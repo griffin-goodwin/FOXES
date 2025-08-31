@@ -15,6 +15,12 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 #norm = np.load("/mnt/data/ML-Ready_clean/mixed_data/SXR/normalized_sxr.npy")
 
+def normalize_sxr(unnormalized_values, sxr_norm):
+    """Convert from unnormalized to normalized space"""
+    log_values = torch.log10(unnormalized_values + 1e-8)  # Use torch.log10, not np.log10
+    normalized = (log_values - float(sxr_norm[0].item())) / float(sxr_norm[1].item())
+    return normalized
+
 def unnormalize_sxr(normalized_values, sxr_norm):
     return 10 ** (normalized_values * float(sxr_norm[1].item()) + float(sxr_norm[0].item())) - 1e-8
 
@@ -26,12 +32,13 @@ class ViT(pl.LightningModule):
         self.save_hyperparameters()
         filtered_kwargs = dict(model_kwargs)
         filtered_kwargs.pop('lr', None)
+        filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformer(**filtered_kwargs)
         self.adaptive_loss = SXRRegressionDynamicLoss(window_size=500)
         self.sxr_norm = sxr_norm
 
     def forward(self, x, return_attention=True):
-        return self.model(x, return_attention=return_attention)
+        return self.model(x, self.sxr_norm, return_attention=return_attention)
 
     def configure_optimizers(self):
         # Use AdamW with weight decay for better regularization
@@ -64,42 +71,114 @@ class ViT(pl.LightningModule):
         imgs, sxr = batch
         # if mode == "train":
         #     imgs = self.apply_wavelength_dropout(imgs, dropout_prob=0.3)
-        preds = self.model(imgs)
-        preds_squeezed = torch.squeeze(preds)
-
-        # Unnormalize
+        raw_preds, raw_patch_contributions = self.model(imgs,self.sxr_norm)
+        raw_preds_squeezed = torch.squeeze(raw_preds)
         sxr_un = unnormalize_sxr(sxr, self.sxr_norm)
-        preds_squeezed_un = unnormalize_sxr(preds_squeezed, self.sxr_norm)
-
+        # Unnormalize
+        norm_preds_squeezed = normalize_sxr(raw_preds_squeezed, self.sxr_norm)
         # Use adaptive rare event loss
         loss, weights = self.adaptive_loss.calculate_loss(
-            preds_squeezed, sxr, sxr_un, preds_squeezed_un
+            norm_preds_squeezed, sxr, sxr_un, raw_preds_squeezed
         )
 
+
+        # Calculate auxiliary sparsity/entropy loss
+        # sparsity_or_entropy = self._calculate_sparsity_entropy_loss(
+        #     patch_contributions_raw, sxr_un, weights
+        # )
+
+        # Dynamic scaling of auxiliary loss with bounds
+        #target_ratio = getattr(self, 'target_aux_ratio', .5)
+        #λ = target_ratio * (loss.detach() / (sparsity_or_entropy.detach()))
+        #λ = torch.clamp(λ, min=0.01, max=10.0).detach()  # Prevent explosive scaling and gradient flow
+
+        # Total loss
+        #total_loss = loss + λ * sparsity_or_entropy
+        total_loss = loss
+
+
         # Log adaptation info
-        if mode == "train" and self.global_step % 200 == 0:
-            multipliers = self.adaptive_loss.get_current_multipliers()
-            for key, value in multipliers.items():
-                self.log(f"adaptive/{key}", value)
-
-            self.log("adaptive/avg_weight", weights.mean())
-            self.log("adaptive/max_weight", weights.max())
-        if mode == "val":
-            multipliers = self.adaptive_loss.get_current_multipliers()
-            for key, value in multipliers.items():
-                self.log(f"val/{key}", value)
-            self.log("val/avg_weight", weights.mean())
-            self.log("val/max_weight", weights.max())
-
-        # FIXED: Log current learning rate from optimizer
         if mode == "train":
+            # Always log learning rate (every step)
             current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-            self.log('learning_rate', current_lr, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log('learning_rate', current_lr, on_step=True, on_epoch=False,
+                     prog_bar=True, logger=True, sync_dist=True)
+
+            # Always log main losses (every step)
+            self.log("train_main_loss", loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+            #self.log("sparsity_entropy_loss", sparsity_or_entropy, on_step=True, on_epoch=True, )
+            self.log("train_total_loss", total_loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+
+            # Log lambda scaling factor
+            #self.log("adaptive/lambda", λ.mean(), on_step=True, on_epoch=True, logger=True, sync_dist=True)
+
+            # Detailed diagnostics only every 200 steps
+            if self.global_step % 200 == 0:
+                multipliers = self.adaptive_loss.get_current_multipliers()
+                for key, value in multipliers.items():
+                    self.log(f"adaptive/{key}", value, on_step=True, on_epoch=False)
+
+                self.log("adaptive/avg_weight", weights.mean(), on_step=True, on_epoch=False)
+                self.log("adaptive/max_weight", weights.max(), on_step=True, on_epoch=False)
 
         if mode == "val":
-            self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            # Validation: typically only log epoch aggregates
+            multipliers = self.adaptive_loss.get_current_multipliers()
+            for key, value in multipliers.items():
+                self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
+            self.log("val_main_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            #self.log("val_sparsity_entropy_loss", sparsity_or_entropy, on_step=False, on_epoch=True, prog_bar=True,
+            #         logger=True, sync_dist=True)
+            self.log("val_total_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True,
+                     sync_dist=True)
 
-        return loss
+            # Log lambda scaling factor for validation
+            #self.log("val/adaptive/lambda", λ.mean(), on_step=False, on_epoch=True, logger=True, sync_dist=True)
+
+        return total_loss
+
+    def _calculate_sparsity_entropy_loss(self, patch_contributions, sxr_un, weights):
+        """Calculate sparsity/entropy regularization loss."""
+        eps = 1e-8
+        strong_event_threshold = getattr(self, 'strong_event_threshold', 5e-6)
+
+        # Normalize per sample across patches
+        normalized = patch_contributions / (patch_contributions.sum(dim=-1, keepdim=True))
+
+        sorted_normalized, _ = torch.sort(normalized, dim=-1, descending=True)
+        n_patches = normalized.shape[-1]
+
+        k = max(1, int(n_patches*.05))# top 5% of patches
+        topk_concentration = sorted_normalized[..., :k].sum(dim=-1)
+
+
+        # Choose your preferred sparsity measure
+        sparsity_term = -topk_concentration  # negative because we want to maximize concentration
+
+        # Entropy per sample (weak events, encourage distribution)
+        #entropy_term = -(normalized * torch.log(normalized.clamp(min=eps))).sum(dim=-1)
+
+        # sparsity_or_entropy = torch.where(
+        #     sxr_un >= strong_event_threshold,
+        #     sparsity_term,  # strong events: encourage few dominant patches
+        #     -entropy_term  # weak events: maximize entropy (spread)
+        # )
+
+        sparsity_or_entropy = torch.where(
+            sxr_un >= strong_event_threshold,
+            sparsity_term,
+            torch.zeros_like(sparsity_term)  # No regularization for weak events
+        )
+
+        # Weight by importance
+        sparsity_or_entropy = (sparsity_or_entropy * weights.detach()).mean()
+
+        # Clean up
+        del normalized, sorted_normalized
+
+        return sparsity_or_entropy
 
     def training_step(self, batch, batch_idx):
         loss = self._calculate_loss(batch, mode="train")
@@ -133,12 +212,12 @@ class VisionTransformer(nn.Module):
             num_channels,
             num_heads,
             num_layers,
-            num_classes,
             patch_size,
             num_patches,
-            dropout=0.0,
+            dropout,
+
     ):
-        """Vision Transformer.
+        """Vision Transformer that outputs flux contributions per patch.
 
         Args:
             embed_dim: Dimensionality of the input feature vectors to the Transformer
@@ -147,7 +226,6 @@ class VisionTransformer(nn.Module):
             num_channels: Number of channels of the input (3 for RGB)
             num_heads: Number of heads to use in the Multi-Head Attention block
             num_layers: Number of layers to use in the Transformer
-            num_classes: Number of classes to predict
             patch_size: Number of pixels that the patches have per dimension
             num_patches: Maximum number of patches an image can have
             dropout: Amount of dropout to apply in the feed-forward network and
@@ -166,14 +244,14 @@ class VisionTransformer(nn.Module):
             for _ in range(num_layers)
         ])
 
-        self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, num_classes))
+        self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, 1))
         self.dropout = nn.Dropout(dropout)
 
         # Parameters/Embeddings
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, sxr_norm, return_attention=False):
         # Preprocess input
         x = img_to_patch(x, self.patch_size)
         B, T, _ = x.shape
@@ -196,14 +274,21 @@ class VisionTransformer(nn.Module):
             else:
                 x = block(x)
 
-        # Perform classification prediction
-        cls = x[0]  # Take CLS token
-        out = self.mlp_head(cls)
+        patch_embeddings = x[1:].transpose(0, 1)  # [B, num_patches, embed_dim]
+        patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)  # normalized log predictions [B, num_patches]
+
+        # --- Convert to raw SXR ---
+        mean, std = sxr_norm  # in log10 space
+        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=0, max=1e8)
+        #patch_flux_raw = 10 ** (patch_logits * std + mean) - 1e-8  # raw flux per patch
+
+        # Sum over patches for raw global flux
+        global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
 
         if return_attention:
-            return out, attention_weights
+            return global_flux_raw, attention_weights, patch_flux_raw
         else:
-            return out
+            return global_flux_raw, patch_flux_raw
 
 
 class AttentionBlock(nn.Module):
@@ -278,7 +363,7 @@ class SXRRegressionDynamicLoss:
 
         self.base_weights = {
             'quiet': 1.0,
-            'c_class': 2.0,
+            'c_class': 5.0,
             'm_class': 10.0,
             'x_class': 20.0
         }
