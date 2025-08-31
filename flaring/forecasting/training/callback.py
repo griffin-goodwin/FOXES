@@ -124,7 +124,7 @@ class AttentionMapCallback(Callback):
             imgs = imgs[:self.num_samples].to(pl_module.device)
 
             # Get predictions with attention weights
-            outputs, attention_weights = pl_module(imgs, return_attention=True)
+            outputs, attention_weights, _  = pl_module(imgs, return_attention=True)
 
             # Visualize attention for each sample
             for sample_idx in range(min(self.num_samples, imgs.size(0))):
