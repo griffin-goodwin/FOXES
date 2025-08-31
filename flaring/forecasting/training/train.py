@@ -15,6 +15,7 @@ from torch.nn import MSELoss
 from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
 from flaring.forecasting.models.vision_transformer_custom import ViT
 from flaring.forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
+from flaring.forecasting.models.vit_patch_model import ViT as ViTPatch
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
 from pytorch_lightning.callbacks import Callback
 
@@ -128,7 +129,7 @@ attention = AttentionMapCallback()
 
 
 class PTHCheckpointCallback(Callback):
-    def __init__(self, dirpath, monitor='val_loss', mode='min', save_top_k=1, filename_prefix="model"):
+    def __init__(self, dirpath, monitor='val_total_loss', mode='min', save_top_k=1, filename_prefix="model"):
         self.dirpath = dirpath
         self.monitor = monitor
         self.mode = mode
@@ -163,15 +164,15 @@ class PTHCheckpointCallback(Callback):
 # Checkpoint callback
 checkpoint_callback = ModelCheckpoint(
     dirpath=config_data['data']['checkpoints_dir'],
-    monitor='val_loss',
+    monitor='val_total_loss',
     mode='min',
     save_top_k=4,
-    filename=f"{config_data['wandb']['wb_name']}-{{epoch:02d}}-{{val_loss:.4f}}"
+    filename=f"{config_data['wandb']['wb_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}"
 )
 
 pth_callback = PTHCheckpointCallback(
     dirpath=config_data['data']['checkpoints_dir'],
-    monitor='val_loss',
+    monitor='val_total_loss',
     mode='min',
     save_top_k=1,
     filename_prefix=config_data['wandb']['wb_name']
@@ -197,14 +198,14 @@ elif config_data['selected_model'] == 'hybrid':
 elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
-elif config_data['selected_model'] == 'ViT Fast':
-    model = FastViTFlaringModel(model_kwargs=config_data['vit_fast'])
+elif config_data['selected_model'] == 'ViT Patch':
+    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
 else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
 
 # Trainer
-if config_data['selected_model'] == 'ViT':
+if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViT Patch':
     trainer = Trainer(
         default_root_dir=config_data['data']['checkpoints_dir'],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",

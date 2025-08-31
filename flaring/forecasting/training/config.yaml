@@ -4,9 +4,9 @@ base_data_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed"  # Change this line for
 base_checkpoint_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # Model configuration
-selected_model: "ViT"  # Options: "cnn", "vit",
-batch_size:    64
-epochs:        250
+selected_model: "ViT Patch"  # Options: "cnn", "vit",
+batch_size:    80
+epochs:        500
 oversample: true
 balance_strategy: "upsample_minority"
 
@@ -42,11 +42,11 @@ data:
 
 wandb:
   entity: jayantbiradar619-university-of-arizona # Use your exact W&B username
-  project: ViT Added Flaring Data
+  project: ViT Loss Function Testing For Patches
   job_type: training
   tags:
     - aia
     - sxr
     - regression
-  wb_name: vit-patch-size-16-6-wavelengths-with-dropout-oversampling
+  wb_name: vit-16-patch-final-oversample-higher-weights
   notes: Regression from AIA images (6 channels) to GOES SXR flux

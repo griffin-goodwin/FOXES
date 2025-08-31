@@ -12,7 +12,9 @@ from scipy.ndimage import zoom
 from matplotlib.colors import AsinhNorm, LogNorm
 import seaborn as sns
 import matplotlib.ticker as mticker
-
+import matplotlib.patheffects as pe
+import matplotlib.gridspec as gridspec
+import sunpy.visualization.colormaps as cm
 
 class SolarFlareEvaluator:
     def __init__(self,
@@ -163,6 +165,7 @@ class SolarFlareEvaluator:
                 'R2': r2_score(np.log10(self.y_true), np.log10(self.y_baseline)),
                 'Pearson_Corr': np.corrcoef(np.log10(self.y_true), np.log10(self.y_baseline))[0, 1]
             }
+            print(baseline_metrics)
             metrics_list.append(baseline_metrics)
 
         # Save metrics to CSV
@@ -189,7 +192,7 @@ class SolarFlareEvaluator:
         return sensitivity + specificity - 1
 
     def _plot_regression_comparison(self):
-        """Generate regression comparison plot"""
+        """Generate regression comparison plot with MAE contours and residuals plot"""
 
         flare_classes = {
             'A1.0': (1e-8, 1e-7),
@@ -215,7 +218,6 @@ class SolarFlareEvaluator:
             flare_positions = []
             flare_labels = []
             for class_name, (min_flux, max_flux) in flare_classes.items():
-                # Add both min and max boundaries that fall within data range
                 if min_flux >= min_val and min_flux <= max_val:
                     flare_positions.append(min_flux)
                     flare_labels.append(f'{class_name}')
@@ -223,131 +225,288 @@ class SolarFlareEvaluator:
                     flare_positions.append(max_flux)
                     flare_labels.append(f'{class_name}')
 
-            if flare_positions:  # Only add if we have valid positions
+            if flare_positions:
                 ax_top.set_xticks(flare_positions)
-                ax_top.set_xticklabels(flare_labels)
-                ax_top.tick_params(colors='white')
+                ax_top.set_xticklabels(flare_labels,fontsize=12)
+                ax_top.tick_params()
 
-                # Add minor ticks to secondary axes
                 ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_top.tick_params(which='minor', colors='white')
-                #ax_top.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+                ax_top.tick_params(which='minor')
 
                 ax_right.set_yticks(flare_positions)
-                ax_right.set_yticklabels(flare_labels)
-                ax_right.tick_params(colors='white')
+                ax_right.set_yticklabels(flare_labels,fontsize=12)
+                ax_right.tick_params()
 
-                # Add minor ticks to secondary axes
                 ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_right.tick_params(which='minor', colors='white')
-                #ax_right.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+                ax_right.tick_params(which='minor')
 
-                # Style the spines
-                for spine in ax_top.spines.values():
-                    spine.set_color('white')
-                for spine in ax_right.spines.values():
-                    spine.set_color('white')
+        def draw_mae_contours(plot_ax, min_val, max_val):
+            """Draw MAE contours on the 1-to-1 plot"""
+            import numpy as np
 
-                # Optional: Add grid lines at flare class boundaries
-                for pos in flare_positions:
-                    ax.axvline(x=pos, color='cyan', alpha=0.15,linewidth=0.25)
-                    ax.axhline(y=pos, color='cyan', alpha=0.15,linewidth=0.25)
+            y_true = self.y_true
+            y_pred = self.y_pred
 
-        log_bins = np.logspace(np.log10(min(self.y_true)),
-                               np.log10(max(self.y_true)), 100)
-        shared_norm = LogNorm(vmin=1, vmax=None)
+            # Define flare classes
+            flare_classes_mae = {
+                'A': (1e-8, 1e-7, "#3F7CAC"),
+                'B': (1e-7, 1e-6,  "#FFAAA5"),
+                'C': (1e-6, 1e-5, "#FFAAA5"),
 
-        if self.y_baseline is not None:
-            fig, (ax2, ax1) = plt.subplots(1, 2, figsize=(15, 6))
-        else:
-            fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
-            ax2 = None
+                'M': (1e-5, 1e-4, "#FFAAA5"),
+                'X': (1e-4, 1e-3, "#FFAAA5")
+            }
 
-        #fig.patch.set_facecolor('#1a1a2e')
-        sns.set_palette("husl")
-        ax1.set_facecolor('#2d2d44')
-        if ax2 is not None:
-            ax2.set_facecolor('#2d2d44')
+            for class_name, (min_flux, max_flux, color) in flare_classes_mae.items():
+                # Filter data points within this flare class range
+                mask = (y_true >= min_flux) & (y_true < max_flux)
+                if not np.any(mask):
+                    continue
 
-        # Main model plot
+                true_subset = y_true[mask]
+                pred_subset = y_pred[mask]
+
+                # Calculate MAE in log space
+                log_true = np.log10(true_subset)
+                log_pred = np.log10(pred_subset)
+                log_mae = mean_absolute_error(log_true, log_pred)
+
+                # Create smooth curve within this class range
+                x_class = np.logspace(np.log10(min_flux), np.log10(max_flux), 100)
+
+                # Upper and lower MAE bounds
+                upper_bound = x_class * np.exp(log_mae)
+                lower_bound = x_class * np.exp(-log_mae)
+
+                # Plot MAE contours on the 1-to-1 plot
+                if class_name == 'X':
+                    plot_ax.fill_between(x_class, lower_bound, upper_bound,
+                                         alpha=0.75,
+                                         label=f'MAE',color=color)
+                else:
+                    plot_ax.fill_between(x_class, lower_bound, upper_bound,
+                                         alpha=0.75,color=color)
+
+
+
         min_val = min(min(self.y_true), min(self.y_pred))
         max_val = max(max(self.y_true), max(self.y_pred))
+        log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 100)
+
+        shared_norm = LogNorm(vmin=1, vmax=None)
+
+
+        fig, (ax1) = plt.subplots(1, 1, figsize=(10, 6))
+            #ax2 = fig.add_subplot(gs[1], sharex=ax1)  # Residuals plot
+
+        # Main model plot (1-to-1 with MAE contours)
+        min_val = min(min(self.y_true), min(self.y_pred))
+        max_val = max(max(self.y_true), max(self.y_pred))
+
+        # Perfect prediction line
         ax1.plot([min_val, max_val], [min_val, max_val],
-                 label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
+                 label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
 
-        if self.y_uncertainty is not None:
-            sigma_log = self.y_uncertainty / (self.y_pred * np.log(10))
-            weights = 1 / (sigma_log ** 2)
+        # 2D histogram
+        h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
+                        cmap='bone', norm=shared_norm, alpha=1)
 
-            h1 = ax1.hist2d(self.y_true, self.y_pred, weights=weights, bins=[log_bins, log_bins],
-                            cmap='summer', norm=shared_norm)
-        else:
-            h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-                            cmap='summer', norm=shared_norm)
+        # Draw MAE contours on main plot
+        draw_mae_contours(ax1, min_val, max_val)
 
-        ax1.set_xlabel('Ground Truth Flux', color='white')
-        ax1.set_ylabel('Predicted Flux', color='white')
-        ax1.set_title('ViT Model Performance', color='white')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.tick_params(colors='white')
+        ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)',fontsize=12)
+        ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)',fontsize=12)
+        ax1.tick_params(labelsize=12)
+        ax1.set_title('FOXES Model Performance with MAE Overlay',fontsize=12)
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.5)
+        ax1.tick_params()
         ax1.set_xscale('log')
         ax1.set_yscale('log')
 
         # Add minor ticks for main plot
         ax1.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
         ax1.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-        ax1.tick_params(which='minor', colors='white')
-        ax1.grid(True, which='minor', alpha=0.15, linewidth=0.25, linestyle='--')
-
-        for spine in ax1.spines.values():
-            spine.set_color('white')
+        ax1.tick_params(which='minor')
+        ax1.grid(True, which='minor', alpha=0.25, linewidth=0.25, linestyle='--')
 
         # Add flare class axes to main plot
         add_flare_class_axes(ax1, min_val, max_val)
 
-        # Baseline model plot if available
-        if self.y_baseline is not None and ax2 is not None:
-            h2 = ax2.hist2d(self.y_true, self.y_baseline, bins=[log_bins, log_bins],
-                            cmap='summer', norm=shared_norm)
+        # Residuals plot (bottom subplot)
+        #h_resid = plot_residuals(ax2, min_val, max_val)
 
-            min_val_baseline = min(min(self.y_true), min(self.y_baseline))
-            max_val_baseline = max(max(self.y_true), max(self.y_baseline))
-            ax2.plot([min_val_baseline, max_val_baseline], [min_val_baseline, max_val_baseline],
-                     label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
+        cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)
+        cbar.ax.yaxis.set_tick_params(labelsize=12)
+        plt.setp(cbar.ax.yaxis.get_ticklabels())
+        cbar.set_label( "Count", fontsize=12)
 
-            ax2.set_xlabel('Ground Truth Flux', color='white')
-            ax2.set_ylabel('Predicted Flux', color='white')
-            ax2.set_title('Baseline Model Performance', color='white')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-            ax2.tick_params(colors='white')
-            ax2.set_xscale('log')
-            ax2.set_yscale('log')
-
-            # Add minor ticks for baseline plot
-            ax2.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-            ax2.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-            ax2.tick_params(which='minor', colors='white')
-            ax2.grid(True, which='minor', alpha=0.15, linewidth=0.25)
-
-            for spine in ax2.spines.values():
-                spine.set_color('white')
-
-            # Add flare class axes to baseline plot
-            add_flare_class_axes(ax2, min_val_baseline, max_val_baseline)
-
-        # Colorbar (use h1[3] or h2[3], they're identical)
-        cbar = fig.colorbar(h1[3], ax=[ax1, ax2] if ax2 else ax1, orientation='vertical', pad=.08)
-        cbar.ax.yaxis.set_tick_params(color='white')
-        plt.setp(cbar.ax.yaxis.get_ticklabels(), color='white')
-        cbar.set_label("Weighted Count", color='white')
-
-        # plt.tight_layout()
         plot_path = os.path.join(self.comparison_dir, "regression_comparison.png")
-        plt.savefig(plot_path, dpi=150)
+        plt.savefig(plot_path, dpi=500, bbox_inches='tight')
         plt.close()
         print(f"Saved regression comparison plot to {plot_path}")
+
+    # def _plot_regression_comparison(self):
+    #     """Generate regression comparison plot"""
+    #     flare_classes = {
+    #         'A1.0': (1e-8, 1e-7),
+    #         'B1.0': (1e-7, 1e-6),
+    #         'C1.0': (1e-6, 1e-5),
+    #         'M1.0': (1e-5, 1e-4),
+    #         'X1.0': (1e-4, 1e-3)
+    #     }
+    #
+    #     def add_flare_class_axes(ax, min_val, max_val):
+    #         """Helper function to add flare class secondary axes"""
+    #         # Create secondary axis for flare classes (top)
+    #         ax_top = ax.twiny()
+    #         ax_top.set_xlim(ax.get_xlim())
+    #         ax_top.set_xscale('log')
+    #
+    #         # Create secondary axis for flare classes (right)
+    #         ax_right = ax.twinx()
+    #         ax_right.set_ylim(ax.get_ylim())
+    #         ax_right.set_yscale('log')
+    #
+    #         # Set flare class tick positions and labels
+    #         flare_positions = []
+    #         flare_labels = []
+    #         for class_name, (min_flux, max_flux) in flare_classes.items():
+    #             # Add both min and max boundaries that fall within data range
+    #             if min_flux >= min_val and min_flux <= max_val:
+    #                 flare_positions.append(min_flux)
+    #                 flare_labels.append(f'{class_name}')
+    #             if max_flux >= min_val and max_flux <= max_val and max_flux != min_flux:
+    #                 flare_positions.append(max_flux)
+    #                 flare_labels.append(f'{class_name}')
+    #
+    #         if flare_positions:  # Only add if we have valid positions
+    #             ax_top.set_xticks(flare_positions)
+    #             ax_top.set_xticklabels(flare_labels)
+    #             ax_top.tick_params()
+    #
+    #             # Add minor ticks to secondary axes
+    #             ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #             ax_top.tick_params(which='minor')
+    #             #ax_top.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+    #
+    #             ax_right.set_yticks(flare_positions)
+    #             ax_right.set_yticklabels(flare_labels)
+    #             ax_right.tick_params()
+    #
+    #             # Add minor ticks to secondary axes
+    #             ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #             ax_right.tick_params(which='minor')
+    #             #ax_right.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+    #
+    #             # Style the spines
+    #             # for spine in ax_top.spines.values():
+    #             #     spine.set_color('white')
+    #             # for spine in ax_right.spines.values():
+    #             #     spine.set_color('white')
+    #
+    #             # Optional: Add grid lines at flare class boundaries
+    #             for pos in flare_positions:
+    #                 ax.axvline(x=pos, color='cyan', alpha=0.15,linewidth=0.25)
+    #                 ax.axhline(y=pos, color='cyan', alpha=0.15,linewidth=0.25)
+    #
+    #     min_val = min(min(self.y_true), min(self.y_pred))
+    #     max_val = max(max(self.y_true), max(self.y_pred))
+    #     log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 150)
+    #
+    #     shared_norm = LogNorm(vmin=1, vmax=None)
+    #
+    #     if self.y_baseline is not None:
+    #         fig, (ax2, ax1) = plt.subplots(1, 2, figsize=(11, 6))
+    #     else:
+    #         fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+    #         ax2 = None
+    #
+    #     # fig.patch.set_facecolor('#1a1a2e')
+    #     # sns.set_palette("husl")
+    #     # ax1.set_facecolor('#2d2d44')
+    #     # if ax2 is not None:
+    #     #     ax2.set_facecolor('#2d2d44')
+    #
+    #     # Main model plot
+    #     min_val = min(min(self.y_true), min(self.y_pred))
+    #     max_val = max(max(self.y_true), max(self.y_pred))
+    #     ax1.plot([min_val, max_val], [min_val, max_val],
+    #              label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
+    #
+    #     if self.y_uncertainty is not None:
+    #         sigma_log = self.y_uncertainty / (self.y_pred * np.log(10))
+    #         weights = 1 / (sigma_log ** 2)
+    #
+    #         h1 = ax1.hist2d(self.y_true, self.y_pred, weights=weights, bins=[log_bins, log_bins],
+    #                         cmap='summer', norm=shared_norm)
+    #     else:
+    #         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
+    #                         cmap='summer', norm=shared_norm)
+    #
+    #     ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)')
+    #     ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)')
+    #     ax1.set_title('FOXES Model Performance')
+    #     ax1.legend()
+    #     ax1.grid(True, alpha=0.5)
+    #     ax1.tick_params()
+    #     ax1.set_xscale('log')
+    #     ax1.set_yscale('log')
+    #
+    #     # Add minor ticks for main plot
+    #     ax1.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #     ax1.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #     ax1.tick_params(which='minor')
+    #     ax1.grid(True, which='minor', alpha=0.25, linewidth=0.25, linestyle='--')
+    #
+    #     # for spine in ax1.spines.values():
+    #     #     spine.set_color('white')
+    #
+    #     # Add flare class axes to main plot
+    #     add_flare_class_axes(ax1, min_val, max_val)
+    #
+    #     # Baseline model plot if available
+    #     if self.y_baseline is not None and ax2 is not None:
+    #         h2 = ax2.hist2d(self.y_true, self.y_baseline, bins=[log_bins, log_bins],
+    #                         cmap=sns.color_palette("rocket", as_cmap=True), norm=shared_norm)
+    #
+    #         min_val_baseline = min(min(self.y_true), min(self.y_baseline))
+    #         max_val_baseline = max(max(self.y_true), max(self.y_baseline))
+    #         ax2.plot([min_val_baseline, max_val_baseline], [min_val_baseline, max_val_baseline],
+    #                  label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
+    #
+    #         ax2.set_xlabel('Ground Truth Flux', )
+    #         ax2.set_ylabel('Predicted Flux', )
+    #         ax2.set_title('Baseline Model Performance', )
+    #         ax2.legend()
+    #         ax2.grid(True, alpha=0.3)
+    #         ax2.tick_params()
+    #         ax2.set_xscale('log')
+    #         ax2.set_yscale('log')
+    #
+    #         # Add minor ticks for baseline plot
+    #         ax2.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #         ax2.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+    #         ax2.tick_params(which='minor',)
+    #         ax2.grid(True, which='minor', alpha=0.15, linewidth=0.25)
+    #
+    #         # for spine in ax2.spines.values():
+    #         #     spine.set_color('white')
+    #
+    #         # Add flare class axes to baseline plot
+    #         add_flare_class_axes(ax2, min_val_baseline, max_val_baseline)
+    #
+    #     # Colorbar (use h1[3] or h2[3], they're identical)
+    #     cbar = fig.colorbar(h1[3], ax=[ax1, ax2] if ax2 else ax1, orientation='vertical', pad=.08)
+    #     cbar.ax.yaxis.set_tick_params()
+    #     plt.setp(cbar.ax.yaxis.get_ticklabels())
+    #     cbar.set_label( "Count")
+    #
+    #     #plt.tight_layout()
+    #     plot_path = os.path.join(self.comparison_dir, "regression_comparison.png")
+    #     plt.savefig(plot_path, dpi=500, bbox_inches='tight')
+    #     plt.close()
+    #     print(f"Saved regression comparison plot to {plot_path}")
 
     @staticmethod
     def init_worker(csv_data, baseline_csv_data):
@@ -508,12 +667,18 @@ class SolarFlareEvaluator:
             save_path = os.path.join(self.frames_dir, f"{timestamp}.png")
 
             # Create figure
-            fig = plt.figure(figsize=(20, 8))
-            #fig.patch.set_facecolor('#1a1a2e')
-            gs_left = fig.add_gridspec(2, 3, left=0.05, right=0.55, width_ratios=[1, 1, 1], hspace=0.1, wspace=0.15)
+            fig = plt.figure(figsize=(10, 5))
+            # #fig.patch.set_facecolor('#1a1a2e')
+            gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.0)
 
             # Right gridspec for SXR plot (column 3) with more padding
-            gs_right = fig.add_gridspec(2, 1, left=0.60, right=0.95, hspace=0.1)
+            gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0)
+
+            # gs_left = fig.add_gridspec(2, 3, left=0.0, right=1, top=1, bottom=0.52,
+            #                           width_ratios=[1, 1], hspace=0.14, wspace=0.14)
+            #
+            # # Bottom gridspec for SXR plot (1 row, 1 column)
+            # gs_right = fig.add_gridspec(1, 1, left=0, right=1, top=0.48, bottom=0)
 
             wavs = ['94', '131', '171', '193', '211', '304']
             att_max = np.percentile(attention_data, 100)
@@ -522,28 +687,42 @@ class SolarFlareEvaluator:
             max_attention_idx = np.unravel_index(np.argmax(attention_data), attention_data.shape)
             max_y, max_x = max_attention_idx
             # Plot AIA images with attention maps
-            for i in range(6):
-                row = i // 3
-                col = i % 3
-                ax = fig.add_subplot(gs_left[row, col])
+            # for i in range(6):
+            #     row = i // 3
+            #     col = i % 3
+            #     ax = fig.add_subplot(gs_left[row, col])
+            #
+            #     aia_img = aia_data[i]
+            #     ax.imshow(aia_img, cmap="gray", origin='lower')
+            #     ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.35)
+            #     # Plot star at maximum attention location
+            #     # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
+            #     #         markeredgecolor='white', markeredgewidth=1)
+            #     ax.set_title(f'AIA {wavs[i]} Å', fontsize=12)
+            #     ax.axis('off')
 
-                aia_img = aia_data[i]
-                ax.imshow(aia_img, cmap="gray", origin='lower')
-                ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.35)
-                # Plot star at maximum attention location
-                # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
-                #         markeredgecolor='white', markeredgewidth=1)
-                ax.set_title(f'AIA {wavs[i]} Å', fontsize=10, color='white')
-                ax.axis('off')
+            row = 0
+            col = 0
+            ax = fig.add_subplot(gs_left[row, col])
+
+            aia_img = aia_data[1]
+
+            ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
+            ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5)
+            # Plot star at maximum attention location
+            # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
+            #         markeredgecolor='white', markeredgewidth=1)
+            ax.set_title(f'AIA {wavs[1]} Å', fontsize=12)
+            ax.axis('off')
+
 
             # Plot SXR data with uncertainty bands
             sxr_ax = fig.add_subplot(gs_right[:, 0])
-            sxr_ax.set_facecolor('#2a2a3e')
 
             if sxr_window is not None and not sxr_window.empty:
                 # Plot ground truth (no uncertainty)
                 sxr_ax.plot(sxr_window['timestamp'], sxr_window['groundtruth'],
-                            label='Ground Truth', linewidth=1.5, alpha=1, markersize=5, color="#F78E69")
+                            label='Ground Truth', linewidth=2.5, alpha=1, markersize=5, color="#F78E69")
 
                 gt = sxr_window['groundtruth'].values
                 uncertainties = sxr_window['groundtruth_uncertainty'].values
@@ -560,7 +739,7 @@ class SolarFlareEvaluator:
 
                 # Plot ViT model predictions with uncertainty bands
                 vit_prediction_line = sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
-                                                  label='ViT Model', linewidth=1.5, alpha=1, markersize=5,
+                                                  label='FOXES Model', linewidth=2.5, alpha=1, markersize=5,
                                                   color="#C0B9DD")
 
                 # Add uncertainty bands for ViT model if available
@@ -603,13 +782,13 @@ class SolarFlareEvaluator:
 
                 # Mark current time
                 if sxr_current is not None:
-                    sxr_ax.axvline(target_time, color='white', linestyle='--',
-                                   linewidth=2, alpha=0.8, label='Current Time')
+                    sxr_ax.axvline(target_time, color='black', linestyle='--',
+                                   linewidth=2, alpha=0.4, label='Current Time')
 
                     # Create info text with all available values including uncertainties
                     info_lines = ["Current Values:",
-                                  f"GT: {sxr_current['groundtruth']:.2e}",
-                                  f"ViT: {sxr_current['predictions']:.2e}"]
+                                  f"Ground Truth: {sxr_current['groundtruth']:.2e}",
+                                  f"FOXES: {sxr_current['predictions']:.2e}"]
 
                     # Add ViT uncertainty if available
                     if sxr_current['uncertainty'] is not None:
@@ -625,41 +804,41 @@ class SolarFlareEvaluator:
 
                     info_text = "\n".join(info_lines)
                     sxr_ax.text(0.02, 0.98, info_text, transform=sxr_ax.transAxes,
-                                fontsize=8, color='white', verticalalignment='top',
-                                bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+                                fontsize=8, verticalalignment='top',
+                                bbox=dict(boxstyle='round', alpha=0.7, facecolor='white'))
 
-                sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=8),pd.to_datetime(timestamp) + pd.Timedelta(hours=8)])
+                sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
                 sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
-                sxr_ax.set_ylabel('SXR Flux', fontsize=10, color='white')
-                sxr_ax.set_xlabel('Time', fontsize=10, color='white')
-                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, color='white')
+                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12,)
+                sxr_ax.set_xlabel('Time', fontsize=12)
+                sxr_ax.set_title('FOXES Prediction vs. Ground Truth Comparison', fontsize=12)
                 sxr_ax.legend(fontsize=8, loc='upper right')
                 legend1 = sxr_ax.legend()
-                legend1.get_frame().set_facecolor('black')
-                legend1.get_frame().set_edgecolor('white')
-                for text in legend1.get_texts():
-                    text.set_color('white')
+                # legend1.get_frame().set_facecolor('black')
+                # legend1.get_frame().set_edgecolor('white')
+                # for text in legend1.get_texts():
+                #     text.set_color('white')
                 sxr_ax.grid(True, alpha=0.3)
-                sxr_ax.tick_params(axis='x', rotation=45, labelsize=8, colors='white')
-                sxr_ax.tick_params(axis='y', labelsize=8, colors='white')
-                for spine in sxr_ax.spines.values():
-                    spine.set_color('white')
+                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12)
+                sxr_ax.tick_params(axis='y', labelsize=12)
+                # for spine in sxr_ax.spines.values():
+                #     spine.set_color('white')
                 try:
                     sxr_ax.set_yscale('log')
                 except:
                     pass  # Skip log scale if data doesn't support it
             else:
                 sxr_ax.text(0.5, 0.5, 'No SXR Data\nAvailable',
-                            transform=sxr_ax.transAxes, fontsize=12, color='white',
+                            transform=sxr_ax.transAxes, fontsize=12,
                             horizontalalignment='center', verticalalignment='center')
-                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, color='white')
+                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12)
+            #
+            # for spine in sxr_ax.spines.values():
+            #     spine.set_color('white')
 
-            for spine in sxr_ax.spines.values():
-                spine.set_color('white')
-
-            plt.suptitle(f'Timestamp: {timestamp}', color='white', fontsize=14)
+            #plt.suptitle(f'Timestamp: {timestamp}', fontsize=14)
             #plt.tight_layout()
-            plt.savefig(save_path, dpi=150, facecolor='black')
+            plt.savefig(save_path, dpi=500, bbox_inches='tight')
             plt.close()
 
             print(f"Worker {os.getpid()}: Completed {timestamp}")
@@ -762,15 +941,15 @@ class SolarFlareEvaluator:
 
 if __name__ == "__main__":
     # Example paths - replace with your actual paths
-    vit_csv = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/output/4-wavelengths.csv"
+    vit_csv = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/output/NEURIPS.csv"
     baseline_results_csv = ""
     aia_data = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/AIA/test/"
-    weights_directory = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/4-wavelengths"
+    weights_directory = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/NEURIPS_Weight"
 
     # Sample timestamps - Fixed the datetime generation
-    start_time = datetime(2023, 8, 1)
-    end_time = datetime(2023, 8, 14)
-    interval = timedelta(minutes=20)  # Changed from minutes=60 to hours=1 for clarity
+    start_time = datetime(2023, 8, 5, 20,30,00)
+    end_time = datetime(2023, 8, 5, 23,56,00)
+    interval = timedelta(minutes=1)  # Changed from minutes=60 to hours=1 for clarity
     timestamps = []
     current_time = start_time
     while current_time <= end_time:
@@ -783,7 +962,7 @@ if __name__ == "__main__":
         baseline_csv_path=baseline_results_csv,
         aia_dir=aia_data,
         weight_path=weights_directory,
-        output_dir="/mnt/data/ML-Ready-mixed/ML-Ready-mixed/solar_flare_comparison_results/4-wavelength-results"
+        output_dir="/mnt/data/ML-Ready-mixed/ML-Ready-mixed/solar_flare_comparison_results/NEURIPS"
     )
 
     # Run complete evaluation with baseline comparison and uncertainties
