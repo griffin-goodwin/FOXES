@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 def normalize_sxr(unnormalized_values, sxr_norm):
     """Convert from unnormalized to normalized space"""
-    log_values = torch.log10(unnormalized_values + 1e-8)  # Use torch.log10, not np.log10
+    log_values = torch.log10(unnormalized_values + 1e-8)
     normalized = (log_values - float(sxr_norm[0].item())) / float(sxr_norm[1].item())
     return normalized
 
@@ -69,31 +69,15 @@ class ViT(pl.LightningModule):
 
     def _calculate_loss(self, batch, mode="train"):
         imgs, sxr = batch
-        # if mode == "train":
-        #     imgs = self.apply_wavelength_dropout(imgs, dropout_prob=0.3)
         raw_preds, raw_patch_contributions = self.model(imgs,self.sxr_norm)
         raw_preds_squeezed = torch.squeeze(raw_preds)
         sxr_un = unnormalize_sxr(sxr, self.sxr_norm)
-        # Unnormalize
+
         norm_preds_squeezed = normalize_sxr(raw_preds_squeezed, self.sxr_norm)
         # Use adaptive rare event loss
         loss, weights = self.adaptive_loss.calculate_loss(
             norm_preds_squeezed, sxr, sxr_un, raw_preds_squeezed
         )
-
-
-        # Calculate auxiliary sparsity/entropy loss
-        # sparsity_or_entropy = self._calculate_sparsity_entropy_loss(
-        #     patch_contributions_raw, sxr_un, weights
-        # )
-
-        # Dynamic scaling of auxiliary loss with bounds
-        #target_ratio = getattr(self, 'target_aux_ratio', .5)
-        #λ = target_ratio * (loss.detach() / (sparsity_or_entropy.detach()))
-        #λ = torch.clamp(λ, min=0.01, max=10.0).detach()  # Prevent explosive scaling and gradient flow
-
-        # Total loss
-        #total_loss = loss + λ * sparsity_or_entropy
         total_loss = loss
 
 
@@ -110,9 +94,6 @@ class ViT(pl.LightningModule):
             #self.log("sparsity_entropy_loss", sparsity_or_entropy, on_step=True, on_epoch=True, )
             self.log("train_total_loss", total_loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
-
-            # Log lambda scaling factor
-            #self.log("adaptive/lambda", λ.mean(), on_step=True, on_epoch=True, logger=True, sync_dist=True)
 
             # Detailed diagnostics only every 200 steps
             if self.global_step % 200 == 0:
@@ -138,47 +119,6 @@ class ViT(pl.LightningModule):
             #self.log("val/adaptive/lambda", λ.mean(), on_step=False, on_epoch=True, logger=True, sync_dist=True)
 
         return total_loss
-
-    def _calculate_sparsity_entropy_loss(self, patch_contributions, sxr_un, weights):
-        """Calculate sparsity/entropy regularization loss."""
-        eps = 1e-8
-        strong_event_threshold = getattr(self, 'strong_event_threshold', 5e-6)
-
-        # Normalize per sample across patches
-        normalized = patch_contributions / (patch_contributions.sum(dim=-1, keepdim=True))
-
-        sorted_normalized, _ = torch.sort(normalized, dim=-1, descending=True)
-        n_patches = normalized.shape[-1]
-
-        k = max(1, int(n_patches*.05))# top 5% of patches
-        topk_concentration = sorted_normalized[..., :k].sum(dim=-1)
-
-
-        # Choose your preferred sparsity measure
-        sparsity_term = -topk_concentration  # negative because we want to maximize concentration
-
-        # Entropy per sample (weak events, encourage distribution)
-        #entropy_term = -(normalized * torch.log(normalized.clamp(min=eps))).sum(dim=-1)
-
-        # sparsity_or_entropy = torch.where(
-        #     sxr_un >= strong_event_threshold,
-        #     sparsity_term,  # strong events: encourage few dominant patches
-        #     -entropy_term  # weak events: maximize entropy (spread)
-        # )
-
-        sparsity_or_entropy = torch.where(
-            sxr_un >= strong_event_threshold,
-            sparsity_term,
-            torch.zeros_like(sparsity_term)  # No regularization for weak events
-        )
-
-        # Weight by importance
-        sparsity_or_entropy = (sparsity_or_entropy * weights.detach()).mean()
-
-        # Clean up
-        del normalized, sorted_normalized
-
-        return sparsity_or_entropy
 
     def training_step(self, batch, batch_idx):
         loss = self._calculate_loss(batch, mode="train")
@@ -279,8 +219,7 @@ class VisionTransformer(nn.Module):
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
-        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=0, max=1e8)
-        #patch_flux_raw = 10 ** (patch_logits * std + mean) - 1e-8  # raw flux per patch
+        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=0, max=1)
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
@@ -350,7 +289,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
 
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=500):
+    def __init__(self, window_size=1000):
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
@@ -376,7 +315,7 @@ class SXRRegressionDynamicLoss:
         loss = weighted_loss.mean()
         return loss, weights
 
-    def _get_adaptive_weights(self, sxr_un, preds_squeezed_un, base_loss):
+    def _get_adaptive_weights(self, sxr_un):
         device = sxr_un.device
 
         # Get continuous multipliers per class with custom params
@@ -429,10 +368,10 @@ class SXRRegressionDynamicLoss:
         """Class-dependent performance multiplier"""
 
         class_params = {
-            'quiet': {'min_samples': 500, 'recent_window': 100},
-            'c_class': {'min_samples': 500, 'recent_window': 100},
-            'm_class': {'min_samples': 500, 'recent_window': 100},
-            'x_class': {'min_samples': 500, 'recent_window': 100}
+            'quiet': {'min_samples': 1000, 'recent_window': 500},
+            'c_class': {'min_samples': 1000, 'recent_window': 500},
+            'm_class': {'min_samples': 1000, 'recent_window': 500},
+                'x_class': {'min_samples': 1000, 'recent_window': 500}
         }
 
         if len(error_history) < class_params[sxrclass]['min_samples']:

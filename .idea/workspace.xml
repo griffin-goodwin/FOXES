@@ -4,18 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="implement wavelength dropout in training, just as a test... it's commented out">
-      <change afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch_config.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/flaring/forecasting/models/vit_patch_model.py" afterDir="false" />
+    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="added support for a patch based model">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/evaluation.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/evaluation.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/inference.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/inference_config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_config.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/models/vision_transformer_custom.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/models/vision_transformer_custom.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/training/callback.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/training/callback.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/training/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/training/config.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/flaring/forecasting/training/train.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/training/train.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/models/vit_patch_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/models/vit_patch_model.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -153,7 +145,7 @@
       <workItem from="1755801805292" duration="58749000" />
       <workItem from="1756171392559" duration="40222000" />
       <workItem from="1756308588067" duration="10459000" />
-      <workItem from="1756386184391" duration="55715000" />
+      <workItem from="1756386184391" duration="57361000" />
     </task>
     <task id="LOCAL-00004" summary="update train code to save model as .pth, creating plotting jupyter notebook, updated inference code to accept checkpoints">
       <option name="closed" value="true" />
@@ -483,7 +475,15 @@
       <option name="project" value="LOCAL" />
       <updated>1755802313840</updated>
     </task>
-    <option name="localTasksCounter" value="45" />
+    <task id="LOCAL-00045" summary="added support for a patch based model">
+      <option name="closed" value="true" />
+      <created>1756677376487</created>
+      <option name="number" value="00045" />
+      <option name="presentableId" value="LOCAL-00045" />
+      <option name="project" value="LOCAL" />
+      <updated>1756677376487</updated>
+    </task>
+    <option name="localTasksCounter" value="46" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -501,7 +501,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="update plotting script to change output video name and adjust timestamp generation interval;" />
     <MESSAGE value="remove unused resizing and normalization code from SDOAIA_dataloader" />
     <MESSAGE value="add visualization notebook and refactor model configuration; update batch size, patch size, and dropout rate; implement dynamic loss for SXR regression" />
     <MESSAGE value="update model configuration and training scripts; adjust learning rate, epochs, and data paths; refactor trainer initialization and logging" />
@@ -526,7 +525,8 @@
     <MESSAGE value="update evaluation and inference configuration for 4-wavelengths dataset" />
     <MESSAGE value="update evaluation and inference configuration for stereo dataset; adjust wavelengths and model parameters" />
     <MESSAGE value="implement wavelength dropout in training, just as a test... it's commented out" />
-    <option name="LAST_COMMIT_MESSAGE" value="implement wavelength dropout in training, just as a test... it's commented out" />
+    <MESSAGE value="added support for a patch based model" />
+    <option name="LAST_COMMIT_MESSAGE" value="added support for a patch based model" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
