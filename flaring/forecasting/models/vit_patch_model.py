@@ -45,7 +45,7 @@ class ViT(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.lr,
-            weight_decay=0.01,
+            weight_decay=0.00001,
         )
 
         scheduler = CosineAnnealingWarmRestarts(
