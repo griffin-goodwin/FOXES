@@ -18,14 +18,14 @@ import sys
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
-from flaring.forecasting.models.vision_transformer_custom import ViT
-from flaring.forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
-from flaring.forecasting.models.vit_patch_model import ViT as ViTPatch
+from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
+from forecasting.models.vision_transformer_custom import ViT
+from forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
+from forecasting.models.vit_patch_model import ViT as ViTPatch
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
 from pytorch_lightning.callbacks import Callback
 
-from flaring.forecasting.models.FastSpectralNet import FastViTFlaringModel
+from forecasting.models.FastSpectralNet import FastViTFlaringModel
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["NCCL_DEBUG"] = "WARN"
