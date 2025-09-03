@@ -12,6 +12,12 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.nn import MSELoss
+from pathlib import Path
+import sys
+# Add project root to Python path
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
 from flaring.forecasting.models.vision_transformer_custom import ViT
 from flaring.forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
