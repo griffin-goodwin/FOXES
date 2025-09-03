@@ -12,11 +12,11 @@ import torch
 import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
-from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
-import flaring.forecasting.models as models
-from flaring.forecasting.models.vit_patch_model import ViT
-from flaring.forecasting.models.linear_and_hybrid import HybridIrradianceModel  # Add your hybrid model import
-from flaring.forecasting.training.callback import unnormalize_sxr
+from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
+import forecasting.models as models
+from forecasting.models.vit_patch_model import ViT
+from forecasting.models.linear_and_hybrid import HybridIrradianceModel  # Add your hybrid model import
+from forecasting.training.callback import unnormalize_sxr
 import yaml
 import torch.nn.functional as F
 from concurrent.futures import ThreadPoolExecutor
