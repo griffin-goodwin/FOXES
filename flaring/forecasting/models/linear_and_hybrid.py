@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
 from torch.nn import HuberLoss
+from pathlib import Path
+import sys
+# Add project root to Python path
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
 from flaring.forecasting.models.base_model import BaseModel
 from torchvision.models import resnet18
 

@@ -6,6 +6,13 @@ import torch
 import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
+
+from pathlib import Path
+
+# Add project root to Python path
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
 import flaring.forecasting.models as models
 from flaring.forecasting.models.vision_transformer_custom import ViT

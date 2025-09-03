@@ -27,7 +27,7 @@ class ViT(pl.LightningModule):
         filtered_kwargs = dict(model_kwargs)
         filtered_kwargs.pop('lr', None)
         self.model = VisionTransformer(**filtered_kwargs)
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=500)
+        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=1500)
         self.sxr_norm = sxr_norm
 
     def forward(self, x, return_attention=True):
@@ -284,7 +284,8 @@ class SXRRegressionDynamicLoss:
         }
 
     def calculate_loss(self, preds_squeezed, sxr, sxr_un, preds_squeezed_un):
-        base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
+        #base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
+        base_loss = F.mse_loss(preds_squeezed, sxr, reduction='none')
         weights = self._get_adaptive_weights(sxr_un, preds_squeezed_un, base_loss)
         self._update_tracking(sxr_un, preds_squeezed_un, base_loss)
         weighted_loss = base_loss * weights
@@ -299,13 +300,13 @@ class SXRRegressionDynamicLoss:
             self.quiet_errors, max_multiplier=1.5, min_multiplier=0.5, sensitivity=2.0, sxrclass = 'quiet'
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2.0, min_multiplier=0.7, sensitivity=2.5, sxrclass = 'c_class'
+            self.c_errors, max_multiplier=5.0, min_multiplier=0.5, sensitivity=2.5, sxrclass = 'c_class'
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=7.0, min_multiplier=0.8, sensitivity=3.0, sxrclass = 'm_class'
+            self.m_errors, max_multiplier=7.0, min_multiplier=0.5, sensitivity=3.0, sxrclass = 'm_class'
         )
         x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=15.0, min_multiplier=0.9, sensitivity=4.0, sxrclass = 'x_class'
+            self.x_errors, max_multiplier=15.0, min_multiplier=0.5, sensitivity=4.0, sxrclass = 'x_class'
         )
 
         quiet_weight = self.base_weights['quiet'] * quiet_mult

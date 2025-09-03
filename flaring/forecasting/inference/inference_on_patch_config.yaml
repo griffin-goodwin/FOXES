@@ -1,4 +1,4 @@
-base_data_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/"  # Change this line for different datasets
+base_data_dir: "/mnt/data/ML-READY/"  # Change this line for different datasets
 output_path: "${base_data_dir}/output/final_epoch_patch.csv"
 weight_path: "${base_data_dir}/final_epoch_patch_weights_final/"
 flux_path: "${base_data_dir}/patch_flux/"
@@ -25,7 +25,7 @@ data:
   sxr_dir:
     "${base_data_dir}/SXR"
   sxr_norm_path:
-    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/SXR/normalized_sxr.npy"
+    "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/new-checkpoint/vit-16-higher-weight-lower-decay-epoch=119-val_total_loss=0.0419.ckpt"
+    "/mnt/data/ML-READY/new-checkpoint/vit-16-higher-weight-lower-decay-epoch=288-val_total_loss=0.0385.ckpt"
 

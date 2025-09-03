@@ -838,7 +838,7 @@ class SolarFlareEvaluator:
 
             #plt.suptitle(f'Timestamp: {timestamp}', fontsize=14)
             #plt.tight_layout()
-            plt.savefig(save_path, dpi=500, bbox_inches='tight')
+            plt.savefig(save_path, dpi=500)
             plt.close()
 
             print(f"Worker {os.getpid()}: Completed {timestamp}")
@@ -941,10 +941,10 @@ class SolarFlareEvaluator:
 
 if __name__ == "__main__":
     # Example paths - replace with your actual paths
-    vit_csv = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/output/final_epoch_patch.csv"
+    vit_csv = "/mnt/data/ML-READY/output/final_epoch_patch.csv"
     baseline_results_csv = ""
-    aia_data = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/AIA/test/"
-    weights_directory = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/final_epoch_patch_weights_final"
+    aia_data = "/mnt/data/ML-READY/AIA/test/"
+    weights_directory = "/mnt/data/ML-READY/final_epoch_patch_weights_final"
 
     # Sample timestamps - Fixed the datetime generation
     start_time = datetime(2023, 8, 5, 20,30,00)
@@ -962,7 +962,7 @@ if __name__ == "__main__":
         baseline_csv_path=baseline_results_csv,
         aia_dir=aia_data,
         weight_path=weights_directory,
-        output_dir="/mnt/data/ML-Ready-mixed/ML-Ready-mixed/solar_flare_comparison_results/improving_patch"
+        output_dir="/mnt/data/ML-READY/solar_flare_comparison_results/improving_patch"
     )
 
     # Run complete evaluation with baseline comparison and uncertainties

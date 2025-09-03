@@ -172,3 +172,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+.vscode/sftp.json
+
+.DS_Store
+
+.cursorignore
+
+wandb/
