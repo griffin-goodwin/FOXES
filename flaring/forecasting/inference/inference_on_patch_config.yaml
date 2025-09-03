@@ -27,5 +27,5 @@ data:
   sxr_norm_path:
     "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/SXR/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/new-checkpoint/vit-16-patch-final-final-20250831_113151.pth"
+    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/new-checkpoint/vit-16-higher-weight-lower-decay-epoch=119-val_total_loss=0.0419.ckpt"
 
