@@ -4,8 +4,14 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="fixed some comments">
+    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="weight decay">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/inference_config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch_config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/inference/inference_on_patch_config.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/flaring/forecasting/models/vit_patch_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/models/vit_patch_model.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/training/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/training/config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/flaring/forecasting/training/train.py" beforeDir="false" afterPath="$PROJECT_DIR$/flaring/forecasting/training/train.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -143,7 +149,9 @@
       <workItem from="1755801805292" duration="58749000" />
       <workItem from="1756171392559" duration="40222000" />
       <workItem from="1756308588067" duration="10459000" />
-      <workItem from="1756386184391" duration="57683000" />
+      <workItem from="1756386184391" duration="64689000" />
+      <workItem from="1756818485332" duration="17000" />
+      <workItem from="1756821188374" duration="7721000" />
     </task>
     <task id="LOCAL-00004" summary="update train code to save model as .pth, creating plotting jupyter notebook, updated inference code to accept checkpoints">
       <option name="closed" value="true" />
@@ -489,7 +497,15 @@
       <option name="project" value="LOCAL" />
       <updated>1756678669786</updated>
     </task>
-    <option name="localTasksCounter" value="47" />
+    <task id="LOCAL-00047" summary="weight decay">
+      <option name="closed" value="true" />
+      <created>1756678864389</created>
+      <option name="number" value="00047" />
+      <option name="presentableId" value="LOCAL-00047" />
+      <option name="project" value="LOCAL" />
+      <updated>1756678864389</updated>
+    </task>
+    <option name="localTasksCounter" value="48" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -507,7 +523,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="add visualization notebook and refactor model configuration; update batch size, patch size, and dropout rate; implement dynamic loss for SXR regression" />
     <MESSAGE value="update model configuration and training scripts; adjust learning rate, epochs, and data paths; refactor trainer initialization and logging" />
     <MESSAGE value="update model configuration and training scripts; change selected model to 'ViT Custom', increase epochs to 250, and adjust output paths; refactor model loading in inference to support hybrid models and attention weight saving" />
     <MESSAGE value="added evaluation script" />
@@ -532,7 +547,8 @@
     <MESSAGE value="implement wavelength dropout in training, just as a test... it's commented out" />
     <MESSAGE value="added support for a patch based model" />
     <MESSAGE value="fixed some comments" />
-    <option name="LAST_COMMIT_MESSAGE" value="fixed some comments" />
+    <MESSAGE value="weight decay" />
+    <option name="LAST_COMMIT_MESSAGE" value="weight decay" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
