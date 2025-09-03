@@ -1,11 +1,11 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed"    # Change this line for different datasets
+base_data_dir: "/mnt/data/ML-READY"  # Change this line for different datasets
+base_checkpoint_dir: "/mnt/data/ML-READY"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # Model configuration
 selected_model: "ViT Patch"  # Options: "cnn", "vit",
-batch_size:    4
+batch_size:    80
 epochs:        500
 oversample: false
 balance_strategy: "upsample_minority"
@@ -21,9 +21,9 @@ vit_custom:
     embed_dim: 512
     num_channels: 6
     num_classes: 1
-    patch_size: 8
-    num_patches: 4096
-    hidden_dim: 512
+    patch_size: 16
+    num_patches: 1024
+    hidden_dim: 1024
     num_heads: 8
     num_layers: 6
     dropout: 0.1
@@ -48,5 +48,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-8-patch
+  wb_name: vit-16-MSE-deeper
   notes: Regression from AIA images (6 channels) to GOES SXR flux
