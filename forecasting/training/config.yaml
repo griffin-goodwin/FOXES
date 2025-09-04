@@ -4,8 +4,8 @@ base_data_dir: "/mnt/data/ML-READY"  # Change this line for different datasets
 base_checkpoint_dir: "/mnt/data/ML-READY"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # Model configuration
-selected_model: "ViT Patch"  # Options: "cnn", "vit",
-batch_size:    80
+selected_model: "FusionViTHybrid"  # Options: "cnn", "vit",
+batch_size:    16
 epochs:        500
 oversample: false
 balance_strategy: "upsample_minority"
@@ -23,11 +23,26 @@ vit_custom:
     num_classes: 1
     patch_size: 16
     num_patches: 1024
-    hidden_dim: 1024
+    hidden_dim: 512
     num_heads: 8
     num_layers: 6
     dropout: 0.1
     lr: 0.0001
+
+
+fusion:
+  scalar_branch: "hybrid"        # or "linear"
+  lr: 0.0001
+  lambda_vit_to_target: 0.3
+  lambda_scalar_to_target: 0.1
+  learnable_gate: true
+  gate_init_bias: 5.0
+  scalar_kwargs:
+    d_input: 6
+    d_output: 1
+    cnn_model: "updated"
+    cnn_dp: 0.75
+
 
 # Data paths (automatically constructed from base directories)
 data:
@@ -48,5 +63,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-16-MSE-deeper
+  wb_name: vit-fused-model
   notes: Regression from AIA images (6 channels) to GOES SXR flux
