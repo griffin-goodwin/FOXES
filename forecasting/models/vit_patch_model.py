@@ -288,6 +288,23 @@ def img_to_patch(x, patch_size, flatten_channels=True):
     return x
 
 class SXRRegressionDynamicLoss:
+    def __init__(self, window_size=1500):
+        self.c_threshold = 1e-6
+        self.m_threshold = 1e-5
+        self.x_threshold = 1e-4
+
+        self.window_size = window_size
+        self.quiet_errors = deque(maxlen=window_size)
+        self.c_errors = deque(maxlen=window_size)
+        self.m_errors = deque(maxlen=window_size)
+        self.x_errors = deque(maxlen=window_size)
+
+        self.base_weights = {
+            'quiet': 1.0,
+            'c_class': 2.0,
+            'm_class': 10.0,
+            'x_class': 20.0
+        }
     def calculate_loss(self, preds_squeezed, sxr, sxr_un, preds_squeezed_un):
         #base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
         base_loss = F.mse_loss(preds_squeezed, sxr, reduction='none')
