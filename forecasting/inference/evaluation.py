@@ -941,10 +941,10 @@ class SolarFlareEvaluator:
 
 if __name__ == "__main__":
     # Example paths - replace with your actual paths
-    vit_csv = "/mnt/data/ML-READY/output/final_epoch_patch.csv"
+    vit_csv = "/mnt/data/ML-READY/output/patch.csv"
     baseline_results_csv = ""
     aia_data = "/mnt/data/ML-READY/AIA/test/"
-    weights_directory = "/mnt/data/ML-READY/final_epoch_patch_weights_final"
+    weights_directory = "/mnt/data/ML-READY/patch_weights"
 
     # Sample timestamps - Fixed the datetime generation
     start_time = datetime(2023, 8, 5, 20,30,00)
