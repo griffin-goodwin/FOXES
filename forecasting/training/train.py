@@ -22,6 +22,7 @@ from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
 from forecasting.models.vision_transformer_custom import ViT
 from forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
 from forecasting.models.vit_patch_model import ViT as ViTPatch
+from forecasting.models import FusionViTHybrid
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
 from pytorch_lightning.callbacks import Callback
 
@@ -204,14 +205,39 @@ elif config_data['selected_model'] == 'hybrid':
 elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
-elif config_data['selected_model'] == 'ViT Patch':
+elif config_data['selected_model'] == 'ViTPatch':
     model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
+
+elif config_data['selected_model'] == 'FusionViTHybrid':
+    # Expect a 'fusion' section in YAML
+    fusion_cfg = config_data.get('fusion', {})
+    scalar_branch = fusion_cfg.get('scalar_branch', 'hybrid')
+    scalar_kwargs = fusion_cfg.get('scalar_kwargs', {
+        'd_input': len(config_data['wavelengths']),
+        'd_output': 1,
+        'cnn_model': config_data.get('megsai', {}).get('cnn_model', 'updated'),
+        'cnn_dp': config_data.get('megsai', {}).get('cnn_dp', 0.75),
+        'lr': fusion_cfg.get('lr', config_data.get('megsai', {}).get('lr', 1e-4)),
+    })
+    vit_kwargs = config_data.get('vit_custom', {})
+
+    model = FusionViTHybrid(
+        vit_kwargs=vit_kwargs,
+        scalar_branch=scalar_branch,
+        scalar_kwargs=scalar_kwargs,
+        sxr_norm=sxr_norm,
+        lr=fusion_cfg.get('lr', 1e-4),
+        lambda_vit_to_target=fusion_cfg.get('lambda_vit_to_target', 0.3),
+        lambda_scalar_to_target=fusion_cfg.get('lambda_scalar_to_target', 0.1),
+        learnable_gate=fusion_cfg.get('learnable_gate', True),
+        gate_init_bias=fusion_cfg.get('gate_init_bias', 5.0),
+    )
 
 else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
 
 # Trainer
-if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViT Patch':
+if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViT Patch' or config_data['selected_model'] == 'FusionViTHybrid':
     trainer = Trainer(
         default_root_dir=config_data['data']['checkpoints_dir'],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
