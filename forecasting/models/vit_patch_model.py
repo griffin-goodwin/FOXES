@@ -34,7 +34,7 @@ class ViT(pl.LightningModule):
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformer(**filtered_kwargs)
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=500)
+        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=1500)
         self.sxr_norm = sxr_norm
 
     def forward(self, x, return_attention=True):
@@ -287,35 +287,17 @@ def img_to_patch(x, patch_size, flatten_channels=True):
         x = x.flatten(2, 4)  # [B, H'*W', C*p_H*p_W]
     return x
 
-
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=1500):
-        self.c_threshold = 1e-6
-        self.m_threshold = 1e-5
-        self.x_threshold = 1e-4
-
-        self.window_size = window_size
-        self.quiet_errors = deque(maxlen=window_size)
-        self.c_errors = deque(maxlen=window_size)
-        self.m_errors = deque(maxlen=window_size)
-        self.x_errors = deque(maxlen=window_size)
-
-        self.base_weights = {
-            'quiet': 1.0,
-            'c_class': 8.0,
-            'm_class': 10.0,
-            'x_class': 20.0
-        }
-
     def calculate_loss(self, preds_squeezed, sxr, sxr_un, preds_squeezed_un):
-        base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
-        weights = self._get_adaptive_weights(sxr_un)
+        #base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
+        base_loss = F.mse_loss(preds_squeezed, sxr, reduction='none')
+        weights = self._get_adaptive_weights(sxr_un, preds_squeezed_un, base_loss)
         self._update_tracking(sxr_un, preds_squeezed_un, base_loss)
         weighted_loss = base_loss * weights
         loss = weighted_loss.mean()
         return loss, weights
 
-    def _get_adaptive_weights(self, sxr_un):
+    def _get_adaptive_weights(self, sxr_un, preds_squeezed_un, base_loss):
         device = sxr_un.device
 
         # Get continuous multipliers per class with custom params
@@ -323,13 +305,13 @@ class SXRRegressionDynamicLoss:
             self.quiet_errors, max_multiplier=1.5, min_multiplier=0.5, sensitivity=2.0, sxrclass = 'quiet'
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2.0, min_multiplier=0.7, sensitivity=2.5, sxrclass = 'c_class'
+            self.c_errors, max_multiplier=5.0, min_multiplier=0.5, sensitivity=2.5, sxrclass = 'c_class'
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=7.0, min_multiplier=0.8, sensitivity=3.0, sxrclass = 'm_class'
+            self.m_errors, max_multiplier=7.0, min_multiplier=0.5, sensitivity=3.0, sxrclass = 'm_class'
         )
         x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=15.0, min_multiplier=0.9, sensitivity=4.0, sxrclass = 'x_class'
+            self.x_errors, max_multiplier=15.0, min_multiplier=0.5, sensitivity=4.0, sxrclass = 'x_class'
         )
 
         quiet_weight = self.base_weights['quiet'] * quiet_mult
@@ -368,10 +350,10 @@ class SXRRegressionDynamicLoss:
         """Class-dependent performance multiplier"""
 
         class_params = {
-            'quiet': {'min_samples': 1000, 'recent_window': 500},
-            'c_class': {'min_samples': 1000, 'recent_window': 500},
-            'm_class': {'min_samples': 1000, 'recent_window': 500},
-                'x_class': {'min_samples': 1000, 'recent_window': 500}
+            'quiet': {'min_samples': 500, 'recent_window': 100},
+            'c_class': {'min_samples': 500, 'recent_window': 100},
+            'm_class': {'min_samples': 500, 'recent_window': 100},
+            'x_class': {'min_samples': 500, 'recent_window': 100}
         }
 
         if len(error_history) < class_params[sxrclass]['min_samples']:
