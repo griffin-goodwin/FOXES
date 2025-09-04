@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
 import forecasting.models as models
 from forecasting.models.vit_patch_model import ViT
+from forecasting.models import FusionViTHybrid
 from forecasting.models.linear_and_hybrid import HybridIrradianceModel  # Add your hybrid model import
 from forecasting.training.callback import unnormalize_sxr
 import yaml
@@ -28,7 +29,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def has_attention_weights(model):
     """Check if model supports attention weights"""
-    return hasattr(model, 'attention') or isinstance(model, ViT)
+    return hasattr(model, 'attention') or isinstance(model, ViT) or isinstance(model, FusionViTHybrid)
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
@@ -201,7 +202,7 @@ def load_model_from_config(config_data):
                 model_class = getattr(models, model_type)
                 model = model_class.load_from_checkpoint(checkpoint_path)
             except AttributeError:
-                raise ValueError(f"Unknown model type: {model_type}. Available types: ViT, HybridIrradianceModel")
+                raise ValueError(f"Unknown model type: {model_type}. Available types include: ViT, HybridIrradianceModel, FusionViTHybrid")
     else:
         # Regular PyTorch checkpoint
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -243,7 +244,7 @@ def main():
     parser.add_argument('-config', type=str, default='config.yaml', required=True, help='Path to config YAML.')
     parser.add_argument('-input_size', type=int, default=512, help='Input size for the model')
     parser.add_argument('-patch_size', type=int, default=16, help='Patch size for the model')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for inference')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for inference')
     parser.add_argument('--no_weights', action='store_true', help='Skip saving attention weights to speed up')
     args = parser.parse_args()
 

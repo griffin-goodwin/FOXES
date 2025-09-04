@@ -124,7 +124,11 @@ class AttentionMapCallback(Callback):
             imgs = imgs[:self.num_samples].to(pl_module.device)
 
             # Get predictions with attention weights
-            outputs, attention_weights, _  = pl_module(imgs, return_attention=True)
+            #Dynamically extract attention weights from the model
+            try:
+                outputs, attention_weights, _  = pl_module(imgs, return_attention=True)
+            except:
+                attention_weights = pl_module.forward_for_callback(imgs, return_attention=True)
 
             # Visualize attention for each sample
             for sample_idx in range(min(self.num_samples, imgs.size(0))):
@@ -134,7 +138,7 @@ class AttentionMapCallback(Callback):
                     attention_weights,
                     sample_idx,
                     trainer.current_epoch,
-                    pl_module.model.patch_size
+                    patch_size=16
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(map)})
                 plt.close(map)
