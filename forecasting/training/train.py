@@ -11,7 +11,7 @@ import numpy as np
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-from torch.nn import MSELoss
+from torch.nn import MSELoss, HuberLoss
 from pathlib import Path
 import sys
 # Add project root to Python path
@@ -191,8 +191,7 @@ if config_data['selected_model'] == 'linear':
         d_input= len(config_data['wavelengths']),
         d_output=1,
         lr= config_data['megsai']['lr'],
-        loss_func=MSELoss(),
-        sxr_norm=sxr_norm,
+        loss_func=HuberLoss(),
         weight_decay=config_data['megsai']['weight_decay'],
         cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
         cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
@@ -206,7 +205,6 @@ elif config_data['selected_model'] == 'hybrid':
         ln_model=True,
         cnn_dp=config_data['megsai']['cnn_dp'],
         lr=config_data['megsai']['lr'],
-        sxr_norm=sxr_norm,
         weight_decay=config_data['megsai']['weight_decay'],
         cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
         cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],

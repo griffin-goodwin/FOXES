@@ -14,7 +14,7 @@ megsai:
   architecture: "cnn"
   seed: 42
   lr: 0.0001
-  cnn_model: "updated"
+  cnn_model: "original"
   cnn_dp: 0.2
   weight_decay: 1e-5
   cosine_restart_T0: 50
