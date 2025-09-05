@@ -1,7 +1,7 @@
 # Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/"  # Change this line for different datasets
-output_path: "${base_data_dir}/output//mnt/data/ML-Ready-mixed/ML-Ready-mixed/output/patch.csv"
-weight_path: "${base_data_dir}/patch_Weight/"
+base_data_dir: "/mnt/data/ML-READY/"  # Change this line for different datasets
+output_path: "${base_data_dir}/output/baseline-model.csv"
+weight_path: "${base_data_dir}/baseline-model/"
 mc:
   active: "false"
   runs: 5
@@ -11,13 +11,13 @@ Stereo: "false"
 Stereo_data:
     stereo_img_dir: "/mnt/data/ML-Ready-mixed/STEREO_processed"
     sxr_dir: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/SXR"
-    sxr_norm_path: "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/SXR/normalized_sxr.npy"
+    sxr_norm_path: "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
 SolO: "false"
 SolO_data:
     solo_img_dir: "/mnt/data/ML-Ready_clean/SolO/SolO/ML-Ready-SolO"
     sxr_dir: "${base_data_dir}/SXR"
     sxr_norm_path: "${base_data_dir}/SolO/SXR/normalized_sxr.npy"
-model: "cnn"  # Options: "cnn", "vit", "ViT Custom"
+model: "hybrid"  # Options: "vit", "hybrid"
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 data:
   aia_dir:
@@ -25,8 +25,8 @@ data:
   sxr_dir:
     "${base_data_dir}/SXR"
   sxr_norm_path:
-    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/SXR/normalized_sxr.npy"
+    "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/new-checkpoint/vit-16-higher-weight-lower-decay-epoch=119-val_total_loss=0.0419.ckpt"
+    "/mnt/data/ML-READY/new-checkpoint/baseline-model-epoch=14-val_total_loss=0.0343.ckpt"
 
 
