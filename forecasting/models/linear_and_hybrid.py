@@ -10,11 +10,14 @@ from forecasting.models.base_model import BaseModel
 from torchvision.models import resnet18
 
 class LinearIrradianceModel(BaseModel):
-    def __init__(self, d_input, d_output, loss_func=HuberLoss(), lr=1e-4):
+    def __init__(self, d_input, d_output, loss_func=HuberLoss(), lr=1e-4, sxr_norm=None, 
+                 weight_decay=1e-5, cosine_restart_T0=50, cosine_restart_Tmult=2, cosine_eta_min=1e-7):
         self.n_channels = d_input
         self.outSize = d_output
         model = nn.Linear(2 * self.n_channels, self.outSize)
-        super().__init__(model=model, loss_func=loss_func, lr=lr)
+        super().__init__(model=model, loss_func=loss_func, lr=lr, sxr_norm=sxr_norm,
+                        weight_decay=weight_decay, cosine_restart_T0=cosine_restart_T0,
+                        cosine_restart_Tmult=cosine_restart_Tmult, cosine_eta_min=cosine_eta_min)
 
     def forward(self, x, **kwargs):
 
@@ -48,14 +51,21 @@ class LinearIrradianceModel(BaseModel):
         return self.model(input_features)
 
 class HybridIrradianceModel(BaseModel):
-    def __init__(self, d_input, d_output, cnn_model='resnet', ln_model=True, ln_params=None, lr=1e-4, cnn_dp=0.75, loss_func=HuberLoss()):
-        super().__init__(model=None, loss_func=loss_func, lr=lr)
+    def __init__(self, d_input, d_output, cnn_model='resnet', ln_model=True, ln_params=None, lr=1e-4, cnn_dp=0.75, loss_func=HuberLoss(),
+                 sxr_norm=None, weight_decay=1e-5, cosine_restart_T0=50, cosine_restart_Tmult=2, cosine_eta_min=1e-7):
+        super().__init__(model=None, loss_func=loss_func, lr=lr, sxr_norm=sxr_norm,
+                        weight_decay=weight_decay, cosine_restart_T0=cosine_restart_T0,
+                        cosine_restart_Tmult=cosine_restart_Tmult, cosine_eta_min=cosine_eta_min)
         self.n_channels = d_input
         self.outSize = d_output
         self.ln_params = ln_params
         self.ln_model = None
         if ln_model:
-            self.ln_model = LinearIrradianceModel(d_input, d_output, loss_func=loss_func, lr=lr)
+            self.ln_model = LinearIrradianceModel(d_input, d_output, loss_func=loss_func, lr=lr,
+                                                sxr_norm=sxr_norm, weight_decay=weight_decay,
+                                                cosine_restart_T0=cosine_restart_T0,
+                                                cosine_restart_Tmult=cosine_restart_Tmult,
+                                                cosine_eta_min=cosine_eta_min)
         if self.ln_params is not None and self.ln_model is not None:
             self.ln_model.model.weight = nn.Parameter(self.ln_params['weight'])
             self.ln_model.model.bias = nn.Parameter(self.ln_params['bias'])
