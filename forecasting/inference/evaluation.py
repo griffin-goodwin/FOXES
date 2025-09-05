@@ -890,7 +890,7 @@ class SolarFlareEvaluator:
         # Sort frame paths by timestamp to ensure correct order
         frame_paths.sort(key=lambda x: os.path.basename(x))
 
-        movie_path = os.path.join(self.output_dir, "AIA_video_with_uncertainties.mp4")
+        movie_path = os.path.join(self.output_dir, f"AIA_{timestamps[0].split('T')[0]}.mp4")
         with imageio.get_writer(movie_path, fps=30, codec='libx264', format='ffmpeg') as writer:
             for frame_path in frame_paths:
                 if os.path.exists(frame_path):

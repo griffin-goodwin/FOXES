@@ -190,8 +190,13 @@ if config_data['selected_model'] == 'linear':
     model = LinearIrradianceModel(
         d_input= len(config_data['wavelengths']),
         d_output=1,
-        lr= config_data['model']['lr'],
-        loss_func=MSELoss()
+        lr= config_data['megsai']['lr'],
+        loss_func=MSELoss(),
+        sxr_norm=sxr_norm,
+        weight_decay=config_data['megsai']['weight_decay'],
+        cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
+        cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
+        cosine_eta_min=config_data['megsai']['cosine_eta_min']
     )
 elif config_data['selected_model'] == 'hybrid':
     model = HybridIrradianceModel(
@@ -201,6 +206,11 @@ elif config_data['selected_model'] == 'hybrid':
         ln_model=True,
         cnn_dp=config_data['megsai']['cnn_dp'],
         lr=config_data['megsai']['lr'],
+        sxr_norm=sxr_norm,
+        weight_decay=config_data['megsai']['weight_decay'],
+        cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
+        cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
+        cosine_eta_min=config_data['megsai']['cosine_eta_min']
     )
 elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
