@@ -10,14 +10,15 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 
 # Add project root to Python path
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.absolute()
+PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from flaring.forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
-import flaring.forecasting.models as models
-from flaring.forecasting.models.vision_transformer_custom import ViT
-from flaring.forecasting.models.linear_and_hybrid import HybridIrradianceModel  # Add your hybrid model import
-from flaring.forecasting.training.callback import unnormalize_sxr
+from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
+import forecasting.models as models
+from forecasting.models.vision_transformer_custom import ViT
+from forecasting.models.linear_and_hybrid import HybridIrradianceModel, LinearIrradianceModel  # Add your hybrid and linear model imports
+from torch.nn import HuberLoss
+from forecasting.training.callback import unnormalize_sxr
 import yaml
 import torch.nn.functional as F
 from concurrent.futures import ThreadPoolExecutor
@@ -275,6 +276,7 @@ def load_model_from_config(config_data):
     """Load model based on config specifications"""
     checkpoint_path = config_data['data']['checkpoint_path']
     model_type = config_data['model']  # Default to ViT for backward compatibility
+    wavelengths = config_data.get('wavelengths', [94, 131, 171, 193, 211, 304])
 
     print(f"Loading {model_type} model...")
 
@@ -283,14 +285,44 @@ def load_model_from_config(config_data):
         if model_type.lower() == 'vit':
             model = ViT.load_from_checkpoint(checkpoint_path)
         elif model_type.lower() == 'hybrid' or model_type.lower() == 'hybridirradiancemodel':
-            model = HybridIrradianceModel.load_from_checkpoint(checkpoint_path)
+            # Try to load with saved hyperparameters first, then fall back to config parameters
+            try:
+                model = HybridIrradianceModel.load_from_checkpoint(checkpoint_path)
+            except (TypeError, RuntimeError) as e:
+                print(f"Failed to load with saved hyperparameters: {e}")
+                print("Loading with config parameters...")
+                # Provide required parameters for HybridIrradianceModel
+                # Use the same architecture parameters as training
+                model = HybridIrradianceModel.load_from_checkpoint(
+                    checkpoint_path,
+                    d_input=len(wavelengths),
+                    d_output=1,
+                    cnn_model=config_data.get('megsai', {}).get('cnn_model', 'original'),
+                    ln_model=True,
+                    cnn_dp=config_data.get('megsai', {}).get('cnn_dp', 0.2),
+                    loss_func=HuberLoss()
+                )
+        elif model_type.lower() == 'linear' or model_type.lower() == 'linearirradiancemodel':
+            # Try to load with saved hyperparameters first, then fall back to config parameters
+            try:
+                model = LinearIrradianceModel.load_from_checkpoint(checkpoint_path)
+            except (TypeError, RuntimeError) as e:
+                print(f"Failed to load with saved hyperparameters: {e}")
+                print("Loading with config parameters...")
+                # Provide required parameters for LinearIrradianceModel
+                model = LinearIrradianceModel.load_from_checkpoint(
+                    checkpoint_path,
+                    d_input=len(wavelengths),
+                    d_output=1,
+                    loss_func=HuberLoss()
+                )
         else:
             # Try to dynamically load the model class
             try:
                 model_class = getattr(models, model_type)
                 model = model_class.load_from_checkpoint(checkpoint_path)
             except AttributeError:
-                raise ValueError(f"Unknown model type: {model_type}. Available types: ViT, HybridIrradianceModel")
+                raise ValueError(f"Unknown model type: {model_type}. Available types: ViT, HybridIrradianceModel, LinearIrradianceModel")
     else:
         # Regular PyTorch checkpoint
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
