@@ -284,8 +284,8 @@ class SXRRegressionDynamicLoss:
         }
 
     def calculate_loss(self, preds_squeezed, sxr, sxr_un, preds_squeezed_un):
-        #base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
-        base_loss = F.mse_loss(preds_squeezed, sxr, reduction='none')
+        base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
+        #base_loss = F.mse_loss(preds_squeezed, sxr, reduction='none')
         weights = self._get_adaptive_weights(sxr_un, preds_squeezed_un, base_loss)
         self._update_tracking(sxr_un, preds_squeezed_un, base_loss)
         weighted_loss = base_loss * weights
