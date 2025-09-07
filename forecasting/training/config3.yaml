@@ -4,7 +4,7 @@ base_data_dir: "/mnt/data/ML-READY"  # Change this line for different datasets
 base_checkpoint_dir: "/mnt/data/ML-READY"    # Change this line for different datasets
 wavelengths: [171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # Model configuration
-selected_model: "hybrid"  # Options: "hybrid", "vit", "fusion", "vitpatch"
+selected_model: "vitpatch"  # Options: "hybrid", "vit", "fusion", "vitpatch"
 batch_size:    16
 epochs:        250
 oversample: false
@@ -67,5 +67,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: baseline-model-more-complex-STEREO
+  wb_name: baseline-model-more-complex
   notes: Regression from AIA images (6 channels) to GOES SXR flux
