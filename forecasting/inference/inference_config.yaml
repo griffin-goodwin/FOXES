@@ -27,6 +27,6 @@ data:
   sxr_norm_path:
     "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-READY/new-checkpoint/baseline-model-epoch=14-val_total_loss=0.0343.ckpt"
+    "/mnt/data/ML-READY/new-checkpoint/baseline-model-more-complex-epoch=55-val_total_loss=0.0194.ckpt"
 
 

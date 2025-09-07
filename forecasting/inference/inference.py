@@ -364,7 +364,7 @@ def main():
     parser.add_argument('-config', type=str, default='config.yaml', required=True, help='Path to config YAML.')
     parser.add_argument('-input_size', type=int, default=512, help='Input size for the model')
     parser.add_argument('-patch_size', type=int, default=16, help='Patch size for the model')
-    parser.add_argument('--batch_size', type=int, default=5, help='Batch size for inference')
+    parser.add_argument('--batch_size', type=int, default=10, help='Batch size for inference')
     parser.add_argument('--no_weights', action='store_true', help='Skip saving attention weights to speed up')
     args = parser.parse_args()
 
