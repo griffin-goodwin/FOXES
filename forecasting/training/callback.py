@@ -126,7 +126,7 @@ class AttentionMapCallback(Callback):
             # Get predictions with attention weights
             #Dynamically extract attention weights from the model
             try:
-                outputs, attention_weights, _  = pl_module(imgs, return_attention=True)
+                outputs, attention_weights  = pl_module(imgs, return_attention=True)
             except:
                 attention_weights = pl_module.forward_for_callback(imgs, return_attention=True)
 
