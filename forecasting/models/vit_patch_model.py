@@ -228,6 +228,12 @@ class VisionTransformer(nn.Module):
             return global_flux_raw, attention_weights, patch_flux_raw
         else:
             return global_flux_raw, patch_flux_raw
+        
+    def forward_for_callback(self, x, return_attention=True):
+        """Forward method compatible with AttentionMapCallback"""
+        global_flux_raw, attention_weights, patch_flux_raw = self.forward(x, return_attention=return_attention)
+        # Callback expects (outputs, attention_weights, _)
+        return global_flux_raw, attention_weights    
 
 
 class AttentionBlock(nn.Module):
@@ -288,7 +294,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
     return x
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=500):
+    def __init__(self, window_size=1500):
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
