@@ -265,7 +265,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
 
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=500):
+    def __init__(self, window_size=1500):
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
