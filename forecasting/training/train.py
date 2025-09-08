@@ -245,7 +245,7 @@ else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
 
 # Trainer
-if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViT Patch' or config_data['selected_model'] == 'FusionViTHybrid':
+if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViTPatch' or config_data['selected_model'] == 'FusionViTHybrid':
     trainer = Trainer(
         default_root_dir=config_data['data']['checkpoints_dir'],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
