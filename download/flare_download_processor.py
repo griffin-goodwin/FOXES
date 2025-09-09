@@ -45,7 +45,7 @@ class FlareDownloadProcessor:
                 start_time = event['event_starttime'] - time_before_start
                 end_time = event['event_endtime'] + time_after_end
                 self.SXRDownloader.download_and_save_goes_data(start_time.strftime('%Y-%m-%d'),
-                                                               end_time.strftime('%Y-%m-%d'), max_workers=2)
+                                                               end_time.strftime('%Y-%m-%d'), max_workers=16)
                 processed_dates = set()
                 for d in [start_time + i * timedelta(minutes=1) for i in
                           range((end_time - start_time) // timedelta(minutes=1))]:
@@ -65,7 +65,7 @@ class FlareDownloadProcessor:
                 start_time = end_time_fl[i]
                 end_time = start_time_fl[i+1] if i + 1 < len(fl_events) else end_time_fl[-1] + timedelta(minutes=5)
                 self.SXRDownloader.download_and_save_goes_data(start_time.strftime('%Y-%m-%d'),
-                                                               end_time.strftime('%Y-%m-%d'), max_workers=2)
+                                                               end_time.strftime('%Y-%m-%d'), max_workers=16)
                 
                 # Adaptive sampling based on quiet period duration
                 quiet_duration = end_time - start_time
@@ -84,7 +84,7 @@ class FlareDownloadProcessor:
                                    range((end_time - start_time) // sampling_interval)]
                 
                 # Process in smaller batches to avoid overwhelming the server
-                batch_size = 50  # Smaller batches
+                batch_size = 100  # Smaller batches
                 for i in range(0, len(dates_to_process), batch_size):
                     batch = dates_to_process[i:i + batch_size]
                     print(f"Processing batch {i//batch_size + 1}/{(len(dates_to_process) + batch_size - 1)//batch_size} ({len(batch)} dates)")
@@ -106,14 +106,14 @@ class FlareDownloadProcessor:
                                 
                                 # Add small delay between individual downloads
                                 if j < len(batch) - 1:
-                                    time.sleep(2)
+                                    time.sleep(1)
                                     
                             except Exception as e:
                                 print(f"  ✗ Failed to download data for {d}: {e}")
                                 # If it's a connection error, wait longer before retrying
                                 if "Connection refused" in str(e) or "timeout" in str(e).lower():
                                     print(f"  Waiting 10 seconds before continuing...")
-                                    time.sleep(10)
+                                    time.sleep(5)
                                 continue
                         elif d.isoformat() in completed_dates:
                             print(f"  ⏭ Skipping {d} (already completed)")
@@ -139,7 +139,7 @@ if __name__ == '__main__':
                         help='Directory to save downloaded data (default: /mnt/data)')
     parser.add_argument('--flaring_data', dest='flaring_data', action='store_true',
                         help='Download flaring data (default)')
-    parser.add_argument('--non_flaring_data', dest='non_flaring_data', action='store_false',
+    parser.add_argument('--non_flaring_data', dest='flaring_data', action='store_false',
                         help='Download non-flaring data')
     parser.set_defaults(flaring_data=True)
     args = parser.parse_args()
