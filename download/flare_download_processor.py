@@ -4,6 +4,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from os import cpu_count
+from urllib.error import HTTPError
 
 import download_sdo as sdo
 import flare_event_downloader as fed
@@ -19,6 +20,41 @@ class FlareDownloadProcessor:
         self.SDODownloader = SDODownloader
         self.SXRDownloader = SXRDownloader
         self.flaring_data = flaring_data
+
+    def retry_download_with_backoff(self, download_func, *args, max_retries=5, base_delay=60, **kwargs):
+        """
+        Retry a download function with exponential backoff for HTTP 503 errors.
+        
+        Args:
+            download_func: The download function to retry
+            *args: Arguments to pass to the download function
+            max_retries: Maximum number of retry attempts (default: 5)
+            base_delay: Base delay in seconds for exponential backoff (default: 60)
+            **kwargs: Keyword arguments to pass to the download function
+        
+        Returns:
+            The result of the download function if successful
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return download_func(*args, **kwargs)
+            except HTTPError as e:
+                if e.code == 503:  # Service Unavailable
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"  ⚠ HTTP 503 Service Unavailable (attempt {attempt + 1}/{max_retries + 1})")
+                        print(f"  ⏳ Waiting {delay} seconds before retry...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"  ✗ Max retries ({max_retries}) exceeded for HTTP 503 error")
+                        raise
+                else:
+                    # Re-raise non-503 HTTP errors immediately
+                    raise
+            except Exception as e:
+                # Re-raise non-HTTP errors immediately
+                raise
 
     def process_download(self, time_before_start=timedelta(minutes=5), time_after_end=timedelta(minutes=0)):
 
@@ -44,14 +80,15 @@ class FlareDownloadProcessor:
                 event = events[1]
                 start_time = event['event_starttime'] - time_before_start
                 end_time = event['event_endtime'] + time_after_end
-                self.SXRDownloader.download_and_save_goes_data(start_time.strftime('%Y-%m-%d'),
-                                                               end_time.strftime('%Y-%m-%d'), max_workers=16)
+                self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
+                                                start_time.strftime('%Y-%m-%d'),
+                                                end_time.strftime('%Y-%m-%d'), max_workers=16)
                 processed_dates = set()
                 for d in [start_time + i * timedelta(minutes=1) for i in
                           range((end_time - start_time) // timedelta(minutes=1))]:
                     # Only download if we haven't processed this date yet
                     if d.isoformat() not in processed_dates:
-                        self.SDODownloader.downloadDate(d)
+                        self.retry_download_with_backoff(self.SDODownloader.downloadDate, d)
                         processed_dates.add(d.isoformat())
                 logging.info(f"Processed flare event {i + 1}/{len(fl_events)}: {event['event_starttime']} to {event['event_endtime']}")
         elif self.flaring_data == False:
@@ -62,10 +99,11 @@ class FlareDownloadProcessor:
             start_time_fl = fl_events['event_starttime']
             end_time_fl = fl_events['event_endtime']
             for i, events in enumerate(fl_events.iterrows()):
-                start_time = end_time_fl[i]
-                end_time = start_time_fl[i+1] if i + 1 < len(fl_events) else end_time_fl[-1] + timedelta(minutes=5)
-                self.SXRDownloader.download_and_save_goes_data(start_time.strftime('%Y-%m-%d'),
-                                                               end_time.strftime('%Y-%m-%d'), max_workers=16)
+                start_time = end_time_fl.iloc[i]
+                end_time = start_time_fl.iloc[i+1] if i + 1 < len(fl_events) else end_time_fl.iloc[-1] + timedelta(minutes=5)
+                self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
+                                                start_time.strftime('%Y-%m-%d'),
+                                                end_time.strftime('%Y-%m-%d'), max_workers=16)
                 
                 # Adaptive sampling based on quiet period duration
                 quiet_duration = end_time - start_time
@@ -94,7 +132,7 @@ class FlareDownloadProcessor:
                         if d.isoformat() not in processed_dates and d.isoformat() not in completed_dates:
                             try:
                                 print(f"  Downloading data for {d} ({j+1}/{len(batch)})")
-                                self.SDODownloader.downloadDate(d)
+                                self.retry_download_with_backoff(self.SDODownloader.downloadDate, d)
                                 processed_dates.add(d.isoformat())
                                 completed_dates.add(d.isoformat())
                                 

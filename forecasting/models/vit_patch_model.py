@@ -25,7 +25,7 @@ def unnormalize_sxr(normalized_values, sxr_norm):
     return 10 ** (normalized_values * float(sxr_norm[1].item()) + float(sxr_norm[0].item())) - 1e-8
 
 class ViT(pl.LightningModule):
-    def __init__(self, model_kwargs, sxr_norm):
+    def __init__(self, model_kwargs, sxr_norm, base_weights=None):
         super().__init__()
         self.model_kwargs = model_kwargs
         self.lr = model_kwargs['lr']
@@ -34,9 +34,12 @@ class ViT(pl.LightningModule):
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformer(**filtered_kwargs)
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=1500)
+        #Set the base weights based on the number of samples in each class within training data
+        self.base_weights = base_weights
+        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=1500, base_weights=self.base_weights)
         self.sxr_norm = sxr_norm
 
+    
     def forward(self, x, return_attention=True):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
 
@@ -78,7 +81,9 @@ class ViT(pl.LightningModule):
         loss, weights = self.adaptive_loss.calculate_loss(
             norm_preds_squeezed, sxr, sxr_un, raw_preds_squeezed
         )
-        total_loss = loss
+
+        #Also calculate huber loss for logging
+        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=1.0)
 
 
         # Log adaptation info
@@ -109,20 +114,13 @@ class ViT(pl.LightningModule):
             multipliers = self.adaptive_loss.get_current_multipliers()
             for key, value in multipliers.items():
                 self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
-            self.log("val_main_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            #self.log("val_sparsity_entropy_loss", sparsity_or_entropy, on_step=False, on_epoch=True, prog_bar=True,
-            #         logger=True, sync_dist=True)
-            self.log("val_total_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True,
-                     sync_dist=True)
-
-            # Log lambda scaling factor for validation
-            #self.log("val/adaptive/lambda", λ.mean(), on_step=False, on_epoch=True, logger=True, sync_dist=True)
+            self.log("val_total_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         return total_loss
 
     def training_step(self, batch, batch_idx):
-        loss = self._calculate_loss(batch, mode="train")
-        return loss
+        return self._calculate_loss(batch, mode="train")
 
     def validation_step(self, batch, batch_idx):
         self._calculate_loss(batch, mode="val")
@@ -294,7 +292,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
     return x
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=1500):
+    def __init__(self, window_size=1500, base_weights=None):    
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
@@ -305,7 +303,15 @@ class SXRRegressionDynamicLoss:
         self.m_errors = deque(maxlen=window_size)
         self.x_errors = deque(maxlen=window_size)
 
-        self.base_weights = {
+        #Calculate the base weights based on the number of samples in each class within training data
+        if base_weights is None:
+            self.base_weights = self._get_base_weights()
+        else:
+            self.base_weights = base_weights
+
+    def _get_base_weights(self):
+        #Calculate the base weights based on the number of samples in each class within training data
+        return {
             'quiet': 1.0,
             'c_class': 2.0,
             'm_class': 10.0,
@@ -329,7 +335,7 @@ class SXRRegressionDynamicLoss:
             self.quiet_errors, max_multiplier=1.5, min_multiplier=0.5, sensitivity=2.0, sxrclass = 'quiet'
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=5.0, min_multiplier=0.5, sensitivity=2.5, sxrclass = 'c_class'
+            self.c_errors, max_multiplier=1.5, min_multiplier=0.5, sensitivity=2.0, sxrclass = 'c_class'
         )
         m_mult = self._get_performance_multiplier(
             self.m_errors, max_multiplier=7.0, min_multiplier=0.5, sensitivity=3.0, sxrclass = 'm_class'
@@ -351,10 +357,10 @@ class SXRRegressionDynamicLoss:
 
         # Normalize so mean weight ~1.0 (optional, helps stability)
         mean_weight = torch.mean(weights)
-        weights = weights / (mean_weight + 1e-8)
+        weights = weights / (mean_weight)
 
         # Clamp extreme weights
-        weights = torch.clamp(weights, min=0.1, max=40.0)
+        weights = torch.clamp(weights, min=0.01, max=40.0)
 
         # Save for logging
         self.current_multipliers = {
@@ -400,7 +406,7 @@ class SXRRegressionDynamicLoss:
             preds_np = preds_squeezed_un.detach().cpu().numpy()
             log_error = np.abs(np.log10(np.maximum(sxr_np, 1e-12)) - np.log10(np.maximum(preds_np, 1e-12)))
 
-            quiet_mask = sxr_np < self.c_threshold
+            quiet_mask = sxr_np < self.quiet_threshold
             if quiet_mask.sum() > 0:
                 self.quiet_errors.append(float(np.mean(log_error[quiet_mask])))
 
@@ -435,7 +441,6 @@ class SXRRegressionDynamicLoss:
             'm_error': np.mean(self.m_errors) if self.m_errors else 0.0,
             'x_error': np.mean(self.x_errors) if self.x_errors else 0.0,
             'quiet_weight': self.current_multipliers['quiet_weight'],
-            'c_weight': self.current_multipliers['c_weight'],
             'm_weight': self.current_multipliers['m_weight'],
             'x_weight': self.current_multipliers['x_weight']
         }
