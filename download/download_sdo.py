@@ -200,6 +200,20 @@ if __name__ == '__main__':
     start_date_datetime = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
     #end_date = datetime.now()
     end_date_datetime = datetime.strptime(end_date, "%Y-%m-%d %H:%M:%S")
+
+
+    #Skip over dates that already exist in the download directory
     for d in [start_date_datetime + i * timedelta(minutes=1) for i in
               range((end_date_datetime - start_date_datetime) // timedelta(minutes=1))]:
+        #make sure the file exists in all wavelengths directories
+        for wl in [94, 131, 171, 193, 211, 304]:
+            if not os.path.exists(os.path.join(
+                download_dir, 
+                str(wl), 
+                f"{d.year:04d}-{d.month:02d}-{d.day:02d}T{d.hour:02d}:{d.minute:02d}:{d.second:02d}.fits"
+            )):
+                break
+        else:
+            logging.info(f"Skipping {d.isoformat()} because it already exists in the download directory")
+            continue
         downloader.downloadDate(d)
