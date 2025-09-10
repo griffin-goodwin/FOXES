@@ -185,6 +185,64 @@ pth_callback = PTHCheckpointCallback(
     filename_prefix=config_data['wandb']['wb_name']
 )
 
+def get_base_weights(data_loader, sxr_norm):
+    """
+    Calculate base weights based on the number of samples in each class within training data.
+    Classes: quiet (<1e-6), c_class [1e-6, 1e-5), m_class [1e-5, 1e-4), x_class >=1e-4
+    Returns a dict with weights for each class: quiet, c_class, m_class, x_class
+    """
+    # Thresholds for SXR classes
+    c_threshold = 1e-6
+    m_threshold = 1e-5
+    x_threshold = 1e-4
+
+    quiet_count = 0
+    c_count = 0
+    m_count = 0
+    x_count = 0
+    total = 0
+
+    # Import unnormalize_sxr from the ViT model file or define here if not imported
+    from forecasting.models.vit_patch_model import unnormalize_sxr
+
+    for batch in data_loader:
+        # Assume batch = (inputs, targets)
+        _, sxr = batch
+        # Unnormalize the SXR values
+        sxr_un = unnormalize_sxr(sxr, sxr_norm)
+        sxr_un_flat = sxr_un.view(-1).cpu().numpy()
+        total += len(sxr_un_flat)
+        quiet_count += ((sxr_un_flat < c_threshold)).sum()
+        c_count += ((sxr_un_flat >= c_threshold) & (sxr_un_flat < m_threshold)).sum()
+        m_count += ((sxr_un_flat >= m_threshold) & (sxr_un_flat < x_threshold)).sum()
+        x_count += ((sxr_un_flat >= x_threshold)).sum()
+
+    # Avoid division by zero
+    quiet_count = max(quiet_count, 1)
+    c_count = max(c_count, 1)
+    m_count = max(m_count, 1)
+    x_count = max(x_count, 1)
+
+    # Inverse frequency weighting (more rare = higher weight)
+    quiet_weight = total / quiet_count
+    c_weight = total / c_count
+    m_weight = total / m_count
+    x_weight = total / x_count
+
+    # Optionally normalize so quiet_weight = 1.0
+    norm_factor = max(quiet_weight, c_weight, m_weight, x_weight)
+    quiet_weight = quiet_weight / norm_factor
+    c_weight = c_weight / norm_factor
+    m_weight = m_weight / norm_factor
+    x_weight = x_weight / norm_factor
+
+    return {
+        'quiet': quiet_weight,
+        'c_class': c_weight,
+        'm_class': m_weight,
+        'x_class': x_weight
+    }
+
 # Model
 if config_data['selected_model'] == 'linear':
     model = LinearIrradianceModel(
@@ -214,7 +272,7 @@ elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
 elif config_data['selected_model'] == 'ViTPatch':
-    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
+    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=get_base_weights(data_loader.train_ds, sxr_norm))
 
 elif config_data['selected_model'] == 'FusionViTHybrid':
     # Expect a 'fusion' section in YAML
