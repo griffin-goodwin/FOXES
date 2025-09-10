@@ -128,7 +128,11 @@ class AttentionMapCallback(Callback):
             try:
                 outputs, attention_weights  = pl_module(imgs, return_attention=True)
             except:
-                attention_weights = pl_module.forward_for_callback(imgs, return_attention=True)
+                # For ViT patch model, we need to call the model's forward method directly
+                if hasattr(pl_module, 'model') and hasattr(pl_module.model, 'forward'):
+                    outputs, attention_weights, _ = pl_module.model(imgs, pl_module.sxr_norm, return_attention=True)
+                else:
+                    outputs, attention_weights = pl_module.forward_for_callback(imgs, return_attention=True)
 
             # Visualize attention for each sample
             for sample_idx in range(min(self.num_samples, imgs.size(0))):

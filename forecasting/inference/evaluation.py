@@ -1,7 +1,11 @@
 import os
 import glob
+import re
+import sys
+import yaml
 from multiprocessing import Pool
 from datetime import timedelta, datetime
+from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
@@ -62,6 +66,9 @@ class SolarFlareEvaluator:
         # Load main model prediction data
         if self.csv_path and os.path.exists(self.csv_path):
             self.df = pd.read_csv(self.csv_path)
+            outlier_threshold = 999999 # 0.01
+            self.mask = self.df['predictions'] < outlier_threshold
+            self.df = self.df[self.mask]
             self.y_true = self.df['groundtruth'].values
             #add 20% uncertainty to ground truth
             self.y_true_uncertainty = 0.2 * self.y_true
@@ -75,6 +82,7 @@ class SolarFlareEvaluator:
         # Load baseline model prediction data
         if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
             self.baseline_df = pd.read_csv(self.baseline_csv_path)
+            self.baseline_df = self.baseline_df[self.mask]
             self.y_baseline = self.baseline_df['predictions'].values
             if 'uncertainty' in self.baseline_df.columns and self.baseline_df['uncertainty'] is not None:
                 self.y_baseline_uncertainty = self.baseline_df['uncertainty'].values
@@ -346,167 +354,6 @@ class SolarFlareEvaluator:
         plt.close()
         print(f"Saved regression comparison plot to {plot_path}")
 
-    # def _plot_regression_comparison(self):
-    #     """Generate regression comparison plot"""
-    #     flare_classes = {
-    #         'A1.0': (1e-8, 1e-7),
-    #         'B1.0': (1e-7, 1e-6),
-    #         'C1.0': (1e-6, 1e-5),
-    #         'M1.0': (1e-5, 1e-4),
-    #         'X1.0': (1e-4, 1e-3)
-    #     }
-    #
-    #     def add_flare_class_axes(ax, min_val, max_val):
-    #         """Helper function to add flare class secondary axes"""
-    #         # Create secondary axis for flare classes (top)
-    #         ax_top = ax.twiny()
-    #         ax_top.set_xlim(ax.get_xlim())
-    #         ax_top.set_xscale('log')
-    #
-    #         # Create secondary axis for flare classes (right)
-    #         ax_right = ax.twinx()
-    #         ax_right.set_ylim(ax.get_ylim())
-    #         ax_right.set_yscale('log')
-    #
-    #         # Set flare class tick positions and labels
-    #         flare_positions = []
-    #         flare_labels = []
-    #         for class_name, (min_flux, max_flux) in flare_classes.items():
-    #             # Add both min and max boundaries that fall within data range
-    #             if min_flux >= min_val and min_flux <= max_val:
-    #                 flare_positions.append(min_flux)
-    #                 flare_labels.append(f'{class_name}')
-    #             if max_flux >= min_val and max_flux <= max_val and max_flux != min_flux:
-    #                 flare_positions.append(max_flux)
-    #                 flare_labels.append(f'{class_name}')
-    #
-    #         if flare_positions:  # Only add if we have valid positions
-    #             ax_top.set_xticks(flare_positions)
-    #             ax_top.set_xticklabels(flare_labels)
-    #             ax_top.tick_params()
-    #
-    #             # Add minor ticks to secondary axes
-    #             ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #             ax_top.tick_params(which='minor')
-    #             #ax_top.grid(True, which='minor', alpha=0.15, linewidth=0.5)
-    #
-    #             ax_right.set_yticks(flare_positions)
-    #             ax_right.set_yticklabels(flare_labels)
-    #             ax_right.tick_params()
-    #
-    #             # Add minor ticks to secondary axes
-    #             ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #             ax_right.tick_params(which='minor')
-    #             #ax_right.grid(True, which='minor', alpha=0.15, linewidth=0.5)
-    #
-    #             # Style the spines
-    #             # for spine in ax_top.spines.values():
-    #             #     spine.set_color('white')
-    #             # for spine in ax_right.spines.values():
-    #             #     spine.set_color('white')
-    #
-    #             # Optional: Add grid lines at flare class boundaries
-    #             for pos in flare_positions:
-    #                 ax.axvline(x=pos, color='cyan', alpha=0.15,linewidth=0.25)
-    #                 ax.axhline(y=pos, color='cyan', alpha=0.15,linewidth=0.25)
-    #
-    #     min_val = min(min(self.y_true), min(self.y_pred))
-    #     max_val = max(max(self.y_true), max(self.y_pred))
-    #     log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 150)
-    #
-    #     shared_norm = LogNorm(vmin=1, vmax=None)
-    #
-    #     if self.y_baseline is not None:
-    #         fig, (ax2, ax1) = plt.subplots(1, 2, figsize=(11, 6))
-    #     else:
-    #         fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
-    #         ax2 = None
-    #
-    #     # fig.patch.set_facecolor('#1a1a2e')
-    #     # sns.set_palette("husl")
-    #     # ax1.set_facecolor('#2d2d44')
-    #     # if ax2 is not None:
-    #     #     ax2.set_facecolor('#2d2d44')
-    #
-    #     # Main model plot
-    #     min_val = min(min(self.y_true), min(self.y_pred))
-    #     max_val = max(max(self.y_true), max(self.y_pred))
-    #     ax1.plot([min_val, max_val], [min_val, max_val],
-    #              label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
-    #
-    #     if self.y_uncertainty is not None:
-    #         sigma_log = self.y_uncertainty / (self.y_pred * np.log(10))
-    #         weights = 1 / (sigma_log ** 2)
-    #
-    #         h1 = ax1.hist2d(self.y_true, self.y_pred, weights=weights, bins=[log_bins, log_bins],
-    #                         cmap='summer', norm=shared_norm)
-    #     else:
-    #         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-    #                         cmap='summer', norm=shared_norm)
-    #
-    #     ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)')
-    #     ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)')
-    #     ax1.set_title('FOXES Model Performance')
-    #     ax1.legend()
-    #     ax1.grid(True, alpha=0.5)
-    #     ax1.tick_params()
-    #     ax1.set_xscale('log')
-    #     ax1.set_yscale('log')
-    #
-    #     # Add minor ticks for main plot
-    #     ax1.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #     ax1.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #     ax1.tick_params(which='minor')
-    #     ax1.grid(True, which='minor', alpha=0.25, linewidth=0.25, linestyle='--')
-    #
-    #     # for spine in ax1.spines.values():
-    #     #     spine.set_color('white')
-    #
-    #     # Add flare class axes to main plot
-    #     add_flare_class_axes(ax1, min_val, max_val)
-    #
-    #     # Baseline model plot if available
-    #     if self.y_baseline is not None and ax2 is not None:
-    #         h2 = ax2.hist2d(self.y_true, self.y_baseline, bins=[log_bins, log_bins],
-    #                         cmap=sns.color_palette("rocket", as_cmap=True), norm=shared_norm)
-    #
-    #         min_val_baseline = min(min(self.y_true), min(self.y_baseline))
-    #         max_val_baseline = max(max(self.y_true), max(self.y_baseline))
-    #         ax2.plot([min_val_baseline, max_val_baseline], [min_val_baseline, max_val_baseline],
-    #                  label='Perfect Prediction', color='red', linestyle='--', linewidth=2)
-    #
-    #         ax2.set_xlabel('Ground Truth Flux', )
-    #         ax2.set_ylabel('Predicted Flux', )
-    #         ax2.set_title('Baseline Model Performance', )
-    #         ax2.legend()
-    #         ax2.grid(True, alpha=0.3)
-    #         ax2.tick_params()
-    #         ax2.set_xscale('log')
-    #         ax2.set_yscale('log')
-    #
-    #         # Add minor ticks for baseline plot
-    #         ax2.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #         ax2.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-    #         ax2.tick_params(which='minor',)
-    #         ax2.grid(True, which='minor', alpha=0.15, linewidth=0.25)
-    #
-    #         # for spine in ax2.spines.values():
-    #         #     spine.set_color('white')
-    #
-    #         # Add flare class axes to baseline plot
-    #         add_flare_class_axes(ax2, min_val_baseline, max_val_baseline)
-    #
-    #     # Colorbar (use h1[3] or h2[3], they're identical)
-    #     cbar = fig.colorbar(h1[3], ax=[ax1, ax2] if ax2 else ax1, orientation='vertical', pad=.08)
-    #     cbar.ax.yaxis.set_tick_params()
-    #     plt.setp(cbar.ax.yaxis.get_ticklabels())
-    #     cbar.set_label( "Count")
-    #
-    #     #plt.tight_layout()
-    #     plot_path = os.path.join(self.comparison_dir, "regression_comparison.png")
-    #     plt.savefig(plot_path, dpi=500, bbox_inches='tight')
-    #     plt.close()
-    #     print(f"Saved regression comparison plot to {plot_path}")
 
     @staticmethod
     def init_worker(csv_data, baseline_csv_data):
@@ -939,32 +786,105 @@ class SolarFlareEvaluator:
 
 
 
-if __name__ == "__main__":
-    # Example paths - replace with your actual paths
-    vit_csv = "/mnt/data/ML-READY/output/baseline-model.csv"
-    baseline_results_csv = "/mnt/data/ML-READY/output/baseline-model.csv"
-    aia_data = "/mnt/data/ML-READY/AIA/test/"
-    weights_directory = ""
+def resolve_config_variables(config_dict):
+    """Recursively resolve ${variable} references within the config"""
+    variables = {}
+    for key, value in config_dict.items():
+        if isinstance(value, str) and not value.startswith('${'):
+            variables[key] = value
 
-    # Sample timestamps - Fixed the datetime generation
-    start_time = datetime(2023, 8, 5, 20,30,00)
-    end_time = datetime(2023, 8, 5, 23,56,00)
-    interval = timedelta(minutes=1)  # Changed from minutes=60 to hours=1 for clarity
+    def substitute_value(value, variables):
+        if isinstance(value, str):
+            pattern = r'\$\{([^}]+)\}'
+            for match in re.finditer(pattern, value):
+                var_name = match.group(1)
+                if var_name in variables:
+                    value = value.replace(f'${{{var_name}}}', variables[var_name])
+        return value
+
+    def recursive_substitute(obj, variables):
+        if isinstance(obj, dict):
+            return {k: recursive_substitute(v, variables) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [recursive_substitute(item, variables) for item in obj]
+        else:
+            return substitute_value(obj, variables)
+
+    return recursive_substitute(config_dict, variables)
+
+
+def load_evaluation_config(config_path):
+    """Load evaluation configuration from YAML file"""
+    with open(config_path, 'r') as stream:
+        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
+    
+    # Resolve variable substitutions
+    config_data = resolve_config_variables(config_data)
+    return config_data
+
+
+def generate_timestamps(start_time_str, end_time_str, interval_minutes):
+    """Generate list of timestamps for evaluation"""
+    start_time = datetime.fromisoformat(start_time_str)
+    end_time = datetime.fromisoformat(end_time_str)
+    interval = timedelta(minutes=interval_minutes)
+    
     timestamps = []
     current_time = start_time
     while current_time <= end_time:
         timestamps.append(current_time.strftime("%Y-%m-%dT%H:%M:%S"))
         current_time += interval
+    
+    return timestamps
 
-    # Initialize evaluator with baseline comparison
-    evaluator = SolarFlareEvaluator(
-        csv_path=vit_csv,
-        baseline_csv_path=baseline_results_csv,
-        aia_dir=aia_data,
-        weight_path=weights_directory,
-        output_dir="/mnt/data/ML-READY/solar_flare_comparison_results/baseline-model"
+
+def main():
+    """Main function to run evaluation with config file"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run solar flare evaluation')
+    parser.add_argument('-config', type=str, default='evaluation_config.yaml', 
+                       help='Path to evaluation config YAML file')
+    args = parser.parse_args()
+    
+    # Load configuration
+    config = load_evaluation_config(args.config)
+    
+    # Extract parameters from config
+    model_predictions = config['model_predictions']
+    data = config['data']
+    evaluation = config['evaluation']
+    time_range = config['time_range']
+    
+    # Generate timestamps
+    timestamps = generate_timestamps(
+        time_range['start_time'],
+        time_range['end_time'],
+        time_range['interval_minutes']
     )
-
-    # Run complete evaluation with baseline comparison and uncertainties
+    
+    print(f"Loaded evaluation config from: {args.config}")
+    print(f"Main model CSV: {model_predictions['main_model_csv']}")
+    print(f"Baseline CSV: {model_predictions['baseline_csv']}")
+    print(f"AIA directory: {data['aia_dir']}")
+    print(f"Output directory: {evaluation['output_dir']}")
+    print(f"Time range: {time_range['start_time']} to {time_range['end_time']}")
+    print(f"Number of timestamps: {len(timestamps)}")
+    
+    # Initialize evaluator
+    evaluator = SolarFlareEvaluator(
+        csv_path=model_predictions['main_model_csv'],
+        baseline_csv_path=model_predictions['baseline_csv'],
+        aia_dir=data['aia_dir'],
+        weight_path=data['weight_path'],
+        output_dir=evaluation['output_dir']
+    )
+    
+    # Run complete evaluation
+    print("Starting evaluation...")
     evaluator.run_full_evaluation(timestamps=timestamps)
-    #evaluator.create_attention_movie(timestamps)
+    print("Evaluation completed!")
+
+
+if __name__ == "__main__":
+    main()
