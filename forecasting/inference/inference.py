@@ -287,12 +287,6 @@ def load_model_from_config(config_data):
         elif model_type.lower() == 'hybrid' or model_type.lower() == 'hybridirradiancemodel':
             # Try to load with saved hyperparameters first, then fall back to config parameters
             try:
-                model = HybridIrradianceModel.load_from_checkpoint(checkpoint_path)
-            except (TypeError, RuntimeError) as e:
-                print(f"Failed to load with saved hyperparameters: {e}")
-                print("Loading with config parameters...")
-                # Provide required parameters for HybridIrradianceModel
-                # Use the same architecture parameters as training
                 model = HybridIrradianceModel.load_from_checkpoint(
                     checkpoint_path,
                     d_input=len(wavelengths),
@@ -302,6 +296,8 @@ def load_model_from_config(config_data):
                     cnn_dp=config_data.get('megsai', {}).get('cnn_dp', 0.2),
                     loss_func=HuberLoss()
                 )
+            except (TypeError, RuntimeError) as e:
+                print(f"Failed to load with saved hyperparameters: {e}")
         elif model_type.lower() == 'linear' or model_type.lower() == 'linearirradiancemodel':
             # Try to load with saved hyperparameters first, then fall back to config parameters
             try:
@@ -361,11 +357,7 @@ def main():
         return recursive_substitute(config_dict, variables)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-config', type=str, default='config.yaml', required=True, help='Path to config YAML.')
-    parser.add_argument('-input_size', type=int, default=512, help='Input size for the model')
-    parser.add_argument('-patch_size', type=int, default=16, help='Patch size for the model')
-    parser.add_argument('--batch_size', type=int, default=10, help='Batch size for inference')
-    parser.add_argument('--no_weights', action='store_true', help='Skip saving attention weights to speed up')
+    parser.add_argument('-config', type=str, default='inference_config.yaml', required=True, help='Path to config YAML.')
     args = parser.parse_args()
 
     # Load config with variable substitution
@@ -375,14 +367,27 @@ def main():
     config_data = resolve_config_variables(config_data)
     sys.modules['models'] = models
 
+    # Extract model parameters from config with defaults
+    model_params = config_data.get('model_params', {})
+    input_size = model_params.get('input_size', 512)
+    patch_size = model_params.get('patch_size', 16)
+    batch_size = model_params.get('batch_size', 10)
+    no_weights = model_params.get('no_weights', False)
+
+    print(f"Using parameters from config:")
+    print(f"  Input size: {input_size}")
+    print(f"  Patch size: {patch_size}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Skip weights: {no_weights}")
+
     # Load model based on config
     model = load_model_from_config(config_data)
 
     # Check if model supports attention and user wants to save weights
-    save_weights = not args.no_weights and has_attention_weights(model)
+    save_weights = not no_weights and has_attention_weights(model)
 
-    if args.no_weights:
-        print("Skipping attention weight saving (--no_weights flag)")
+    if no_weights:
+        print("Skipping attention weight saving (no_weights=true in config)")
     elif not has_attention_weights(model):
         print(f"Model {type(model).__name__} doesn't support attention weights - skipping weight saving")
     else:
@@ -420,12 +425,12 @@ def main():
     predictions = []
     ground = []
 
-    print(f"Processing {total_samples} samples with batch size {args.batch_size}...")
+    print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
     if config_data['mc']['active'] == "false":
         print("Running inference without MC Dropout")
         for prediction, sxr, weight, idx in evaluate_model_on_dataset(
-                model, dataset, args.batch_size, times, config_data, save_weights, args.input_size, args.patch_size
+                model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
         ):
             # Unnormalize prediction
             pred = unnormalize_sxr(prediction, sxr_norm)
@@ -463,7 +468,7 @@ def main():
         if config_data['mc']['active'] == "false":
             print("Running inference without MC Dropout")
             for prediction, sxr, weight, idx in evaluate_model_on_dataset(
-                    model, dataset, args.batch_size, times, config_data, save_weights, args.input_size, args.patch_size
+                    model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
             ):
                 # Unnormalize prediction
                 pred = unnormalize_sxr(prediction, sxr_norm)
@@ -495,8 +500,8 @@ def main():
 
             print(f"Using batch MC Dropout with {mc_runs} runs per batch")
             mc_generator = evaluate_model_on_dataset_mc_dropout(
-                model, dataset, args.batch_size, times, config_data, save_weights,
-                args.input_size, args.patch_size, runs=mc_runs, sxr_norm=sxr_norm
+                model, dataset, batch_size, times, config_data, save_weights,
+                input_size, patch_size, runs=mc_runs, sxr_norm=sxr_norm
             )
 
             for prediction, sxr, uncertainty, weight, idx in mc_generator:
