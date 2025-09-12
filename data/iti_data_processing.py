@@ -15,8 +15,8 @@ from tqdm import tqdm
 
 # Configuration for all wavelengths to process
 wavelengths = [94, 131, 171, 193, 211, 304]
-base_input_folder = '/mnt/data2/SDO-AIA'
-output_folder = '/mnt/data2/AIA_processed'
+base_input_folder = '/mnt/data/SDO-AIA-flaring'
+output_folder = '/mnt/data/AIA_ITI'
 os.makedirs(output_folder, exist_ok=True)
 
 sdo_norms = {
