@@ -173,9 +173,9 @@ class FlareDownloadProcessor:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download flare events and associated SDO data.')
-    parser.add_argument('--start_date', type=str, default='2017-09-01',
+    parser.add_argument('--start_date', type=str, default='2023-6-15',
                         help='Start date for downloading flare events (YYYY-MM-DD)')
-    parser.add_argument('--end_date', type=str, default='2021-01-01',
+    parser.add_argument('--end_date', type=str, default='2023-07-15',
                         help='End date for downloading flare events (YYYY-MM-DD)')
     parser.add_argument('--chunk_size', type=int, default=2000,
                         help='Number of days per chunk for processing (default: 180)')
