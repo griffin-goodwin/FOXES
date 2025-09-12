@@ -31,9 +31,9 @@ class SolarFlareEvaluator:
         Initialize the solar flare evaluation system with baseline comparison.
 
         Args:
-            csv_path (str): Path to main model prediction results CSV
+            csv_path (str): Path to main model prediction results CSV (optional)
             aia_dir (str): Path to AIA image data directory
-            weight_path (str): Path to main model attention weights directory
+            weight_path (str): Path to main model attention weights directory (optional)
             baseline_csv_path (str): Path to baseline model prediction results CSV
             output_dir (str): Base output directory for results
         """
@@ -43,6 +43,9 @@ class SolarFlareEvaluator:
         self.weight_path = weight_path
         self.baseline_csv_path = baseline_csv_path
         self.output_dir = output_dir
+        
+        # Determine if we're in baseline-only mode
+        self.baseline_only_mode = (csv_path is None or not os.path.exists(csv_path)) and baseline_csv_path is not None
 
         # Create output directory structure
         self.metrics_dir = os.path.join(output_dir, "metrics")
@@ -63,32 +66,57 @@ class SolarFlareEvaluator:
 
     def load_data(self):
         """Load and prepare all required data including baseline"""
-        # Load main model prediction data
-        if self.csv_path and os.path.exists(self.csv_path):
-            self.df = pd.read_csv(self.csv_path)
-            outlier_threshold = 999999 # 0.01
-            self.mask = self.df['predictions'] < outlier_threshold
-            self.df = self.df[self.mask]
-            self.y_true = self.df['groundtruth'].values
-            #add 20% uncertainty to ground truth
-            self.y_true_uncertainty = 0.2 * self.y_true
-            self.y_pred = self.df['predictions'].values
-            if 'uncertainty' in self.df.columns and self.df['uncertainty'] is not None:
-                self.y_uncertainty = self.df['uncertainty'].values
-            else:
-                self.y_uncertainty = None
-            print(f"Loaded main model data with {len(self.df)} records")
-
-        # Load baseline model prediction data
-        if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
-            self.baseline_df = pd.read_csv(self.baseline_csv_path)
-            self.baseline_df = self.baseline_df[self.mask]
-            self.y_baseline = self.baseline_df['predictions'].values
-            if 'uncertainty' in self.baseline_df.columns and self.baseline_df['uncertainty'] is not None:
-                self.y_baseline_uncertainty = self.baseline_df['uncertainty'].values
-            else:
+        if self.baseline_only_mode:
+            # In baseline-only mode, use baseline data as the main data
+            if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
+                self.df = pd.read_csv(self.baseline_csv_path)
+                outlier_threshold = 1 # 0.01
+                self.mask = self.df['predictions'] < outlier_threshold
+                self.df = self.df[self.mask]
+                self.y_true = self.df['groundtruth'].values
+                #add 20% uncertainty to ground truth
+                self.y_true_uncertainty = 0.2 * self.y_true
+                self.y_pred = self.df['predictions'].values
+                if 'uncertainty' in self.df.columns and self.df['uncertainty'] is not None:
+                    self.y_uncertainty = self.df['uncertainty'].values
+                else:
+                    self.y_uncertainty = None
+                print(f"Loaded baseline model data with {len(self.df)} records (baseline-only mode)")
+                
+                # Set baseline data to None since we're using it as main data
+                self.baseline_df = None
+                self.y_baseline = None
                 self.y_baseline_uncertainty = None
-            print(f"Loaded baseline model data with {len(self.baseline_df)} records")
+            else:
+                raise ValueError("Baseline CSV path is required in baseline-only mode")
+        else:
+            # Original behavior for main model + baseline comparison
+            # Load main model prediction data
+            if self.csv_path and os.path.exists(self.csv_path):
+                self.df = pd.read_csv(self.csv_path)
+                outlier_threshold = 999999 # 0.01
+                self.mask = self.df['predictions'] < outlier_threshold
+                self.df = self.df[self.mask]
+                self.y_true = self.df['groundtruth'].values
+                #add 20% uncertainty to ground truth
+                self.y_true_uncertainty = 0.2 * self.y_true
+                self.y_pred = self.df['predictions'].values
+                if 'uncertainty' in self.df.columns and self.df['uncertainty'] is not None:
+                    self.y_uncertainty = self.df['uncertainty'].values
+                else:
+                    self.y_uncertainty = None
+                print(f"Loaded main model data with {len(self.df)} records")
+
+            # Load baseline model prediction data
+            if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
+                self.baseline_df = pd.read_csv(self.baseline_csv_path)
+                self.baseline_df = self.baseline_df[self.mask]
+                self.y_baseline = self.baseline_df['predictions'].values
+                if 'uncertainty' in self.baseline_df.columns and self.baseline_df['uncertainty'] is not None:
+                    self.y_baseline_uncertainty = self.baseline_df['uncertainty'].values
+                else:
+                    self.y_baseline_uncertainty = None
+                print(f"Loaded baseline model data with {len(self.baseline_df)} records")
 
 
     def calculate_metrics(self):
@@ -96,9 +124,10 @@ class SolarFlareEvaluator:
         if self.y_true is None or self.y_pred is None:
             raise ValueError("No prediction data available. Load data first.")
 
-        # Calculate metrics for main model
+        # Calculate metrics for main model (or baseline in baseline-only mode)
+        model_name = 'Baseline' if self.baseline_only_mode else 'ViT'
         main_metrics = {
-            'Model': 'ViT',
+            'Model': model_name,
             'MSE': mean_squared_error(np.log10(self.y_true), np.log10(self.y_pred)),
             'RMSE': np.sqrt(mean_squared_error(np.log10(self.y_true), np.log10(self.y_pred))),
             'MAE': mean_absolute_error(np.log10(self.y_true), np.log10(self.y_pred)),
@@ -133,8 +162,9 @@ class SolarFlareEvaluator:
             y_pred_class = self.y_pred[mask]
 
             # Calculate metrics for this flare class
+            class_model_name = f'{model_name}_{class_name}'
             class_metrics = {
-                'Model': f'ViT_{class_name}',
+                'Model': class_model_name,
                 'MSE': mean_squared_error(np.log10(y_true_class), np.log10(y_pred_class)),
                 'RMSE': np.sqrt(mean_squared_error(np.log10(y_true_class), np.log10(y_pred_class))),
                 'MAE': mean_absolute_error(np.log10(y_true_class), np.log10(y_pred_class)),
@@ -145,8 +175,8 @@ class SolarFlareEvaluator:
 
             flare_class_metrics.append(class_metrics)
 
-            # If baseline exists, calculate baseline metrics for this class too
-            if self.y_baseline is not None:
+            # If baseline exists and we're not in baseline-only mode, calculate baseline metrics for this class too
+            if self.y_baseline is not None and not self.baseline_only_mode:
                 y_baseline_class = self.y_baseline[mask]
 
                 baseline_class_metrics = {
@@ -163,8 +193,8 @@ class SolarFlareEvaluator:
 
         metrics_list = [main_metrics] + flare_class_metrics
 
-        # Calculate metrics for baseline model if available
-        if self.y_baseline is not None:
+        # Calculate metrics for baseline model if available and not in baseline-only mode
+        if self.y_baseline is not None and not self.baseline_only_mode:
             baseline_metrics = {
                 'Model': 'Baseline',
                 'MSE': mean_squared_error(np.log10(self.y_true), np.log10(self.y_baseline)),
@@ -325,7 +355,8 @@ class SolarFlareEvaluator:
         ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)',fontsize=12)
         ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)',fontsize=12)
         ax1.tick_params(labelsize=12)
-        ax1.set_title('FOXES Model Performance with MAE Overlay',fontsize=12)
+        title = 'Baseline Model Performance with MAE Overlay' if self.baseline_only_mode else 'FOXES Model Performance with MAE Overlay'
+        ax1.set_title(title,fontsize=12)
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.5)
         ax1.tick_params()
@@ -365,21 +396,29 @@ class SolarFlareEvaluator:
 
     def load_csv_data(self):
         """Load and prepare CSV data for workers"""
-        # Load main model CSV
-        csv_data = pd.read_csv(self.csv_path)
-        if 'timestamp' in csv_data.columns:
-            csv_data['timestamp'] = pd.to_datetime(csv_data['timestamp'])
-        csv_data['groundtruth_uncertainty'] = 0.2 * csv_data['groundtruth']  # Add 20% uncertainty to ground truth
-        # Load baseline CSV
-        try:
-            if self.baseline_csv_path:
-                baseline_data = pd.read_csv(self.baseline_csv_path)
-                if 'timestamp' in baseline_data.columns:
-                    baseline_data['timestamp'] = pd.to_datetime(baseline_data['timestamp'])
-            else:
-                baseline_data = None
-        except:
+        if self.baseline_only_mode:
+            # In baseline-only mode, use baseline data as main data
+            csv_data = pd.read_csv(self.baseline_csv_path)
+            if 'timestamp' in csv_data.columns:
+                csv_data['timestamp'] = pd.to_datetime(csv_data['timestamp'])
+            csv_data['groundtruth_uncertainty'] = 0.2 * csv_data['groundtruth']  # Add 20% uncertainty to ground truth
             baseline_data = None
+        else:
+            # Load main model CSV
+            csv_data = pd.read_csv(self.csv_path)
+            if 'timestamp' in csv_data.columns:
+                csv_data['timestamp'] = pd.to_datetime(csv_data['timestamp'])
+            csv_data['groundtruth_uncertainty'] = 0.2 * csv_data['groundtruth']  # Add 20% uncertainty to ground truth
+            # Load baseline CSV
+            try:
+                if self.baseline_csv_path:
+                    baseline_data = pd.read_csv(self.baseline_csv_path)
+                    if 'timestamp' in baseline_data.columns:
+                        baseline_data['timestamp'] = pd.to_datetime(baseline_data['timestamp'])
+                else:
+                    baseline_data = None
+            except:
+                baseline_data = None
         return csv_data, baseline_data
 
     def load_aia_image(self, timestamp):
@@ -584,12 +623,14 @@ class SolarFlareEvaluator:
                 #sxr_ax.fill_between(sxr_window['timestamp'], lower_bound, upper_bound,
                                     #alpha=0.3, color="#F78E69")
 
-                # Plot ViT model predictions with uncertainty bands
+                # Plot model predictions with uncertainty bands
+                model_label = 'Baseline Model' if self.baseline_only_mode else 'FOXES Model'
+                model_color = "#94ECBE" if self.baseline_only_mode else "#C0B9DD"
                 vit_prediction_line = sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
-                                                  label='FOXES Model', linewidth=2.5, alpha=1, markersize=5,
-                                                  color="#C0B9DD")
+                                                  label=model_label, linewidth=2.5, alpha=1, markersize=5,
+                                                  color=model_color)
 
-                # Add uncertainty bands for ViT model if available
+                # Add uncertainty bands for model if available
                 if 'uncertainty' in sxr_window.columns and sxr_window['uncertainty'].notna().any():
                     predictions = sxr_window['predictions'].values
                     uncertainties = sxr_window['uncertainty'].values
@@ -602,10 +643,10 @@ class SolarFlareEvaluator:
                     lower_bound = np.maximum(lower_bound, 1e-12)
 
                     sxr_ax.fill_between(sxr_window['timestamp'], lower_bound, upper_bound,
-                                        alpha=0.3, color="#C0B9DD")
+                                        alpha=0.3, color=model_color)
 
-                # Plot baseline predictions with uncertainty bands if available
-                if 'baseline_predictions' in sxr_window.columns and sxr_window[
+                # Plot baseline predictions with uncertainty bands if available and not in baseline-only mode
+                if not self.baseline_only_mode and 'baseline_predictions' in sxr_window.columns and sxr_window[
                     'baseline_predictions'].notna().any():
                     baseline_line = sxr_ax.plot(sxr_window['timestamp'], sxr_window['baseline_predictions'],
                                                 label='Baseline Model', linewidth=1.5, alpha=1, markersize=5,
@@ -633,16 +674,18 @@ class SolarFlareEvaluator:
                                    linewidth=2, alpha=0.4, label='Current Time')
 
                     # Create info text with all available values including uncertainties
+                    model_name = 'Baseline' if self.baseline_only_mode else 'FOXES'
                     info_lines = ["Current Values:",
                                   f"Ground Truth: {sxr_current['groundtruth']:.2e}",
-                                  f"FOXES: {sxr_current['predictions']:.2e}"]
+                                  f"{model_name}: {sxr_current['predictions']:.2e}"]
 
-                    # Add ViT uncertainty if available
+                    # Add model uncertainty if available
                     if sxr_current['uncertainty'] is not None:
-                        info_lines.append(f"ViT σ: {sxr_current['uncertainty']:.2e}")
+                        uncertainty_label = f"{model_name} σ" if self.baseline_only_mode else "ViT σ"
+                        info_lines.append(f"{uncertainty_label}: {sxr_current['uncertainty']:.2e}")
 
-                    # Add baseline prediction if available
-                    if sxr_current['baseline_predictions'] is not None:
+                    # Add baseline prediction if available and not in baseline-only mode
+                    if not self.baseline_only_mode and sxr_current['baseline_predictions'] is not None:
                         info_lines.append(f"Base: {sxr_current['baseline_predictions']:.2e}")
 
                         # Add baseline uncertainty if available
@@ -658,7 +701,8 @@ class SolarFlareEvaluator:
                 sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
                 sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12,)
                 sxr_ax.set_xlabel('Time', fontsize=12)
-                sxr_ax.set_title('FOXES Prediction vs. Ground Truth Comparison', fontsize=12)
+                title = 'Baseline Prediction vs. Ground Truth Comparison' if self.baseline_only_mode else 'FOXES Prediction vs. Ground Truth Comparison'
+                sxr_ax.set_title(title, fontsize=12)
                 sxr_ax.legend(fontsize=8, loc='upper right')
                 legend1 = sxr_ax.legend()
                 # legend1.get_frame().set_facecolor('black')
@@ -871,9 +915,16 @@ def main():
     print(f"Time range: {time_range['start_time']} to {time_range['end_time']}")
     print(f"Number of timestamps: {len(timestamps)}")
     
+    # Check if we're in baseline-only mode
+    main_csv = model_predictions['main_model_csv']
+    if main_csv is None or main_csv == 'null' or not os.path.exists(main_csv):
+        print("Running in baseline-only mode")
+    else:
+        print("Running in comparison mode (main model + baseline)")
+    
     # Initialize evaluator
     evaluator = SolarFlareEvaluator(
-        csv_path=model_predictions['main_model_csv'],
+        csv_path=main_csv if main_csv != 'null' else None,
         baseline_csv_path=model_predictions['baseline_csv'],
         aia_dir=data['aia_dir'],
         weight_path=data['weight_path'],
