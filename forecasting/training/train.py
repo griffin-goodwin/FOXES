@@ -214,59 +214,44 @@ def process_batch(batch_data, sxr_norm, c_threshold, m_threshold, x_threshold):
     }
 
 def get_base_weights(data_loader, sxr_norm):
-    """
-    Calculate base weights based on the number of samples in each class within training data.
-    Classes: quiet (<1e-6), c_class [1e-6, 1e-5), m_class [1e-5, 1e-4), x_class >=1e-4
-    Returns a dict with weights for each class: quiet, c_class, m_class, x_class
-    """
-    print("Calculating base weights...")
+    print("Calculating base weights from DataModule...")
+    
     # Thresholds for SXR classes
     c_threshold = 1e-6
     m_threshold = 1e-5
     x_threshold = 1e-4
 
+    from forecasting.models.vit_patch_model import unnormalize_sxr
+    
     quiet_count = 0
     c_count = 0
     m_count = 0
     x_count = 0
     total = 0
-
-    # Import unnormalize_sxr from the ViT model file or define here if not imported
-    from forecasting.models.vit_patch_model import unnormalize_sxr
-
-    print(f"Dataset length: {len(data_loader)}")
-    print(f"DataLoader length: {len(data_loader)}")
     
-    # Collect all batches first
-    batches = []
-    for batch_idx, batch in enumerate(data_loader):
-        batches.append((batch, batch_idx))
+    # Use the train_dataloader which already exists
+    train_loader = data_loader.train_dataloader()
+    print(f"Processing {len(train_loader)} batches...")
     
-    print(f"Processing {len(batches)} batches using multiprocessing...")
-    
-    # Create partial function with fixed arguments
-    process_func = partial(
-        process_batch, 
-        sxr_norm=sxr_norm,
-        c_threshold=c_threshold,
-        m_threshold=m_threshold,
-        x_threshold=x_threshold
-    )
-    
-    # Use multiprocessing to process batches in parallel
-    num_processes = min(cpu_count(), 4)
-    with Pool(processes=num_processes) as pool:
-        results = pool.map(process_func, batches)
-    
-    # Aggregate results
-    for result in results:
-        total += result['total']
-        quiet_count += result['quiet_count']
-        c_count += result['c_count']
-        m_count += result['m_count']
-        x_count += result['x_count']
-        if result['batch_idx'] % 10 == 0:  # Show progress every 10 batches
-            print(f"Processed batch {result['batch_idx']} of {len(batches)}")
+    for batch_idx, (aia_batch, sxr_batch) in enumerate(train_loader):
+        if batch_idx % 50 == 0:
+            print(f"Processed {batch_idx}/{len(train_loader)} batches...")
+            
+        # Unnormalize the SXR batch
+        sxr_un = unnormalize_sxr(sxr_batch, sxr_norm)
+        sxr_un_flat = sxr_un.view(-1).cpu().numpy()
+        
+        batch_total = len(sxr_un_flat)
+        batch_quiet = ((sxr_un_flat < c_threshold)).sum()
+        batch_c = ((sxr_un_flat >= c_threshold) & (sxr_un_flat < m_threshold)).sum()
+        batch_m = ((sxr_un_flat >= m_threshold) & (sxr_un_flat < x_threshold)).sum()
+        batch_x = ((sxr_un_flat >= x_threshold)).sum()
+        
+        total += batch_total
+        quiet_count += batch_quiet
+        c_count += batch_c
+        m_count += batch_m
+        x_count += batch_x
 
     # Avoid division by zero
     quiet_count = max(quiet_count, 1)
@@ -274,23 +259,19 @@ def get_base_weights(data_loader, sxr_norm):
     m_count = max(m_count, 1)
     x_count = max(x_count, 1)
 
-    # Inverse frequency weighting (more rare = higher weight)
-    quiet_weight = total / quiet_count
-    c_weight = total / c_count
+    # Inverse frequency weighting
+    quiet_weight = total / (quiet_count + c_count)
+    c_weight = total / (quiet_count + c_count)
     m_weight = total / m_count
     x_weight = total / x_count
 
-    # Optionally normalize so quiet_weight = 1.0
-    norm_factor = max(quiet_weight, c_weight, m_weight, x_weight)
-    quiet_weight = quiet_weight / norm_factor
-    c_weight = c_weight / norm_factor
-    m_weight = m_weight / norm_factor
-    x_weight = x_weight / norm_factor
     print("Base weights calculated")
-    print(f"Quiet weight: {quiet_weight}")
-    print(f"C weight: {c_weight}")
-    print(f"M weight: {m_weight}")
-    print(f"X weight: {x_weight}")
+    print(f"Total samples: {total}")
+    print(f"Quiet samples: {quiet_count}, weight: {quiet_weight:.4f}")
+    print(f"C samples: {c_count}, weight: {c_weight:.4f}")
+    print(f"M samples: {m_count}, weight: {m_weight:.4f}")
+    print(f"X samples: {x_count}, weight: {x_weight:.4f}")
+    
     return {
         'quiet': quiet_weight,
         'c_class': c_weight,
@@ -327,7 +308,7 @@ elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
 elif config_data['selected_model'] == 'ViTPatch':
-    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=get_base_weights(data_loader.train_ds, sxr_norm))
+    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=get_base_weights(data_loader, sxr_norm))
 
 elif config_data['selected_model'] == 'FusionViTHybrid':
     # Expect a 'fusion' section in YAML

@@ -4,9 +4,10 @@ base_data_dir: "/mnt/data/ML-READY"
 output_base_dir: "/mnt/data/ML-READY/solar_flare_comparison_results"
 
 # Model prediction files
+# Note: When main_model_csv is None or doesn't exist, the evaluator will run in baseline-only mode
 model_predictions:
-  main_model_csv: "${base_data_dir}/output/baseline-model-complex.csv"
-  baseline_csv: "${base_data_dir}/output/baseline-model.csv"
+  main_model_csv: null  # Set to null for baseline-only mode
+  baseline_csv: "${base_data_dir}/output/baseline-model-complex.csv"
 
 # Data directories
 data:
