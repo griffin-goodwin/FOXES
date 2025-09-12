@@ -82,7 +82,7 @@ class FlareDownloadProcessor:
                 end_time = event['event_endtime'] + time_after_end
                 self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
                                                 start_time.strftime('%Y-%m-%d'),
-                                                end_time.strftime('%Y-%m-%d'), max_workers=16)
+                                                end_time.strftime('%Y-%m-%d'), max_workers=os.cpu_count()-1)
                 processed_dates = set()
                 for d in [start_time + i * timedelta(minutes=1) for i in
                           range((end_time - start_time) // timedelta(minutes=1))]:
@@ -101,28 +101,34 @@ class FlareDownloadProcessor:
             for i, events in enumerate(fl_events.iterrows()):
                 start_time = end_time_fl.iloc[i]
                 end_time = start_time_fl.iloc[i+1] if i + 1 < len(fl_events) else end_time_fl.iloc[-1] + timedelta(minutes=5)
+                #Pass on end time to start time if end time is before start time
+                if end_time < start_time:
+                    end_time = start_time
                 self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
                                                 start_time.strftime('%Y-%m-%d'),
-                                                end_time.strftime('%Y-%m-%d'), max_workers=16)
+                                                end_time.strftime('%Y-%m-%d'), max_workers=os.cpu_count()-1)
                 
                 # Adaptive sampling based on quiet period duration
                 quiet_duration = end_time - start_time
                 if quiet_duration < timedelta(hours=1):
                     # Short quiet period - sample every 10 minutes
-                    sampling_interval = timedelta(minutes=5)
+                    sampling_interval = timedelta(minutes=10)
                 elif quiet_duration < timedelta(days=1):
                     # Medium quiet period - sample every hour
-                    sampling_interval = timedelta(minutes=30)
-                else:
+                    sampling_interval = timedelta(minutes=60)
+                elif quiet_duration < timedelta(days=30):
                     # Long quiet period - sample every 6 hours
-                    sampling_interval = timedelta(hours=1)
+                    sampling_interval = timedelta(hours=6)
+                else:
+                    # Very long quiet period - sample every day
+                    sampling_interval = timedelta(days=1)
                 
                 processed_dates = set()
                 dates_to_process = [start_time + i * sampling_interval for i in
                                    range((end_time - start_time) // sampling_interval)]
                 
                 # Process in smaller batches to avoid overwhelming the server
-                batch_size = 100  # Smaller batches
+                batch_size = 900  # Smaller batches
                 for i in range(0, len(dates_to_process), batch_size):
                     batch = dates_to_process[i:i + batch_size]
                     print(f"Processing batch {i//batch_size + 1}/{(len(dates_to_process) + batch_size - 1)//batch_size} ({len(batch)} dates)")
@@ -144,7 +150,7 @@ class FlareDownloadProcessor:
                                 
                                 # Add small delay between individual downloads
                                 if j < len(batch) - 1:
-                                    time.sleep(1)
+                                    time.sleep(.2)
                                     
                             except Exception as e:
                                 print(f"  ✗ Failed to download data for {d}: {e}")
@@ -167,11 +173,11 @@ class FlareDownloadProcessor:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download flare events and associated SDO data.')
-    parser.add_argument('--start_date', type=str, default='2012-01-01',
+    parser.add_argument('--start_date', type=str, default='2017-09-01',
                         help='Start date for downloading flare events (YYYY-MM-DD)')
-    parser.add_argument('--end_date', type=str, default='2013-01-01',
+    parser.add_argument('--end_date', type=str, default='2021-01-01',
                         help='End date for downloading flare events (YYYY-MM-DD)')
-    parser.add_argument('--chunk_size', type=int, default=180,
+    parser.add_argument('--chunk_size', type=int, default=2000,
                         help='Number of days per chunk for processing (default: 180)')
     parser.add_argument('--download_dir', type=str, default='/mnt/data',
                         help='Directory to save downloaded data (default: /mnt/data)')
