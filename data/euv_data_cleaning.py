@@ -16,7 +16,7 @@ from astropy.io import fits
 
 # Configuration for all wavelengths to process
 wavelengths = [94, 131, 171, 193, 211, 304]
-base_input_folder = '/mnt/data2/SDO-AIA-flaring'
+base_input_folder = '/mnt/data/SDO-AIA-flaring'
 
 aia_files = get_intersecting_files(base_input_folder, wavelengths)
 
@@ -26,6 +26,9 @@ def process_fits_file(file_path):
         with fits.open(file_path) as hdu:
             header = hdu[1].header
             date_obs = pd.to_datetime(header['DATE-OBS'])
+            # Ensure timezone-naive datetime
+            if date_obs.tz is not None:
+                date_obs = date_obs.tz_localize(None)
             wavelength = header['WAVELNTH']
             filename = pd.to_datetime(os.path.basename(file_path).split('.')[0])
             return {'DATE-OBS': date_obs, 'WAVELNTH': wavelength, 'FILENAME': filename}
@@ -43,9 +46,8 @@ results = [r for r in results if r is not None]
 
 # Convert to DataFrame
 aia_header = pd.DataFrame(results)
-
-# Convert to timezone-naive
-aia_header['DATE-OBS'] = aia_header['DATE-OBS'].dt.tz_localize(None)
+# Ensure DATE-OBS is datetime (already timezone-naive from processing)
+aia_header['DATE-OBS'] = pd.to_datetime(aia_header['DATE-OBS'])
 
 # add a column for date difference between DATE-OBS and FILENAME
 aia_header['DATE_DIFF'] = (
@@ -53,16 +55,16 @@ aia_header['DATE_DIFF'] = (
 
 # remove rows where DATE_DIFF is greater than plus or minus 60 seconds in a list
 files_to_remove = aia_header[(aia_header['DATE_DIFF'] <= -60) | (aia_header['DATE_DIFF'] >= 60)]
-
+print(len(files_to_remove))
 # Loop through each wavelength
 for wavelength in wavelengths:
-    print(f"\nProcessing wavelength: {wavelength}")
+    #print(f"\nProcessing wavelength: {wavelength}")
     for names in files_to_remove['FILENAME'].to_numpy():
         # Construct file path
         filename = pd.to_datetime(names).strftime('%Y-%m-%dT%H:%M:%S') + ".fits"
         file_path = os.path.join(base_input_folder, f"{wavelength}/{filename}")
         # Destination path
-        destination_folder = os.path.join("/mnt/data2/SDO-AIA_bad/removed_files", str(wavelength))
+        destination_folder = os.path.join("/mnt/data/SDO-AIA_bad", str(wavelength))
         os.makedirs(destination_folder, exist_ok=True)
         # Move or report missing
         if os.path.exists(file_path):
