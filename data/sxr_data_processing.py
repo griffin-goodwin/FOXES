@@ -194,9 +194,9 @@ class SXRDataProcessor:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Preprocess GOES X-ray data.')
-    parser.add_argument('--data_dir', type=str, default='/mnt/data/GOES-flaring',
+    parser.add_argument('--data_dir', type=str, default='/mnt/data/NEW-FLARE/GOES-flaring',
                         help='Directory where downloaded GOES data is stored.')
-    parser.add_argument('--output_dir', type=str, default='/mnt/data/GOES-flaring/combined',
+    parser.add_argument('--output_dir', type=str, default='/mnt/data/NEW-FLARE/combined',
                         help='Directory where combined GOES data will be saved.')
     args = parser.parse_args()
     
