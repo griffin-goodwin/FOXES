@@ -15,18 +15,34 @@ warnings.filterwarnings('ignore')
 
 def process_timestamp(args):
     """
-    Process a single timestamp: load wavelength data, apply normalization,
-    and save to disk along with SXR data.
+    Process a single timestamp: find the most recent available GOES data,
+    extract SXR data, and save to disk.
     """
-    timestamp, goes_data = args
+    timestamp, goes_data_dict = args
     try:
-        # Get SXR data for this timestamp
-        sxr = goes_data[goes_data['time'] == pd.to_datetime(timestamp)]
-        sxr_a = sxr['xrsa_flux'].values[0] if not sxr.empty else None
-        sxr_b = sxr['xrsb_flux'].values[0] if not sxr.empty else None
+        # Convert timestamp to datetime for comparison
+        target_time = pd.to_datetime(timestamp)
+        
+        # Try to find GOES data for this timestamp, starting with the most recent instrument
+        sxr_a = None
+        sxr_b = None
+        used_instrument = None
+        
+        # Sort instruments by G-number (most recent first)
+        for g_number in sorted(goes_data_dict.keys(), reverse=True):
+            goes_data = goes_data_dict[g_number]
+            
+            # Look for exact match first
+            exact_match = goes_data[goes_data['time'] == target_time]
+            if not exact_match.empty:
+                sxr_a = exact_match['xrsa_flux'].values[0]
+                sxr_b = exact_match['xrsb_flux'].values[0]
+                used_instrument = f"GOES-{g_number}"
+                break
+            
 
-        if sxr_a is None or sxr_b is None:
-            return (timestamp, False, f"Missing SXR data for timestamp {timestamp}")
+        if sxr_a is None or sxr_b is None or np.isnan(sxr_a) or np.isnan(sxr_b):
+            return (timestamp, False, f"No valid SXR data found for timestamp {timestamp}")
 
         # Initialize arrays
         sxr_a_data = np.zeros(1, dtype=np.float32)
@@ -35,10 +51,10 @@ def process_timestamp(args):
         sxr_b_data[0] = sxr_b
 
         # Save data to disk
-        np.save(f"/mnt/data2/ML-Ready/GOES-18-SXR-A/{timestamp}.npy", sxr_a_data)
-        np.save(f"/mnt/data2/ML-Ready/GOES-18-SXR-B/{timestamp}.npy", sxr_b_data)
+        np.save(f"/mnt/data/NEW-FLARE/GOES-18-SXR-A/{timestamp}.npy", sxr_a_data)
+        np.save(f"/mnt/data/NEW-FLARE/GOES-18-SXR-B/{timestamp}.npy", sxr_b_data)
 
-        return (timestamp, True, "Success")
+        return (timestamp, True, f"Success using {used_instrument}")
 
     except Exception as e:
         return (timestamp, False, f"Error processing timestamp {timestamp}: {e}")
@@ -52,10 +68,13 @@ def update_progress(result):
     if success:
         successful_count += 1
         pbar.set_postfix(success=successful_count, failed=failed_count)
+        # Only show success message if it includes instrument info
+        if "using" in message:
+            tqdm.write(f"Success: {timestamp} - {message}")
     else:
         failed_count += 1
         pbar.set_postfix(success=successful_count, failed=failed_count)
-        tqdm.write(f"Failed: {message}")
+        tqdm.write(f"Failed: {timestamp} - {message}")
 
     pbar.update(1)
 
@@ -63,10 +82,10 @@ def update_progress(result):
 def main():
     global pbar, successful_count, failed_count
 
-    # Load GOES data
-    print("Loading GOES data...")
+    # Load GOES data from multiple instruments
+    print("Loading GOES data from multiple instruments...")
     # Directory containing GOES files
-    directory = "/mnt/data2/goes_combined"
+    directory = "/mnt/data/NEW-FLARE/combined"
 
     # Regex to match filenames and extract G-number
     pattern = re.compile(r"combined_g(\d+)_avg1m_\d+_\d+\.csv")
@@ -82,22 +101,43 @@ def main():
     if not goes_files:
         raise FileNotFoundError("No GOES CSV files found in directory.")
 
-    # Select file with highest G-number
-    goes_files.sort(reverse=True)  # Highest G-number first
-    _, selected_file = goes_files[0]
-
-    goes = pd.read_csv(os.path.join(directory, selected_file))
-    goes['time'] = pd.to_datetime(goes['time'], format='%Y-%m-%d %H:%M:%S')
+    # Load all available GOES instruments
+    goes_data_dict = {}
+    print(f"Found {len(goes_files)} GOES instrument files:")
+    
+    for g_number, filename in sorted(goes_files, reverse=True):  # Most recent first
+        print(f"  Loading GOES-{g_number} from {filename}")
+        try:
+            goes_df = pd.read_csv(os.path.join(directory, filename))
+            goes_df['time'] = pd.to_datetime(goes_df['time'], format='%Y-%m-%d %H:%M:%S')
+            goes_data_dict[g_number] = goes_df
+            print(f"    Loaded {len(goes_df)} records from {goes_df['time'].min()} to {goes_df['time'].max()}")
+        except Exception as e:
+            print(f"    Warning: Failed to load {filename}: {e}")
+            continue
+    
+    if not goes_data_dict:
+        raise FileNotFoundError("No valid GOES data files could be loaded.")
+    
+    print(f"Successfully loaded {len(goes_data_dict)} GOES instruments: {sorted(goes_data_dict.keys())}")
+    
+    # Analyze timestamp coverage across instruments
+    print("\nAnalyzing timestamp coverage...")
+    for g_number in sorted(goes_data_dict.keys(), reverse=True):
+        goes_data = goes_data_dict[g_number]
+        time_range = f"{goes_data['time'].min()} to {goes_data['time'].max()}"
+        print(f"  GOES-{g_number}: {len(goes_data)} records, {time_range}")
 
     # Create output directories if they don't exist
-    os.makedirs("/mnt/data2/ML-Ready/GOES-18-SXR-A", exist_ok=True)
-    os.makedirs("/mnt/data2/ML-Ready/GOES-18-SXR-B", exist_ok=True)
+    os.makedirs("/mnt/data/NEW-FLARE/GOES-18-SXR-A", exist_ok=True)
+    os.makedirs("/mnt/data/NEW-FLARE/GOES-18-SXR-B", exist_ok=True)
 
-    aia_files = sorted(glob.glob('/mnt/data2/AIA_processed/*.npy', recursive=True))
+    aia_files = sorted(glob.glob('/mnt/data/NEW-FLARE/SDO-AIA-flaring/AIA_processed/*.npy', recursive=True))
+    #print(aia_files)
     aia_files_split = []
     for file in aia_files:
-        aia_files_split.append(file.split('/')[4].split('.')[0])
-
+        aia_files_split.append(file.split('/')[-1].split('.')[0])
+    #print(aia_files_split)
     common_timestamps = [
         datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
         for date_str in aia_files_split]
@@ -111,8 +151,8 @@ def main():
     successful_count = 0
     failed_count = 0
 
-    # Create arguments for multiprocessing (timestamp, goes_data pairs)
-    args_list = [(timestamp, goes) for timestamp in common_timestamps]
+    # Create arguments for multiprocessing (timestamp, goes_data_dict pairs)
+    args_list = [(timestamp, goes_data_dict) for timestamp in common_timestamps]
 
     # Start timing
     start_time = time.time()
@@ -146,9 +186,14 @@ def main():
     print(f"Successfully processed: {successful_count}/{len(common_timestamps)} timestamps")
     print(f"Failed processes: {failed_count}")
     print(f"Processing rate: {len(common_timestamps) / total_time:.2f} timestamps/second")
+    print(f"Available GOES instruments: {sorted(goes_data_dict.keys())}")
 
     if failed_count > 0:
         print(f"\n{failed_count} timestamps failed processing (see messages above)")
+        print("This may be due to:")
+        print("  - Timestamps outside the coverage range of all GOES instruments")
+        print("  - Missing or invalid SXR data in the GOES files")
+        print("  - Time gaps between different GOES instruments")
 
 
 if __name__ == "__main__":
