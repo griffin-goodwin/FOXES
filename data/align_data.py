@@ -13,83 +13,15 @@ import re
 warnings.filterwarnings('ignore')
 
 
-def process_timestamp(args):
+def load_and_prepare_goes_data(directory):
     """
-    Process a single timestamp: find the most recent available GOES data,
-    extract SXR data, and save to disk.
+    Load all GOES data and prepare it for efficient lookups.
     """
-    timestamp, goes_data_dict = args
-    try:
-        # Convert timestamp to datetime for comparison
-        target_time = pd.to_datetime(timestamp)
-        
-        # Try to find GOES data for this timestamp, starting with the most recent instrument
-        sxr_a = None
-        sxr_b = None
-        used_instrument = None
-        
-        # Sort instruments by G-number (most recent first)
-        for g_number in sorted(goes_data_dict.keys(), reverse=True):
-            goes_data = goes_data_dict[g_number]
-            
-            # Look for exact match first
-            exact_match = goes_data[goes_data['time'] == target_time]
-            if not exact_match.empty:
-                sxr_a = exact_match['xrsa_flux'].values[0]
-                sxr_b = exact_match['xrsb_flux'].values[0]
-                used_instrument = f"GOES-{g_number}"
-                break
-            
-
-        if sxr_a is None or sxr_b is None or np.isnan(sxr_a) or np.isnan(sxr_b):
-            return (timestamp, False, f"No valid SXR data found for timestamp {timestamp}")
-
-        # Initialize arrays
-        sxr_a_data = np.zeros(1, dtype=np.float32)
-        sxr_b_data = np.zeros(1, dtype=np.float32)
-        sxr_a_data[0] = sxr_a
-        sxr_b_data[0] = sxr_b
-
-        # Save data to disk
-        np.save(f"/mnt/data/NEW-FLARE/GOES-18-SXR-A/{timestamp}.npy", sxr_a_data)
-        np.save(f"/mnt/data/NEW-FLARE/GOES-18-SXR-B/{timestamp}.npy", sxr_b_data)
-
-        return (timestamp, True, f"Success using {used_instrument}")
-
-    except Exception as e:
-        return (timestamp, False, f"Error processing timestamp {timestamp}: {e}")
-
-
-def update_progress(result):
-    """Callback function to update progress bar"""
-    global pbar, successful_count, failed_count
-    timestamp, success, message = result
-
-    if success:
-        successful_count += 1
-        pbar.set_postfix(success=successful_count, failed=failed_count)
-        # Only show success message if it includes instrument info
-        if "using" in message:
-            tqdm.write(f"Success: {timestamp} - {message}")
-    else:
-        failed_count += 1
-        pbar.set_postfix(success=successful_count, failed=failed_count)
-        tqdm.write(f"Failed: {timestamp} - {message}")
-
-    pbar.update(1)
-
-
-def main():
-    global pbar, successful_count, failed_count
-
-    # Load GOES data from multiple instruments
     print("Loading GOES data from multiple instruments...")
-    # Directory containing GOES files
-    directory = "/mnt/data/NEW-FLARE/combined"
-
+    
     # Regex to match filenames and extract G-number
     pattern = re.compile(r"combined_g(\d+)_avg1m_\d+_\d+\.csv")
-
+    
     # Find all files matching the pattern and extract G-numbers
     goes_files = []
     for fname in os.listdir(directory):
@@ -97,10 +29,10 @@ def main():
         if match:
             g_number = int(match.group(1))
             goes_files.append((g_number, fname))
-
+    
     if not goes_files:
         raise FileNotFoundError("No GOES CSV files found in directory.")
-
+    
     # Load all available GOES instruments
     goes_data_dict = {}
     print(f"Found {len(goes_files)} GOES instrument files:")
@@ -110,8 +42,12 @@ def main():
         try:
             goes_df = pd.read_csv(os.path.join(directory, filename))
             goes_df['time'] = pd.to_datetime(goes_df['time'], format='%Y-%m-%d %H:%M:%S')
+            
+            goes_df.set_index('time', inplace=True)
+            goes_df.sort_index(inplace=True)  # Ensure sorted for faster lookups
+            
             goes_data_dict[g_number] = goes_df
-            print(f"    Loaded {len(goes_df)} records from {goes_df['time'].min()} to {goes_df['time'].max()}")
+            print(f"    Loaded {len(goes_df)} records from {goes_df.index.min()} to {goes_df.index.max()}")
         except Exception as e:
             print(f"    Warning: Failed to load {filename}: {e}")
             continue
@@ -125,76 +61,206 @@ def main():
     print("\nAnalyzing timestamp coverage...")
     for g_number in sorted(goes_data_dict.keys(), reverse=True):
         goes_data = goes_data_dict[g_number]
-        time_range = f"{goes_data['time'].min()} to {goes_data['time'].max()}"
+        time_range = f"{goes_data.index.min()} to {goes_data.index.max()}"
         print(f"  GOES-{g_number}: {len(goes_data)} records, {time_range}")
+    
+    return goes_data_dict
 
-    # Create output directories if they don't exist
-    os.makedirs("/mnt/data/NEW-FLARE/GOES-18-SXR-A", exist_ok=True)
-    os.makedirs("/mnt/data/NEW-FLARE/GOES-18-SXR-B", exist_ok=True)
 
-    aia_files = sorted(glob.glob('/mnt/data/NEW-FLARE/SDO-AIA-flaring/AIA_processed/*.npy', recursive=True))
-    #print(aia_files)
-    aia_files_split = []
-    for file in aia_files:
-        aia_files_split.append(file.split('/')[-1].split('.')[0])
-    #print(aia_files_split)
-    common_timestamps = [
-        datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
-        for date_str in aia_files_split]
+def create_combined_lookup_table(goes_data_dict, target_timestamps):
+    """
+    Create a single lookup table with the best available data for each timestamp.
+    This eliminates the need to search through multiple DataFrames during processing.
+    """
+    print("Creating optimized lookup table...")
+    
+    target_times = pd.to_datetime(target_timestamps)
+    lookup_data = []
+    
+    # For each target timestamp, find the best available data
+    for target_time in tqdm(target_times, desc="Building lookup table"):
+        # Try instruments in priority order (most recent first)
+        for g_number in sorted(goes_data_dict.keys(), reverse=True):
+            goes_data = goes_data_dict[g_number]
+            
+            if target_time in goes_data.index:
+                row = goes_data.loc[target_time]
+                sxr_a = row['xrsa_flux']
+                sxr_b = row['xrsb_flux']
+                
+                # Check if data is valid
+                if not (pd.isna(sxr_b)):
+                    lookup_data.append({
+                        'timestamp': target_time.strftime('%Y-%m-%dT%H:%M:%S'),
+                        'sxr_a': float(sxr_a),
+                        'sxr_b': float(sxr_b),
+                        'instrument': f"GOES-{g_number}"
+                    })
+                    break
+    
+    print(f"Found valid data for {len(lookup_data)}/{len(target_timestamps)} timestamps")
+    return lookup_data
 
-    # Use all available CPU cores
-    num_processes = cpu_count()
-    print(f"Using {num_processes} CPU cores for processing")
-    print(f"Processing {len(common_timestamps)} timestamps...")
 
-    # Initialize global counters for progress tracking
+def process_batch(batch_data):
+    """
+    Process a batch of timestamps efficiently.
+    This is much more efficient than processing one timestamp per process.
+    """
     successful_count = 0
     failed_count = 0
+    results = []
+    
+    for data in batch_data:
+        try:
+            timestamp = data['timestamp']
+            sxr_a = data['sxr_a']
+            sxr_b = data['sxr_b']
+            instrument = data['instrument']
+            
+            # Create arrays
+            sxr_a_data = np.array([sxr_a], dtype=np.float32)
+            sxr_b_data = np.array([sxr_b], dtype=np.float32)
+            
+            # Save data to disk
+            np.save(f"/mnt/data/GOES-flaring/GOES-SXR-A/{timestamp}.npy", sxr_a_data)
+            np.save(f"/mnt/data/GOES-flaring/GOES-SXR-B/{timestamp}.npy", sxr_b_data)
+            
+            successful_count += 1
+            results.append((timestamp, True, f"Success using {instrument}"))
+            
+        except Exception as e:
+            failed_count += 1
+            results.append((timestamp, False, f"Error processing timestamp {timestamp}: {e}"))
+    
+    return results, successful_count, failed_count
 
-    # Create arguments for multiprocessing (timestamp, goes_data_dict pairs)
-    args_list = [(timestamp, goes_data_dict) for timestamp in common_timestamps]
 
-    # Start timing
+def split_into_batches(data, batch_size):
+    """Split data into batches for parallel processing."""
+    for i in range(0, len(data), batch_size):
+        yield data[i:i + batch_size]
+
+
+def main():
+    # Directory containing GOES files
+    directory = "/mnt/data/GOES-flaring/combined"
+    
+    # Make output directories if they don't exist
+    os.makedirs("/mnt/data/GOES-flaring/GOES-SXR-A", exist_ok=True)
+    os.makedirs("/mnt/data/GOES-flaring/GOES-SXR-B", exist_ok=True)
+    
+    # Load and prepare GOES data with optimizations
+    goes_data_dict = load_and_prepare_goes_data(directory)
+    
+    # Get target timestamps from AIA files
+    print("Finding target timestamps from AIA files...")
+    aia_files = sorted(glob.glob('/mnt/data/AIA_ITI/*.npy', recursive=True))
+    aia_files_split = [file.split('/')[-1].split('.')[0] for file in aia_files]
+    common_timestamps = [
+        datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
+        for date_str in aia_files_split
+    ]
+    
+    print(f"Found {len(common_timestamps)} target timestamps")
+    
+    # Create optimized lookup table
+    lookup_data = create_combined_lookup_table(goes_data_dict, common_timestamps)
+    
+    if not lookup_data:
+        print("No valid data found for any timestamps!")
+        return
+    
+    # Start timing the processing phase
     start_time = time.time()
-
-    # Create progress bar
-    pbar = tqdm(total=len(common_timestamps), desc="Processing timestamps",
-                unit="timestamp", dynamic_ncols=True)
-
-    # Process timestamps in parallel with progress tracking
-    with Pool(processes=num_processes) as pool:
-        # Use map with callback for real-time progress updates
-        results = []
-        for args in args_list:
-            result = pool.apply_async(process_timestamp, (args,), callback=update_progress)
-            results.append(result)
-
-        # Wait for all processes to complete
-        for result in results:
-            result.wait()
-
-    # Close progress bar
-    pbar.close()
-
+    
+    # Determine optimal batch size and number of processes
+    num_processes = min(cpu_count(), max(1, len(lookup_data) // 100))  # Don't create too many processes
+    batch_size = max(1, len(lookup_data) // (num_processes * 4))  # 4 batches per process
+    
+    print(f"Processing {len(lookup_data)} valid timestamps...")
+    print(f"Using {num_processes} processes with batch size {batch_size}")
+    
+    # Split data into batches
+    batches = list(split_into_batches(lookup_data, batch_size))
+    
+    # Process batches in parallel
+    total_successful = 0
+    total_failed = 0
+    
+    if num_processes == 1:
+        # Single-threaded processing for small datasets
+        pbar = tqdm(batches, desc="Processing batches")
+        for batch in pbar:
+            results, successful, failed = process_batch(batch)
+            total_successful += successful
+            total_failed += failed
+            pbar.set_postfix(success=total_successful, failed=total_failed)
+    else:
+        # Multi-threaded processing
+        with Pool(processes=num_processes) as pool:
+            # Process all batches
+            results = []
+            for batch in tqdm(batches, desc="Submitting batches"):
+                result = pool.apply_async(process_batch, (batch,))
+                results.append(result)
+            
+            # Collect results with progress bar
+            pbar = tqdm(total=len(results), desc="Processing batches")
+            for result in results:
+                batch_results, successful, failed = result.get()
+                total_successful += successful
+                total_failed += failed
+                pbar.set_postfix(success=total_successful, failed=total_failed)
+                pbar.update(1)
+            pbar.close()
+    
     # Calculate statistics
     end_time = time.time()
     total_time = end_time - start_time
-
+    
     print(f"\nProcessing complete!")
     print(f"Total time: {total_time:.2f} seconds")
-    print(f"Average time per timestamp: {total_time / len(common_timestamps):.2f} seconds")
-    print(f"Successfully processed: {successful_count}/{len(common_timestamps)} timestamps")
-    print(f"Failed processes: {failed_count}")
-    print(f"Processing rate: {len(common_timestamps) / total_time:.2f} timestamps/second")
+    print(f"Average time per timestamp: {total_time / len(lookup_data):.4f} seconds")
+    print(f"Successfully processed: {total_successful}/{len(lookup_data)} timestamps")
+    print(f"Failed processes: {total_failed}")
+    print(f"Processing rate: {len(lookup_data) / total_time:.2f} timestamps/second")
     print(f"Available GOES instruments: {sorted(goes_data_dict.keys())}")
-
-    if failed_count > 0:
-        print(f"\n{failed_count} timestamps failed processing (see messages above)")
+    
+    # Report on timestamps that couldn't be processed
+    missing_count = len(common_timestamps) - len(lookup_data)
+    if missing_count > 0:
+        print(f"\n{missing_count} timestamps had no valid GOES data available")
         print("This may be due to:")
         print("  - Timestamps outside the coverage range of all GOES instruments")
         print("  - Missing or invalid SXR data in the GOES files")
         print("  - Time gaps between different GOES instruments")
 
+    # For AIA data that has missing GOES data, we will move the file from the AIA_ITI directory to the AIA_ITI_MISSING directory
+    print(f"\nChecking for AIA files with missing GOES data...")
+    os.makedirs("/mnt/data/AIA_ITI_MISSING", exist_ok=True)
+    
+    # Create a set of timestamps that have valid GOES data for faster lookup
+    valid_timestamps = {data['timestamp'] for data in lookup_data}
+    
+    moved_count = 0
+    for file in aia_files:
+        # Extract timestamp from filename
+        filename = file.split('/')[-1].split('.')[0]
+        timestamp = datetime.fromisoformat(filename).strftime('%Y-%m-%dT%H:%M:%S')
+        
+        if timestamp not in valid_timestamps:
+            try:
+                target_path = f"/mnt/data/AIA_ITI_MISSING/{file.split('/')[-1]}"
+                os.rename(file, target_path)
+                moved_count += 1
+                print(f"Moved {file} to AIA_ITI_MISSING directory")
+            except Exception as e:
+                print(f"Failed to move {file}: {e}")
+    
+    print(f"Moved {moved_count} files to AIA_ITI_MISSING directory")
+
+    print("Done")
 
 if __name__ == "__main__":
     main()
