@@ -12,26 +12,53 @@ import re
 
 warnings.filterwarnings('ignore')
 
+# =============================================================================
+# CONFIGURATION - Change these paths as needed
+# =============================================================================
+# 
+# To change directories, simply modify the variables below:
+# - All paths are relative to your system
+# - Directories will be created automatically if they don't exist
+# - Use absolute paths for best results
+#
+# =============================================================================
 
-def load_and_prepare_goes_data(directory):
+# Input directories
+GOES_DATA_DIR = "/mnt/data/NEW-FLARE/combined"  # Directory containing GOES CSV files
+AIA_PROCESSED_DIR = "/mnt/data/NEW-FLARE/AIA_processed"  # Directory with processed AIA files
+
+# Output directories
+OUTPUT_SXR_A_DIR = "/mnt/data/NEW-FLARE/GOES-SXR-A"  # Output directory for SXR-A data
+OUTPUT_SXR_B_DIR = "/mnt/data/NEW-FLARE/GOES-SXR-B"  # Output directory for SXR-B data
+AIA_MISSING_DIR = "/mnt/data/NEW-FLARE/AIA_ITI_MISSING"  # Directory for AIA files with missing GOES data
+
+# Processing configuration
+BATCH_SIZE_MULTIPLIER = 4  # Number of batches per process (adjust for performance)
+MIN_BATCH_SIZE = 1  # Minimum batch size
+MAX_PROCESSES = None  # Maximum number of processes (None = use all CPU cores)
+
+# =============================================================================
+
+
+def load_and_prepare_goes_data(goes_data_dir):
     """
     Load all GOES data and prepare it for efficient lookups.
     """
-    print("Loading GOES data from multiple instruments...")
+    print(f"Loading GOES data from: {goes_data_dir}")
     
     # Regex to match filenames and extract G-number
     pattern = re.compile(r"combined_g(\d+)_avg1m_\d+_\d+\.csv")
     
     # Find all files matching the pattern and extract G-numbers
     goes_files = []
-    for fname in os.listdir(directory):
+    for fname in os.listdir(goes_data_dir):
         match = pattern.match(fname)
         if match:
             g_number = int(match.group(1))
             goes_files.append((g_number, fname))
     
     if not goes_files:
-        raise FileNotFoundError("No GOES CSV files found in directory.")
+        raise FileNotFoundError(f"No GOES CSV files found in directory: {goes_data_dir}")
     
     # Load all available GOES instruments
     goes_data_dict = {}
@@ -40,7 +67,7 @@ def load_and_prepare_goes_data(directory):
     for g_number, filename in sorted(goes_files, reverse=True):  # Most recent first
         print(f"  Loading GOES-{g_number} from {filename}")
         try:
-            goes_df = pd.read_csv(os.path.join(directory, filename))
+            goes_df = pd.read_csv(os.path.join(goes_data_dir, filename))
             goes_df['time'] = pd.to_datetime(goes_df['time'], format='%Y-%m-%d %H:%M:%S')
             
             goes_df.set_index('time', inplace=True)
@@ -122,9 +149,9 @@ def process_batch(batch_data):
             sxr_a_data = np.array([sxr_a], dtype=np.float32)
             sxr_b_data = np.array([sxr_b], dtype=np.float32)
             
-            # Save data to disk
-            np.save(f"/mnt/data/GOES-flaring/GOES-SXR-A/{timestamp}.npy", sxr_a_data)
-            np.save(f"/mnt/data/GOES-flaring/GOES-SXR-B/{timestamp}.npy", sxr_b_data)
+            # Save data to disk using configured directories
+            np.save(f"{OUTPUT_SXR_A_DIR}/{timestamp}.npy", sxr_a_data)
+            np.save(f"{OUTPUT_SXR_B_DIR}/{timestamp}.npy", sxr_b_data)
             
             successful_count += 1
             results.append((timestamp, True, f"Success using {instrument}"))
@@ -143,19 +170,27 @@ def split_into_batches(data, batch_size):
 
 
 def main():
-    # Directory containing GOES files
-    directory = "/mnt/data/GOES-flaring/combined"
+    print("=" * 60)
+    print("GOES Data Alignment Tool")
+    print("=" * 60)
+    print(f"GOES data directory: {GOES_DATA_DIR}")
+    print(f"AIA processed directory: {AIA_PROCESSED_DIR}")
+    print(f"Output SXR-A directory: {OUTPUT_SXR_A_DIR}")
+    print(f"Output SXR-B directory: {OUTPUT_SXR_B_DIR}")
+    print(f"AIA missing directory: {AIA_MISSING_DIR}")
+    print("=" * 60)
     
     # Make output directories if they don't exist
-    os.makedirs("/mnt/data/GOES-flaring/GOES-SXR-A", exist_ok=True)
-    os.makedirs("/mnt/data/GOES-flaring/GOES-SXR-B", exist_ok=True)
+    os.makedirs(OUTPUT_SXR_A_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_SXR_B_DIR, exist_ok=True)
+    os.makedirs(AIA_MISSING_DIR, exist_ok=True)
     
     # Load and prepare GOES data with optimizations
-    goes_data_dict = load_and_prepare_goes_data(directory)
+    goes_data_dict = load_and_prepare_goes_data(GOES_DATA_DIR)
     
     # Get target timestamps from AIA files
-    print("Finding target timestamps from AIA files...")
-    aia_files = sorted(glob.glob('/mnt/data/AIA_ITI/*.npy', recursive=True))
+    print(f"\nFinding target timestamps from AIA files in: {AIA_PROCESSED_DIR}")
+    aia_files = sorted(glob.glob(f"{AIA_PROCESSED_DIR}/*.npy", recursive=True))
     aia_files_split = [file.split('/')[-1].split('.')[0] for file in aia_files]
     common_timestamps = [
         datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
@@ -175,10 +210,11 @@ def main():
     start_time = time.time()
     
     # Determine optimal batch size and number of processes
-    num_processes = min(cpu_count(), max(1, len(lookup_data) // 100))  # Don't create too many processes
-    batch_size = max(1, len(lookup_data) // (num_processes * 4))  # 4 batches per process
+    max_procs = MAX_PROCESSES if MAX_PROCESSES is not None else cpu_count()
+    num_processes = min(max_procs, max(1, len(lookup_data) // 100))  # Don't create too many processes
+    batch_size = max(MIN_BATCH_SIZE, len(lookup_data) // (num_processes * BATCH_SIZE_MULTIPLIER))
     
-    print(f"Processing {len(lookup_data)} valid timestamps...")
+    print(f"\nProcessing {len(lookup_data)} valid timestamps...")
     print(f"Using {num_processes} processes with batch size {batch_size}")
     
     # Split data into batches
@@ -219,7 +255,9 @@ def main():
     end_time = time.time()
     total_time = end_time - start_time
     
-    print(f"\nProcessing complete!")
+    print(f"\n" + "=" * 60)
+    print(f"PROCESSING COMPLETE!")
+    print(f"=" * 60)
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per timestamp: {total_time / len(lookup_data):.4f} seconds")
     print(f"Successfully processed: {total_successful}/{len(lookup_data)} timestamps")
@@ -236,9 +274,9 @@ def main():
         print("  - Missing or invalid SXR data in the GOES files")
         print("  - Time gaps between different GOES instruments")
 
-    # For AIA data that has missing GOES data, we will move the file from the AIA_ITI directory to the AIA_ITI_MISSING directory
+    # For AIA data that has missing GOES data, move files to missing directory
     print(f"\nChecking for AIA files with missing GOES data...")
-    os.makedirs("/mnt/data/AIA_ITI_MISSING", exist_ok=True)
+    print(f"Moving files with missing GOES data to: {AIA_MISSING_DIR}")
     
     # Create a set of timestamps that have valid GOES data for faster lookup
     valid_timestamps = {data['timestamp'] for data in lookup_data}
@@ -251,16 +289,15 @@ def main():
         
         if timestamp not in valid_timestamps:
             try:
-                target_path = f"/mnt/data/AIA_ITI_MISSING/{file.split('/')[-1]}"
+                target_path = f"{AIA_MISSING_DIR}/{file.split('/')[-1]}"
                 os.rename(file, target_path)
                 moved_count += 1
-                print(f"Moved {file} to AIA_ITI_MISSING directory")
+                print(f"Moved {file} to {AIA_MISSING_DIR}")
             except Exception as e:
                 print(f"Failed to move {file}: {e}")
     
-    print(f"Moved {moved_count} files to AIA_ITI_MISSING directory")
-
-    print("Done")
+    print(f"Moved {moved_count} files to {AIA_MISSING_DIR}")
+    print("\nDone!")
 
 if __name__ == "__main__":
     main()
