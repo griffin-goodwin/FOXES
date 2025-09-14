@@ -16,7 +16,7 @@ from astropy.io import fits
 
 # Configuration for all wavelengths to process
 wavelengths = [94, 131, 171, 193, 211, 304]
-base_input_folder = '/mnt/data/SDO-AIA-flaring'
+base_input_folder = '/mnt/data/NEW-FLARE/SDO-AIA-flaring'
 
 aia_files = get_intersecting_files(base_input_folder, wavelengths)
 
@@ -64,7 +64,7 @@ for wavelength in wavelengths:
         filename = pd.to_datetime(names).strftime('%Y-%m-%dT%H:%M:%S') + ".fits"
         file_path = os.path.join(base_input_folder, f"{wavelength}/{filename}")
         # Destination path
-        destination_folder = os.path.join("/mnt/data/SDO-AIA_bad", str(wavelength))
+        destination_folder = os.path.join("/mnt/data/NEW-FLARE/SDO-AIA_bad", str(wavelength))
         os.makedirs(destination_folder, exist_ok=True)
         # Move or report missing
         if os.path.exists(file_path):
