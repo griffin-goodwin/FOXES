@@ -36,7 +36,7 @@ class ViT(pl.LightningModule):
         self.model = VisionTransformer(**filtered_kwargs)
         #Set the base weights based on the number of samples in each class within training data
         self.base_weights = base_weights
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=5000, base_weights=self.base_weights)
+        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=self.base_weights)
         self.sxr_norm = sxr_norm
 
     
@@ -79,7 +79,7 @@ class ViT(pl.LightningModule):
         norm_preds_squeezed = normalize_sxr(raw_preds_squeezed, self.sxr_norm)
         # Use adaptive rare event loss
         loss, weights = self.adaptive_loss.calculate_loss(
-            norm_preds_squeezed, sxr, sxr_un, raw_preds_squeezed
+            norm_preds_squeezed, sxr, sxr_un
         )
 
         #Also calculate huber loss for logging
@@ -217,10 +217,13 @@ class VisionTransformer(nn.Module):
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
-        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=0, max=1)
+        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=1e-15, max=1)
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
+        
+        # Ensure global flux is never zero (add small epsilon if needed)
+        global_flux_raw = torch.clamp(global_flux_raw, min=1e-15)
 
         if return_attention:
             return global_flux_raw, attention_weights, patch_flux_raw
@@ -292,7 +295,7 @@ def img_to_patch(x, patch_size, flatten_channels=True):
     return x
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=5000, base_weights=None):    
+    def __init__(self, window_size=15000, base_weights=None):    
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
@@ -318,10 +321,10 @@ class SXRRegressionDynamicLoss:
             'x_class': 20.0
         }
 
-    def calculate_loss(self, preds_squeezed, sxr, sxr_un, preds_squeezed_un):
-        base_loss = F.huber_loss(preds_squeezed, sxr, delta=1.0, reduction='none')
+    def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
+        base_loss = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
-        self._update_tracking(sxr_un, preds_squeezed_un)
+        self._update_tracking(sxr_un, sxr_norm, preds_norm)
         weighted_loss = base_loss * weights
         loss = weighted_loss.mean()
         return loss, weights
@@ -331,16 +334,16 @@ class SXRRegressionDynamicLoss:
 
         # Get continuous multipliers per class with custom params
         quiet_mult = self._get_performance_multiplier(
-            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.5, sensitivity=1, sxrclass = 'quiet'
+            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.2, sxrclass='quiet'
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2, min_multiplier=0.5, sensitivity=1, sxrclass = 'c_class'
+            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.3, sxrclass='c_class'  
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=4, min_multiplier=0.5, sensitivity=1, sxrclass = 'm_class'
+            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.4, sxrclass='m_class'
         )
         x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=6, min_multiplier=0.5, sensitivity=1, sxrclass = 'x_class'
+            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=.5, sxrclass='x_class'
         )
 
         quiet_weight = self.base_weights['quiet'] * quiet_mult
@@ -379,11 +382,20 @@ class SXRRegressionDynamicLoss:
         """Class-dependent performance multiplier"""
 
         class_params = {
-            'quiet': {'min_samples': 1500, 'recent_window': 500},
-            'c_class': {'min_samples': 1500, 'recent_window': 500},
+            'quiet': {'min_samples': 2500, 'recent_window': 800},
+            'c_class': {'min_samples': 2500, 'recent_window': 800},
             'm_class': {'min_samples': 1500, 'recent_window': 500},
-            'x_class': {'min_samples': 1500, 'recent_window': 500}
+            'x_class': {'min_samples': 1000, 'recent_window': 300}
         }
+
+        # target_errors = {
+        #     'quiet': 0.15,
+        #     'c_class': 0.08,
+        #     'm_class': 0.05,
+        #     'x_class': 0.05
+        # }
+        
+        #target = target_errors[sxrclass]
 
         if len(error_history) < class_params[sxrclass]['min_samples']:
             return 1.0
@@ -399,35 +411,66 @@ class SXRRegressionDynamicLoss:
         multiplier = np.exp(sensitivity * (ratio - 1))
         return np.clip(multiplier, min_multiplier, max_multiplier)
 
-    def _update_tracking(self, sxr_un, preds_squeezed_un):
-        sxr_np = sxr_un.detach().cpu().numpy()
-        preds_np = preds_squeezed_un.detach().cpu().numpy()
-        log_error = np.abs(np.log10(np.maximum(sxr_np, 1e-30)) - np.log10(np.maximum(preds_np, 1e-30)))
 
-        quiet_mask = sxr_np < self.c_threshold
+        
+        # if len(error_history) < class_params[sxrclass]['min_samples']:
+        #     return 1.0
+        
+        # recent = np.mean(list(error_history)[-class_params[sxrclass]['recent_window']:])
+        
+        # if recent > target:  # Not meeting target - increase weight
+        #     excess_error = (recent - target) / target
+        #     multiplier = 1.0 + sensitivity * excess_error
+        # else:  # Meeting/exceeding target
+        #     if sxrclass == 'quiet':
+        #         # Can reduce quiet weight significantly
+        #         multiplier = max(0.5, 1.0 - 0.5 * (target - recent) / target)
+        #     else:
+        #         # Keep important classes weighted well even when performing good
+        #         multiplier = max(0.8, 1.0 - 0.2 * (target - recent) / target)
+        
+        # return np.clip(multiplier, min_multiplier, max_multiplier)
+
+    def _update_tracking(self, sxr_un, sxr_norm, preds_norm):
+        sxr_un_np = sxr_un.detach().cpu().numpy()
+
+        #Huber loss
+        error = F.huber_loss(preds_norm, sxr_norm, delta=0.3, reduction='none')
+        error = error.detach().cpu().numpy()
+
+    
+        quiet_mask = sxr_un_np < self.c_threshold
         if quiet_mask.sum() > 0:
-            self.quiet_errors.append(float(np.mean(log_error[quiet_mask])))
+            self.quiet_errors.append(float(np.mean(error[quiet_mask])))
 
-        c_mask = (sxr_np >= self.c_threshold) & (sxr_np < self.m_threshold)
+        c_mask = (sxr_un_np >= self.c_threshold) & (sxr_un_np < self.m_threshold)
         if c_mask.sum() > 0:
-            self.c_errors.append(float(np.mean(log_error[c_mask])))
+            self.c_errors.append(float(np.mean(error[c_mask])))
 
-        m_mask = (sxr_np >= self.m_threshold) & (sxr_np < self.x_threshold)
+        m_mask = (sxr_un_np >= self.m_threshold) & (sxr_un_np < self.x_threshold)
         if m_mask.sum() > 0:
-            self.m_errors.append(float(np.mean(log_error[m_mask])))
+            self.m_errors.append(float(np.mean(error[m_mask])))
 
-        x_mask = sxr_np >= self.x_threshold
+        x_mask = sxr_un_np >= self.x_threshold
         if x_mask.sum() > 0:
-            self.x_errors.append(float(np.mean(log_error[x_mask])))
+            self.x_errors.append(float(np.mean(error[x_mask])))
 
 
     def get_current_multipliers(self):
         """Get current performance multipliers for logging"""
         return {
-            'quiet_mult': self._get_performance_multiplier(self.quiet_errors,sxrclass='quiet'),
-            'c_mult': self._get_performance_multiplier(self.c_errors,sxrclass='c_class'),
-            'm_mult': self._get_performance_multiplier(self.m_errors,sxrclass='m_class'),
-            'x_mult': self._get_performance_multiplier(self.x_errors,sxrclass='x_class'),
+            'quiet_mult': self._get_performance_multiplier(
+                self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.2, sxrclass='quiet'
+            ),
+            'c_mult': self._get_performance_multiplier(
+                self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.3, sxrclass='c_class'
+            ),
+            'm_mult': self._get_performance_multiplier(
+                self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.8, sxrclass='m_class'
+            ),
+            'x_mult': self._get_performance_multiplier(
+                self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=1.0, sxrclass='x_class'
+            ),
             'quiet_count': len(self.quiet_errors),
             'c_count': len(self.c_errors),
             'm_count': len(self.m_errors),

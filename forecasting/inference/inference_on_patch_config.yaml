@@ -1,4 +1,4 @@
-base_data_dir: "/mnt/data/ML-READY/"  # Change this line for different datasets
+base_data_dir: "/mnt/data/COMBINED/"  # Change this line for different datasets
 output_path: "${base_data_dir}/output/patch.csv"
 weight_path: "${base_data_dir}/patch_weights/"
 flux_path: "${base_data_dir}/patch_flux/"
@@ -21,11 +21,11 @@ model: "vit"  # Options: "cnn", "vit", "ViT Custom"
 wavelengths: [94,131,171, 193, 211, 304]  # AIA wavelengths in Angstroms
 data:
   aia_dir:
-    "${base_data_dir}/AIA"
+    "${base_data_dir}/AIA-SPLIT"
   sxr_dir:
-    "${base_data_dir}/SXR"
+    "${base_data_dir}/SXR-SPLIT"
   sxr_norm_path:
-    "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
+    "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-READY/new-checkpoint/vit-16-MSE-deeper-epoch=51-val_total_loss=0.1064.ckpt"
+    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-altered-loss-epoch=36-val_total_loss=0.0387.ckpt"
 
