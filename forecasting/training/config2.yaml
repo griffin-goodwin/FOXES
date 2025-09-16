@@ -1,11 +1,11 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/ML-READY"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/ML-READY"    # Change this line for different datasets
+base_data_dir: "/mnt/data/COMBINED"  # Change this line for different datasets
+base_checkpoint_dir: "/mnt/data/COMBINED"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # Model configuration
 selected_model: "ViTPatch"  # Options: "hybrid", "vit", "fusion", "vitpatch"
-batch_size:    16
+batch_size:    64
 epochs:        250
 oversample: false
 balance_strategy: "upsample_minority"
@@ -51,21 +51,21 @@ fusion:
 # Data paths (automatically constructed from base directories)
 data:
   aia_dir:
-    "${base_data_dir}/AIA"
+    "${base_data_dir}/AIA-SPLIT"
   sxr_dir:
-    "${base_data_dir}/SXR"
+    "${base_data_dir}/SXR-SPLIT"
   sxr_norm_path:
-    "${base_data_dir}/SXR/normalized_sxr.npy"
+    "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
   checkpoints_dir:
     "${base_checkpoint_dir}/new-checkpoint/"
 
 wandb:
   entity: jayantbiradar619-university-of-arizona # Use your exact W&B username
-  project: ViT Proper Scale
+  project: Model Testing
   job_type: training
   tags:
     - aia
     - sxr
     - regression
-  wb_name: baseline-model-more-complex
+  wb_name: vit-patch-model
   notes: Regression from AIA images (6 channels) to GOES SXR flux

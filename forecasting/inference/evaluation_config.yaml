@@ -1,22 +1,22 @@
 # Evaluation Configuration
 # Base directories
-base_data_dir: "/mnt/data/ML-READY"
-output_base_dir: "/mnt/data/ML-READY/solar_flare_comparison_results"
+base_data_dir: "/mnt/data/COMBINED"
+output_base_dir: "/mnt/data/COMBINED/solar_flare_comparison_results"
 
 # Model prediction files
 # Note: When main_model_csv is None or doesn't exist, the evaluator will run in baseline-only mode
 model_predictions:
-  main_model_csv: null  # Set to null for baseline-only mode
-  baseline_csv: "${base_data_dir}/output/baseline-model-complex.csv"
+  main_model_csv: ${base_data_dir}/output/patch.csv  # Set to null for baseline-only mode
+  baseline_csv: "${base_data_dir}/output/patch.csv"
 
 # Data directories
 data:
-  aia_dir: "${base_data_dir}/AIA/test/"
-  weight_path: ""  # Path to attention weights (empty if not available)
+  aia_dir: "${base_data_dir}/AIA-SPLIT/test/"
+  weight_path: "/mnt/data/COMBINED/patch_weights"  # Path to attention weights (empty if not available)
 
 # Evaluation parameters
 evaluation:
-  output_dir: "${output_base_dir}/baseline-model-complex"
+  output_dir: "${output_base_dir}/patch"
   
 # Time range for evaluation
 time_range:
