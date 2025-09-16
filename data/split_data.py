@@ -93,9 +93,9 @@ def split_data(input_folder, output_dir, data_type, flare_events_csv=None, repar
         # Determine split based on month
         month = file_time.month
         
-        if month in [2, 3, 4, 5, 6, 7, 9, 10, 11, 12]:
+        if month in [4, 5, 6, 7, 9, 10, 11, 12]:
             new_split_dir = "train"
-        elif month == 1:
+        elif month in [1,2,3]:
             new_split_dir = "val"
         elif month == 8:
             new_split_dir = "test"
