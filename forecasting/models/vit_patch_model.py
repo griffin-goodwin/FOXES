@@ -83,7 +83,7 @@ class ViT(pl.LightningModule):
         )
 
         #Also calculate huber loss for logging
-        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=1.0)
+        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=0.3)
 
 
         # Log adaptation info
