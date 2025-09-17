@@ -1,0 +1,43 @@
+# Analysis configuration
+base_data_dir: "/mnt/data/COMBINED"
+output_path: "${base_data_dir}/output/patch.csv"
+aia_path: "${base_data_dir}/AIA-SPLIT/test/"
+weight_path: "${base_data_dir}/patch_weights/"
+flux_path: "${base_data_dir}/patch_flux/"
+attention_path: "${base_data_dir}/patch_attention/"
+
+data:
+  aia_dir:
+    "${base_data_dir}/AIA-SPLIT"
+  sxr_dir:
+    "${base_data_dir}/SXR-SPLIT"
+  sxr_norm_path:
+    "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
+  checkpoint_path:
+    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-epoch=54-val_total_loss=0.0365.ckpt"
+
+
+analysis:
+  # Time period selection for testing analysis
+  time_period:
+    start_time: "2012-08-05 00:00:00"  # Start time for analysis
+    end_time: "2023-08-14 00:00:00"    # End time for analysis
+    # Set to null to analyze all available data
+    # start_time: null
+    # end_time: null
+  
+  # Flare detection parameters
+  flare_detection:
+    threshold_percentile: 97.0
+    min_patches: 2
+    max_patches: 50
+    simultaneous_flare_threshold: 0.000005  # Threshold for detecting simultaneous flares
+  
+  # Output configuration
+  output:
+    output_dir: "${base_data_dir}/flux_analysis_output"
+    create_visualizations: true
+    max_visualizations: 10
+    visualization_threshold: 0.00005  # Only save figures for predictions above this threshold (5e-5)
+    create_movie: false
+    movie_fps: 2
