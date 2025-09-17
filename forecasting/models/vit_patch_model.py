@@ -188,6 +188,10 @@ class VisionTransformer(nn.Module):
         # Parameters/Embeddings
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
+        self.grid_h = int(math.sqrt(num_patches))
+        self.grid_w = int(math.sqrt(num_patches))
+        self.pos_embedding_2d = nn.Parameter(torch.randn(1, self.grid_h, self.grid_w, embed_dim))
+
 
     def forward(self, x, sxr_norm, return_attention=False):
         # Preprocess input
@@ -198,7 +202,8 @@ class VisionTransformer(nn.Module):
         # Add CLS token and positional encoding
         cls_token = self.cls_token.repeat(B, 1, 1)
         x = torch.cat([cls_token, x], dim=1)
-        x = x + self.pos_embedding[:, : T + 1]
+        #x = x + self.pos_embedding[:, : T + 1]
+        x = self._add_2d_positional_encoding(x)
 
         # Apply Transformer blocks
         x = self.dropout(x)
@@ -230,6 +235,27 @@ class VisionTransformer(nn.Module):
         else:
             return global_flux_raw, patch_flux_raw
         
+    def _add_2d_positional_encoding(self, x):
+        """Add learned 2D positional encoding to patch embeddings"""
+        B, T, embed_dim = x.shape
+        num_patches = T - 1  # Exclude CLS token
+        
+        # Reshape patches to 2D grid: [B, grid_h, grid_w, embed_dim]
+        patch_embeddings = x[:, 1:, :].reshape(B, self.grid_h, self.grid_w, embed_dim)
+        
+        # Add learned 2D positional encoding
+        # Broadcasting: [B, grid_h, grid_w, embed_dim] + [1, grid_h, grid_w, embed_dim]
+        patch_embeddings = patch_embeddings + self.pos_embedding_2d
+        
+        # Reshape back to sequence format: [B, num_patches, embed_dim]
+        patch_embeddings = patch_embeddings.reshape(B, num_patches, embed_dim)
+        
+        # Combine with CLS token
+        cls_token = x[:, :1, :]  # [B, 1, embed_dim]
+        x = torch.cat([cls_token, patch_embeddings], dim=1)
+        
+        return x
+    
     def forward_for_callback(self, x, return_attention=True):
         """Forward method compatible with AttentionMapCallback"""
         global_flux_raw, attention_weights, patch_flux_raw = self.forward(x, return_attention=return_attention)
