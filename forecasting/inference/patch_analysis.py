@@ -6,98 +6,8 @@ import argparse
 import cv2
 from scipy import ndimage as nd
 import warnings
-
-
-def create_flare_movie_with_aia(self, start_time, end_time, output_dir, fps=2):
-    """Create a movie showing flux contributions overlaid on AIA images"""
-    # Filter timestamps in the time range
-    mask = (self.predictions_df['datetime'] >= pd.to_datetime(start_time)) & \
-           (self.predictions_df['datetime'] <= pd.to_datetime(end_time))
-    event_data = self.predictions_df[mask].sort_values('datetime')
-
-    if len(event_data) == 0:
-        print(f"No data found in time range {start_time} to {end_time}")
-        return
-
-    print(f"Creating AIA+flux movie with {len(event_data)} frames...")
-
-    # Create output directory for frames
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True, parents=True)
-
-    # Determine global color scales
-    all_flux = []
-    aia_intensities = []
-
-    for timestamp in event_data['timestamp'].head(20):  # Sample first 20 for scaling
-        flux_contrib = self.load_flux_contributions(timestamp)
-        aia_image = self.load_aia_image(timestamp)
-
-        if flux_contrib is not None:
-            all_flux.extend(flux_contrib.flatten())
-        if aia_image is not None:
-            aia_clipped = np.clip(aia_image, np.percentile(aia_image, 1),
-                                  np.percentile(aia_image, 99.5))
-            aia_intensities.extend(aia_clipped.flatten())
-
-    flux_vmin, flux_vmax = np.percentile(all_flux, [5, 95]) if all_flux else (0, 1)
-    aia_vmin, aia_vmax = np.percentile(aia_intensities, [1, 99]) if aia_intensities else (1, 1000)
-
-    print(f"Flux range: {flux_vmin:.2e} - {flux_vmax:.2e}")
-    print(f"AIA range: {aia_vmin:.1f} - {aia_vmax:.1f}")
-
-    # Create frames
-    frame_files = []
-    for i, (_, row) in enumerate(event_data.iterrows()):
-        timestamp = row['timestamp']
-        flux_contrib = self.load_flux_contributions(timestamp)
-        aia_image = self.load_aia_image(timestamp)
-
-        if flux_contrib is None:
-            continue
-
-        fig, axes = plt.subplots(1, 3 if aia_image is not None else 1, figsize=(18, 6))
-        if not isinstance(axes, np.ndarray):
-            axes = [axes]
-
-        # AIA background
-        if aia_image is not None:
-            aia_display = np.clip(aia_image, aia_vmin, aia_vmax)
-            aia_display = np.log10(aia_display + 1)
-
-            # Panel 1: AIA only
-            axes[0].imshow(aia_display, cmap='viridis', vmin=np.log10(aia_vmin + 1),
-                           vmax=np.log10(aia_vmax + 1))
-            axes[0].set_title(f'AIA 94 Å\n{row["datetime"].strftime("%Y-%m-%d %H:%M:%S")}')
-            axes[0].set_xlabel('Pixel X')
-            axes[0].set_ylabel('Pixel Y')
-
-            # Panel 2: Flux only
-            axes[1].imshow(flux_contrib, cmap='hot', vmin=flux_vmin, vmax=flux_vmax)
-            axes[1].set_title(f'Flux Contributions\nPred: {row["predictions"]:.2e}')
-            axes[1].set_xlabel('Patch X')
-            axes[1].set_ylabel('Patch Y')
-
-            # Panel 3: Overlay
-            axes[2].imshow(aia_display, cmap='gray', alpha=0.8,
-                           vmin=np.log10(aia_vmin + 1), vmax=np.log10(aia_vmax + 1))
-
-            # Resize and overlay flux
-            flux_resized = self.resize_flux_to_image_size(flux_contrib)
-            flux_threshold = np.percentile(flux_resized.flatten(), 60)
-            flux_mask = flux_resized > flux_threshold
-            flux_masked = np.ma.masked_where(~flux_mask, flux_resized)
-
-            axes[2].imshow(flux_masked, cmap='hot', alpha=0.7,
-                           vmin=flux_vmin, vmax=flux_vmax, interpolation='bilinear')
-            axes[2].set_title('AIA + Flux Overlay')
-            axes[2].set_xlabel('Pixel X')
-            axes[2].set_ylabel('Pixel Y')
-
-            # Add patch grid
-            for j in range(0, 512, 16):
-                axes[2].axvline(j, color='white', alpha=0.3, linewidth=0.3)
-                axes[2].axhline(j, color='white', alpha=0.3, linewidth=0.3)
+import yaml
+from datetime import datetime
 
 
 """
@@ -113,12 +23,13 @@ warnings.filterwarnings('ignore')
 
 
 class FluxContributionAnalyzer:
-    def __init__(self, flux_path, predictions_csv, aia_path=None, attention_path=None,
-                 grid_size=(32, 32), patch_size=16, input_size=512):
+    def __init__(self, config_path=None, flux_path=None, predictions_csv=None, aia_path=None, attention_path=None,
+                 grid_size=(32, 32), patch_size=16, input_size=512, time_period=None):
         """
         Initialize the flux contribution analyzer
 
         Args:
+            config_path: Path to YAML config file (optional, overrides other parameters)
             flux_path: Path to directory containing flux contribution files
             predictions_csv: Path to CSV file with predictions and timestamps
             aia_path: Path to directory containing AIA numpy files
@@ -126,7 +37,37 @@ class FluxContributionAnalyzer:
             grid_size: Size of the flux contribution grid
             patch_size: Size of each patch in pixels
             input_size: Input image size
+            time_period: Dict with 'start_time' and 'end_time' for filtering data
         """
+        # Load config if provided
+        if config_path:
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+            
+            # Extract paths from config
+            base_dir = self.config['base_data_dir']
+            flux_path = self.config['flux_path'].replace('${base_data_dir}', base_dir)
+            predictions_csv = self.config['output_path'].replace('${base_data_dir}', base_dir)
+            aia_path = self.config['aia_path'].replace('${base_data_dir}', base_dir)
+            
+            # Extract analysis parameters
+            self.analysis_config = self.config.get('analysis', {})
+            self.flare_config = self.analysis_config.get('flare_detection', {})
+            self.output_config = self.analysis_config.get('output', {})
+            
+            # Extract time period
+            time_period_config = self.analysis_config.get('time_period', {})
+            if time_period_config.get('start_time') and time_period_config.get('end_time'):
+                time_period = {
+                    'start_time': time_period_config['start_time'],
+                    'end_time': time_period_config['end_time']
+                }
+        else:
+            self.config = {}
+            self.analysis_config = {}
+            self.flare_config = {}
+            self.output_config = {}
+        
         self.flux_path = Path(flux_path)
         self.aia_path = Path(aia_path) if aia_path else None
         self.attention_path = Path(attention_path) if attention_path else None
@@ -134,10 +75,19 @@ class FluxContributionAnalyzer:
         self.grid_size = grid_size
         self.patch_size = patch_size
         self.input_size = input_size
+        self.time_period = time_period
 
         # Convert timestamps to datetime
         self.predictions_df['datetime'] = pd.to_datetime(self.predictions_df['timestamp'])
         self.predictions_df = self.predictions_df.sort_values('datetime')
+
+        # Filter by time period if specified
+        if self.time_period:
+            start_time = pd.to_datetime(self.time_period['start_time'])
+            end_time = pd.to_datetime(self.time_period['end_time'])
+            mask = (self.predictions_df['datetime'] >= start_time) & (self.predictions_df['datetime'] <= end_time)
+            self.predictions_df = self.predictions_df[mask].reset_index(drop=True)
+            print(f"Filtered data to time period: {start_time} to {end_time}")
 
         print(f"Loaded {len(self.predictions_df)} predictions")
         print(f"Time range: {self.predictions_df['datetime'].min()} to {self.predictions_df['datetime'].max()}")
@@ -188,41 +138,6 @@ class FluxContributionAnalyzer:
             return np.loadtxt(flux_file, delimiter=',')
         return None
 
-    def load_aia_image(self, timestamp):
-        """Load AIA 94 Angstrom image for a specific timestamp"""
-        if self.aia_path is None:
-            return None
-
-        # Try different possible filename formats
-        possible_files = [
-            self.aia_path / f"{timestamp}.npy",
-            self.aia_path / f"{timestamp}.npz",
-        ]
-
-        for aia_file in possible_files:
-            if aia_file.exists():
-                try:
-                    if aia_file.suffix == '.npy':
-                        aia_data = np.load(aia_file)
-                    else:  # .npz
-                        aia_data = np.load(aia_file)['arr_0']
-
-                    # Get 94 Angstrom channel (dimension 0) and ensure 512x512
-                    if len(aia_data.shape) == 3:
-                        aia_94 = aia_data[0]  # First channel is 94 Angstrom
-                    else:
-                        aia_94 = aia_data
-
-                    # Ensure correct size
-                    if aia_94.shape != (512, 512):
-                        print(f"Warning: AIA image shape is {aia_94.shape}, expected (512, 512)")
-
-                    return aia_94
-                except Exception as e:
-                    print(f"Error loading {aia_file}: {e}")
-                    continue
-
-        return None
 
     def resize_flux_to_image_size(self, flux_contrib):
         """Resize flux contribution map from patch grid to full image resolution"""
@@ -230,7 +145,7 @@ class FluxContributionAnalyzer:
         return cv2.resize(flux_contrib, (self.input_size, self.input_size),
                           interpolation=cv2.INTER_CUBIC)
 
-    def detect_flare_events(self, threshold_percentile=95, min_patches=1, max_patches=15):
+    def detect_flare_events(self, threshold_percentile=None, min_patches=None, max_patches=None):
         """
         Detect potential flare events based on flux contribution patterns
 
@@ -239,6 +154,13 @@ class FluxContributionAnalyzer:
             min_patches: Minimum number of connected high-contribution patches
             max_patches: Maximum number of connected high-contribution patches
         """
+        # Use config values if not provided
+        if threshold_percentile is None:
+            threshold_percentile = self.flare_config.get('threshold_percentile', 95)
+        if min_patches is None:
+            min_patches = self.flare_config.get('min_patches', 1)
+        if max_patches is None:
+            max_patches = self.flare_config.get('max_patches', 25)
         flare_events = []
 
         print("Analyzing flux contributions for flare detection...")
@@ -247,14 +169,11 @@ class FluxContributionAnalyzer:
             timestamp = row['timestamp']
             flux_contrib = self.load_flux_contributions(timestamp)
 
-            if row['predictions']<5e-6:
-                continue
             if flux_contrib is None:
                 continue
 
             # Calculate threshold for this timestamp
             threshold = np.percentile(flux_contrib.flatten(), threshold_percentile)
-            #threshold = 1e-5
             # Find high contribution regions
             high_contrib_mask = flux_contrib > threshold
 
@@ -269,7 +188,6 @@ class FluxContributionAnalyzer:
                                     [1, 1, 1]])
 
             # Use connected components to find flare regions
-            # Choose structure_4 for stricter connectivity or structure_8 for looser
             labeled_regions, num_regions = nd.label(high_contrib_mask, structure=structure_8)
 
             for region_id in range(1, num_regions + 1):
@@ -312,6 +230,73 @@ class FluxContributionAnalyzer:
         print(f"Detected {len(flare_events)} potential flare events")
         return self.flare_events_df
 
+    def detect_simultaneous_flares(self, threshold=1e-5):
+        """
+        Detect simultaneous flaring events - multiple distinct regions within the same flux prediction
+        where each region has a sum of flux above the threshold
+        
+        Args:
+            threshold: Sum of flux threshold for considering a region as a flare
+        
+        Returns:
+            DataFrame with simultaneous flare events
+        """
+        if not hasattr(self, 'flare_events_df') or len(self.flare_events_df) == 0:
+            print("Please run detect_flare_events() first")
+            return pd.DataFrame()
+        
+        # Filter regions by sum_flux threshold (not prediction threshold)
+        high_flux_regions = self.flare_events_df[self.flare_events_df['sum_flux'] >= threshold].copy()
+        
+        if len(high_flux_regions) == 0:
+            print(f"No regions found with sum_flux above threshold {threshold}")
+            return pd.DataFrame()
+        
+        # Group regions by timestamp to find simultaneous flares within the same flux prediction
+        simultaneous_groups = []
+        for timestamp, group in high_flux_regions.groupby('timestamp'):
+            if len(group) >= 2:  # Multiple distinct regions at the same timestamp
+                simultaneous_groups.append(group)
+        
+        # Create results DataFrame
+        simultaneous_events = []
+        for group_id, group in enumerate(simultaneous_groups):
+            for idx, event in group.iterrows():
+                simultaneous_events.append({
+                    'group_id': group_id,
+                    'timestamp': event['timestamp'],
+                    'datetime': event['datetime'],
+                    'prediction': event['prediction'],
+                    'region_size': event['region_size'],
+                    'max_flux': event['max_flux'],
+                    'sum_flux': event['sum_flux'],
+                    'centroid_img_y': event['centroid_img_y'],
+                    'centroid_img_x': event['centroid_img_x'],
+                    'group_size': len(group)
+                })
+        
+        simultaneous_df = pd.DataFrame(simultaneous_events)
+        
+        if len(simultaneous_df) > 0:
+            print(f"Detected {len(simultaneous_groups)} timestamps with simultaneous flares")
+            print(f"Total simultaneous events: {len(simultaneous_df)}")
+            
+            # Print summary
+            for group_id in simultaneous_df['group_id'].unique():
+                group_events = simultaneous_df[simultaneous_df['group_id'] == group_id]
+                timestamp = group_events['timestamp'].iloc[0]
+                prediction = group_events['prediction'].iloc[0]
+                print(f"\nSimultaneous Group {group_id} at {timestamp}:")
+                print(f"  Flux prediction: {prediction:.2e}")
+                print(f"  Number of distinct regions: {len(group_events)}")
+                print(f"  Region sizes: {group_events['region_size'].values}")
+                print(f"  Sum fluxes: {group_events['sum_flux'].values}")
+        else:
+            print("No simultaneous flare events detected")
+        
+        self.simultaneous_flares_df = simultaneous_df
+        return simultaneous_df
+
     def load_attention_weights(self, timestamp):
         """Load attention weights for a specific timestamp if available"""
         if self.attention_path is None:
@@ -321,86 +306,9 @@ class FluxContributionAnalyzer:
             return np.loadtxt(attention_file, delimiter=',')
         return None
 
-    def plot_flux_overlay_on_aia(self, timestamp, save_path=None, flux_alpha=0.6,
-                                 flux_threshold_percentile=50):
-        """Plot flux contributions overlaid on AIA 94 Angstrom image"""
-        flux_contrib = self.load_flux_contributions(timestamp)
-        aia_image = self.load_aia_image(timestamp)
 
-        if flux_contrib is None:
-            print(f"No flux contributions found for {timestamp}")
-            return
-
-        # Get prediction data for this timestamp
-        pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp].iloc[0]
-
-        # Create figure
-        fig, axes = plt.subplots(1, 3 if aia_image is not None else 2, figsize=(18, 6))
-        if not isinstance(axes, np.ndarray):
-            axes = [axes]
-
-        # Plot 1: Flux contributions only
-        im1 = axes[0].imshow(flux_contrib, cmap='hot', interpolation='nearest')
-        axes[0].set_title(f'Flux Contributions\n{timestamp}\nPrediction: {pred_data["predictions"]:.2e}')
-        axes[0].set_xlabel('Patch X')
-        axes[0].set_ylabel('Patch Y')
-        cbar1 = plt.colorbar(im1, ax=axes[0], shrink=0.8)
-        cbar1.set_label('Flux Contribution')
-
-        if aia_image is not None:
-            # Plot 2: AIA image only
-            # Use log scale for AIA display with clipping to avoid issues with zeros/negatives
-            aia_display = np.clip(aia_image, np.percentile(aia_image, 1),
-                                  np.percentile(aia_image, 99.5))
-            aia_display = np.log10(aia_display + 1)  # Add 1 to avoid log(0)
-
-            im2 = axes[1].imshow(aia_display, cmap='viridis', interpolation='nearest')
-            axes[1].set_title(f'AIA 94 Å\n{timestamp}')
-            axes[1].set_xlabel('Pixel X')
-            axes[1].set_ylabel('Pixel Y')
-            cbar2 = plt.colorbar(im2, ax=axes[1], shrink=0.8)
-            cbar2.set_label('Log(AIA 94 Å Intensity)')
-
-            # Plot 3: Overlay
-            # Resize flux contributions to match image size
-            flux_resized = self.resize_flux_to_image_size(flux_contrib)
-
-            # Create mask for significant flux contributions
-            flux_threshold = np.percentile(flux_resized.flatten(), flux_threshold_percentile)
-            flux_mask = flux_resized > flux_threshold
-
-            # Display AIA as background
-            axes[2].imshow(aia_display, cmap='gray', alpha=0.8, interpolation='nearest')
-
-            # Overlay flux contributions with transparency
-            flux_masked = np.ma.masked_where(~flux_mask, flux_resized)
-            im3 = axes[2].imshow(flux_masked, cmap='hot', alpha=flux_alpha,
-                                 interpolation='bilinear')
-
-            axes[2].set_title(f'AIA 94 Å + Flux Overlay\n{timestamp}\n'
-                              f'Flux threshold: {flux_threshold_percentile}th percentile')
-            axes[2].set_xlabel('Pixel X')
-            axes[2].set_ylabel('Pixel Y')
-
-            # Add colorbar for overlay
-            cbar3 = plt.colorbar(im3, ax=axes[2], shrink=0.8)
-            cbar3.set_label('Flux Contribution')
-
-            # Add patch grid overlay for reference
-            for i in range(0, self.input_size, self.patch_size):
-                axes[2].axvline(i, color='white', alpha=0.3, linewidth=0.5)
-                axes[2].axhline(i, color='white', alpha=0.3, linewidth=0.5)
-
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved AIA overlay plot to {save_path}")
-        else:
-            plt.show()
-
-    def plot_flux_contribution_heatmap(self, timestamp, save_path=None, show_attention=True, threshold_percentile=99,
-                                       min_patches=1, max_patches=15):
+    def plot_flux_contribution_heatmap(self, timestamp, save_path=None, show_attention=True, 
+                                       threshold_percentile=None, min_patches=None, max_patches=None):
         """Plot flux contribution heatmap for a specific timestamp with detected regions highlighted"""
         flux_contrib = self.load_flux_contributions(timestamp)
         aia = self.load_aia_image(timestamp) if show_attention else None
@@ -408,6 +316,14 @@ class FluxContributionAnalyzer:
         if flux_contrib is None:
             print(f"No flux contributions found for {timestamp}")
             return
+
+        # Use config values if not provided
+        if threshold_percentile is None:
+            threshold_percentile = self.flare_config.get('threshold_percentile', 97)
+        if min_patches is None:
+            min_patches = self.flare_config.get('min_patches', 2)
+        if max_patches is None:
+            max_patches = self.flare_config.get('max_patches', 50)
 
         # Get prediction data for this timestamp
         pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp].iloc[0]
@@ -422,31 +338,28 @@ class FluxContributionAnalyzer:
         high_contrib_mask = flux_contrib > threshold
 
         # Use connected components to find flare regions
-        structure_4 = np.array([[0, 1, 0],
-                                [1, 1, 1],
-                                [0, 1, 0]])
-
         # 8-connectivity: patches connected by edges or corners
         structure_8 = np.array([[1, 1, 1],
                                 [1, 1, 1],
                                 [1, 1, 1]])
 
-        # Use connected components to find flare regions
-        # Choose structure_4 for stricter connectivity or structure_8 for looser
         labeled_regions, num_regions = nd.label(high_contrib_mask, structure=structure_8)
 
         # Create a copy for display and collect region info
         flux_contrib_display = flux_contrib.copy()
-        flux_contrib_display[flux_contrib < threshold] = np.nan
+        # Don't hide patches below threshold - show all patches that are part of detected regions
+        # flux_contrib_display[flux_contrib < threshold] = np.nan
 
         detected_regions = []
         region_colors = plt.cm.Set3(np.linspace(0, 1, max(num_regions, 1)))
+        accepted_region_id = 0
 
         for region_id in range(1, num_regions + 1):
             region_mask = labeled_regions == region_id
             region_size = np.sum(region_mask)
 
             if min_patches <= region_size <= max_patches:
+                accepted_region_id += 1
                 region_flux = flux_contrib[region_mask]
                 sum_flux = np.sum(region_flux)
                 max_flux = np.max(region_flux)
@@ -462,7 +375,7 @@ class FluxContributionAnalyzer:
                 label_x = centroid_x  # Center horizontally
 
                 detected_regions.append({
-                    'id': region_id,
+                    'id': accepted_region_id,  # Use sequential ID for accepted regions
                     'size': region_size,
                     'sum_flux': sum_flux,
                     'max_flux': max_flux,
@@ -474,16 +387,11 @@ class FluxContributionAnalyzer:
                 })
 
         # Plot flux contributions
-        im1 = axes[0].imshow(flux_contrib_display, cmap='hot', interpolation='nearest')
+        im1 = axes[0].imshow(flux_contrib_display, cmap='hot', interpolation='nearest', origin='lower')
 
         # Highlight detected regions with colored outlines
         for i, region in enumerate(detected_regions):
             # Create contour around the region
-            # Dilate the mask slightly to create an outline
-            dilated = nd.binary_dilation(region['mask'])
-            outline = dilated & ~region['mask']
-
-            # Overlay the outline
             axes[0].contour(region['mask'].astype(int), levels=[0.5],
                             colors=[region_colors[i % len(region_colors)]], linewidths=2)
 
@@ -493,7 +401,13 @@ class FluxContributionAnalyzer:
                          ha='center', va='center', fontsize=8, fontweight='bold',
                          bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
 
+        # Build title with both prediction and ground truth
         title_text = f'Flux Contributions with Detected Regions\n{timestamp}\nPrediction: {pred_data["predictions"]:.2e}'
+        
+        # Add ground truth if available
+        if 'groundtruth' in pred_data and not pd.isna(pred_data['groundtruth']):
+            title_text += f'\nActual: {pred_data["groundtruth"]:.2e}'
+        
         if detected_regions:
             total_region_flux = sum(r['sum_flux'] for r in detected_regions)
             title_text += f'\nTotal Region Flux: {total_region_flux:.2e} ({len(detected_regions)} regions)'
@@ -511,10 +425,9 @@ class FluxContributionAnalyzer:
         axes[0].set_yticks(np.arange(-0.5, self.grid_size[0], 1), minor=True)
         axes[0].grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.3)
 
-        # Plot attention weights if available
         if aia is not None:
-            im2 = axes[1].imshow(aia, cmap='Blues', interpolation='nearest')
-            axes[1].set_title(f'Attention Weights\n{timestamp}')
+            im2 = axes[1].imshow(aia, cmap='Blues', interpolation='nearest', origin='lower')
+            axes[1].set_title(f'AIA Image 94 Å\n{timestamp}')
             axes[1].grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.3)
 
         # Add legend for detected regions
@@ -543,103 +456,6 @@ class FluxContributionAnalyzer:
                 print(f"  Region {region['id']}: {region['size']} patches, "
                       f"Sum flux: {region['sum_flux']:.2e}, Max flux: {region['max_flux']:.2e}")
 
-    def create_comprehensive_flare_visualization(self, timestamp, save_path=None,
-                                                 flux_alpha=0.7, attention_alpha=0.5):
-        """Create a comprehensive 4-panel visualization showing AIA, flux, attention, and overlay"""
-        flux_contrib = self.load_flux_contributions(timestamp)
-        aia_image = self.load_aia_image(timestamp)
-        attention_weights = self.load_attention_weights(timestamp)
-
-        if flux_contrib is None:
-            print(f"No flux contributions found for {timestamp}")
-            return
-
-        # Get prediction data
-        pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp].iloc[0]
-
-        # Create 2x2 subplot
-        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-
-        # Panel 1: AIA image
-        if aia_image is not None:
-            aia_display = np.clip(aia_image, np.percentile(aia_image, 1),
-                                  np.percentile(aia_image, 99.5))
-            aia_display = np.log10(aia_display + 1)
-
-            im1 = axes[0, 0].imshow(aia_display, cmap='viridis', interpolation='nearest')
-            axes[0, 0].set_title(f'AIA 94 Å\n{timestamp}')
-            axes[0, 0].set_xlabel('Pixel X')
-            axes[0, 0].set_ylabel('Pixel Y')
-            plt.colorbar(im1, ax=axes[0, 0], shrink=0.8).set_label('Log(Intensity)')
-        else:
-            axes[0, 0].text(0.5, 0.5, 'No AIA Data\nAvailable', ha='center', va='center',
-                            transform=axes[0, 0].transAxes, fontsize=16)
-            axes[0, 0].set_title(f'AIA 94 Å\n{timestamp}')
-
-        # Panel 2: Flux contributions
-        im2 = axes[0, 1].imshow(flux_contrib, cmap='hot', interpolation='nearest')
-        axes[0, 1].set_title(f'Flux Contributions\nPrediction: {pred_data["predictions"]:.2e}')
-        axes[0, 1].set_xlabel('Patch X')
-        axes[0, 1].set_ylabel('Patch Y')
-        plt.colorbar(im2, ax=axes[0, 1], shrink=0.8).set_label('Flux Contribution')
-
-        # Panel 3: Attention weights
-        if attention_weights is not None:
-            im3 = axes[1, 0].imshow(attention_weights, cmap='Blues', interpolation='nearest')
-            axes[1, 0].set_title('Attention Weights')
-            axes[1, 0].set_xlabel('Patch X')
-            axes[1, 0].set_ylabel('Patch Y')
-            plt.colorbar(im3, ax=axes[1, 0], shrink=0.8).set_label('Attention Weight')
-        else:
-            axes[1, 0].text(0.5, 0.5, 'No Attention\nWeights Available', ha='center', va='center',
-                            transform=axes[1, 0].transAxes, fontsize=14)
-            axes[1, 0].set_title('Attention Weights')
-
-        # Panel 4: Combined overlay
-        if aia_image is not None:
-            # Background AIA
-            axes[1, 1].imshow(aia_display, cmap='gray', alpha=0.7, interpolation='nearest')
-
-            # Overlay flux contributions
-            flux_resized = self.resize_flux_to_image_size(flux_contrib)
-            flux_threshold = np.percentile(flux_resized.flatten(), 70)
-            flux_mask = flux_resized > flux_threshold
-            flux_masked = np.ma.masked_where(~flux_mask, flux_resized)
-
-            im4 = axes[1, 1].imshow(flux_masked, cmap='hot', alpha=flux_alpha,
-                                    interpolation='bilinear')
-
-            # Overlay attention if available
-            if attention_weights is not None:
-                attention_resized = self.resize_flux_to_image_size(attention_weights)
-                attention_threshold = np.percentile(attention_resized.flatten(), 80)
-                attention_mask = attention_resized > attention_threshold
-                attention_masked = np.ma.masked_where(~attention_mask, attention_resized)
-
-                axes[1, 1].contour(attention_masked, levels=3, colors='cyan', alpha=attention_alpha,
-                                   linewidths=1.5)
-
-            axes[1, 1].set_title('Multi-modal Overlay\n(AIA + Flux + Attention)')
-            axes[1, 1].set_xlabel('Pixel X')
-            axes[1, 1].set_ylabel('Pixel Y')
-
-            # Add patch grid
-            for i in range(0, self.input_size, self.patch_size):
-                axes[1, 1].axvline(i, color='white', alpha=0.2, linewidth=0.5)
-                axes[1, 1].axhline(i, color='white', alpha=0.2, linewidth=0.5)
-        else:
-            axes[1, 1].text(0.5, 0.5, 'Overlay requires\nAIA data', ha='center', va='center',
-                            transform=axes[1, 1].transAxes, fontsize=14)
-            axes[1, 1].set_title('Multi-modal Overlay')
-
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved comprehensive visualization to {save_path}")
-        else:
-            plt.show()
-        """Analyze which patches contribute most across all timestamps"""
 
 
     def create_flare_event_summary(self, output_path=None):
@@ -663,14 +479,15 @@ class FluxContributionAnalyzer:
 
         # Top 10 strongest events
         print(f"\nTop 10 Strongest Flare Events:")
-        print("-" * 80)
-        print(f"{'Rank':<4} {'Timestamp':<20} {'Prediction':<12} {'Region Size':<12} {'Max Flux':<12} {'Location':<15}")
-        print("-" * 80)
+        print("-" * 100)
+        print(f"{'Rank':<4} {'Timestamp':<20} {'Prediction':<12} {'Actual':<12} {'Region Size':<12} {'Max Flux':<12} {'Location':<15}")
+        print("-" * 100)
 
         for i, (_, event) in enumerate(flare_events.head(10).iterrows()):
             location = f"({event['centroid_img_y']:.0f},{event['centroid_img_x']:.0f})"
+            actual_value = f"{event['groundtruth']:.2e}" if 'groundtruth' in event and not pd.isna(event['groundtruth']) else "N/A"
             print(f"{i + 1:<4} {event['datetime'].strftime('%Y-%m-%d %H:%M'):<20} "
-                  f"{event['prediction']:<12.2e} {event['region_size']:<12} "
+                  f"{event['prediction']:<12.2e} {actual_value:<12} {event['region_size']:<12} "
                   f"{event['max_flux']:<12.2e} {location:<15}")
 
         # Statistics
@@ -679,6 +496,15 @@ class FluxContributionAnalyzer:
         print(f"  Mean prediction: {flare_events['prediction'].mean():.2e}")
         print(f"  Max prediction: {flare_events['prediction'].max():.2e}")
         print(f"  Min prediction: {flare_events['prediction'].min():.2e}")
+        
+        # Ground truth statistics if available
+        if 'groundtruth' in flare_events.columns:
+            valid_groundtruth = flare_events.dropna(subset=['groundtruth'])
+            if len(valid_groundtruth) > 0:
+                print(f"  Mean actual: {valid_groundtruth['groundtruth'].mean():.2e}")
+                print(f"  Max actual: {valid_groundtruth['groundtruth'].max():.2e}")
+                print(f"  Min actual: {valid_groundtruth['groundtruth'].min():.2e}")
+                print(f"  Ground truth available for: {len(valid_groundtruth)}/{len(flare_events)} events")
 
         if output_path:
             flare_events.to_csv(output_path, index=False)
@@ -724,7 +550,7 @@ class FluxContributionAnalyzer:
             fig, ax = plt.subplots(figsize=(8, 6))
 
             im = ax.imshow(flux_contrib, cmap='hot', vmin=vmin, vmax=vmax,
-                           interpolation='nearest')
+                           interpolation='nearest', origin='lower')
 
             ax.set_title(f'Flux Contributions\n{row["datetime"].strftime("%Y-%m-%d %H:%M:%S")}\n'
                          f'Prediction: {row["predictions"]:.2e}')
@@ -749,74 +575,140 @@ class FluxContributionAnalyzer:
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze flux contributions for flare detection')
-    parser.add_argument('--flux_path', required=True, help='Path to flux contributions directory')
-    parser.add_argument('--predictions_csv', required=True, help='Path to predictions CSV file')
+    parser.add_argument('--config', required=True, help='Path to YAML config file')
+    parser.add_argument('--flux_path', help='Path to flux contributions directory (overrides config)')
+    parser.add_argument('--predictions_csv', help='Path to predictions CSV file (overrides config)')
     parser.add_argument('--attention_path', help='Path to attention weights directory (optional)')
-    parser.add_argument('--output_dir', default='flux_analysis_output', help='Output directory for results')
-    parser.add_argument('--grid_size', nargs=2, type=int, default=[32, 32], help='Grid size (height width)')
-    parser.add_argument('--threshold_percentile', type=float, default=97,
-                        help='Percentile threshold for flare detection')
-    parser.add_argument('--min_patches', type=int, default=5, help='Minimum patches for flare detection')
+    parser.add_argument('--output_dir', help='Output directory for results (overrides config)')
+    parser.add_argument('--start_time', help='Start time for analysis (overrides config)')
+    parser.add_argument('--end_time', help='End time for analysis (overrides config)')
+    parser.add_argument('--viz_threshold', type=float, help='Visualization threshold (overrides config)')
 
     args = parser.parse_args()
 
+    # Initialize analyzer with config
+    analyzer = FluxContributionAnalyzer(config_path=args.config)
+
+    # Override config with command line arguments if provided
+    if args.flux_path:
+        analyzer.flux_path = Path(args.flux_path)
+    if args.predictions_csv:
+        analyzer.predictions_df = pd.read_csv(args.predictions_csv)
+        analyzer.predictions_df['datetime'] = pd.to_datetime(analyzer.predictions_df['timestamp'])
+        analyzer.predictions_df = analyzer.predictions_df.sort_values('datetime')
+    if args.attention_path:
+        analyzer.attention_path = Path(args.attention_path)
+    if args.start_time and args.end_time:
+        analyzer.time_period = {
+            'start_time': args.start_time,
+            'end_time': args.end_time
+        }
+        # Re-filter data
+        start_time = pd.to_datetime(analyzer.time_period['start_time'])
+        end_time = pd.to_datetime(analyzer.time_period['end_time'])
+        mask = (analyzer.predictions_df['datetime'] >= start_time) & (analyzer.predictions_df['datetime'] <= end_time)
+        analyzer.predictions_df = analyzer.predictions_df[mask].reset_index(drop=True)
+        print(f"Filtered data to time period: {start_time} to {end_time}")
+
+    # Get output directory from config or args
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir_str = analyzer.output_config.get('output_dir', 'flux_analysis_output')
+        # Replace base_data_dir placeholder if present
+        if '${base_data_dir}' in output_dir_str:
+            base_dir = analyzer.config.get('base_data_dir', '/mnt/data/COMBINED')
+            output_dir_str = output_dir_str.replace('${base_data_dir}', base_dir)
+        output_dir = Path(output_dir_str)
+    
     # Create output directory
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # Initialize analyzer
-    analyzer = FluxContributionAnalyzer(
-        flux_path=args.flux_path,
-        predictions_csv=args.predictions_csv,
-        attention_path=args.attention_path,
-        grid_size=tuple(args.grid_size),
-        aia_path = "/mnt/data/ML-Ready-mixed/ML-Ready-mixed/AIA/test"
-    )
-
-    # Detect flare events
+    # Detect flare events using config parameters
     print("Detecting flare events...")
-    flare_events = analyzer.detect_flare_events(
-        threshold_percentile=args.threshold_percentile,
-        min_patches=args.min_patches
-    )
+    flare_events = analyzer.detect_flare_events()
+
+    # Detect simultaneous flares
+    print("\nDetecting simultaneous flares...")
+    simultaneous_threshold = analyzer.flare_config.get('simultaneous_flare_threshold', 5e-6)
+    simultaneous_flares = analyzer.detect_simultaneous_flares(threshold=simultaneous_threshold)
 
     # Create flare event summary
     flare_summary_path = output_dir / 'flare_events_summary.csv'
     analyzer.create_flare_event_summary(flare_summary_path)
 
-    # Analyze top contributing patches
+    # Save simultaneous flares summary
+    if len(simultaneous_flares) > 0:
+        simultaneous_summary_path = output_dir / 'simultaneous_flares_summary.csv'
+        simultaneous_flares.to_csv(simultaneous_summary_path, index=False)
+        print(f"Simultaneous flares summary saved to: {simultaneous_summary_path}")
 
-    # Plot some examples
-    if len(flare_events) > 0:
-        # Plot top 5 flare events
+    # Create visualizations if enabled in config
+    if analyzer.output_config.get('create_visualizations', True) and len(flare_events) > 0:
         print("\nCreating visualizations for top flare events...")
-        top_events = flare_events.head(630).sort_values('prediction', ascending=False)
+        max_viz = analyzer.output_config.get('max_visualizations', 10)
+        viz_threshold = args.viz_threshold if args.viz_threshold is not None else analyzer.output_config.get('visualization_threshold', 0.0)
+        
+        # Filter events by visualization threshold
+        high_prediction_events = flare_events[flare_events['prediction'] >= viz_threshold]
+        print(f"Found {len(high_prediction_events)} events above visualization threshold {viz_threshold:.2e}")
+        
+        if len(high_prediction_events) > 0:
+            top_events = high_prediction_events.head(max_viz).sort_values('prediction', ascending=False)
+            print(f"Creating visualizations for top {len(top_events)} events...")
 
-        for i, (_, event) in enumerate(top_events.iterrows()):
-            output_path = output_dir / f'flare_event_{i + 1}_{event["timestamp"]}.png'
+            for i, (_, event) in enumerate(top_events.iterrows()):
+                output_path = output_dir / f'flare_event_{i + 1}_{event["timestamp"]}.png'
+                analyzer.plot_flux_contribution_heatmap(
+                    event['timestamp'],
+                    save_path=output_path,
+                    show_attention=True,
+                    threshold_percentile=analyzer.flare_config.get('threshold_percentile', 97)
+                )
+        else:
+            print(f"No events found above visualization threshold {viz_threshold:.2e}")
+
+    # Create visualizations for simultaneous flares in separate folder
+    if len(simultaneous_flares) > 0 and analyzer.output_config.get('create_visualizations', True):
+        print("\nCreating visualizations for simultaneous flare events...")
+        simultaneous_output_dir = output_dir / 'simultaneous_flares'
+        simultaneous_output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Get unique timestamps with simultaneous flares
+        simultaneous_timestamps = simultaneous_flares['timestamp'].unique()
+        print(f"Creating visualizations for {len(simultaneous_timestamps)} timestamps with simultaneous flares...")
+        
+        for i, timestamp in enumerate(simultaneous_timestamps):
+            # Get all events for this timestamp
+            timestamp_events = simultaneous_flares[simultaneous_flares['timestamp'] == timestamp]
+            group_id = timestamp_events['group_id'].iloc[0]
+            group_size = timestamp_events['group_size'].iloc[0]
+            
+            output_path = simultaneous_output_dir / f'simultaneous_group_{group_id}_{timestamp}.png'
             analyzer.plot_flux_contribution_heatmap(
-                event['timestamp'],
+                timestamp,
                 save_path=output_path,
-                show_attention= True,
-                threshold_percentile=args.threshold_percentile
-
+                show_attention=True,
+                threshold_percentile=analyzer.flare_config.get('threshold_percentile', 97)
             )
-            # analyzer.plot_flux_overlay_on_aia(
-            #     event['timestamp'],
-            #     save_path=output_path,
-            #     flux_threshold_percentile=args.threshold_percentile
-            # )
+            print(f"  Saved simultaneous flare visualization: {output_path} ({group_size} events)")
 
+    # Create movie if enabled in config
+    if analyzer.output_config.get('create_movie', False) and analyzer.time_period:
+        print("\nCreating flare movie...")
+        movie_fps = analyzer.output_config.get('movie_fps', 2)
+        movie_path = output_dir / 'flare_event_movie.mp4'
+        analyzer.create_flare_movie(
+            start_time=analyzer.time_period['start_time'],
+            end_time=analyzer.time_period['end_time'],
+            output_path=movie_path,
+            fps=movie_fps
+        )
 
     print(f"\nAnalysis complete! Results saved to: {output_dir}")
     print(f"Found {len(flare_events)} potential flare events")
-
-    # analyzer.create_flare_movie(
-    #     start_time='2023-08-05 00:00',
-    #     end_time='2023-08-06 00:00',
-    #     output_path=output_dir / 'flare_event_movie.mp4',
-    #     fps=30
-    # )
+    if len(simultaneous_flares) > 0:
+        print(f"Found {len(simultaneous_flares)} simultaneous flare events in {simultaneous_flares['group_id'].nunique()} groups")
 
 
 if __name__ == "__main__":
