@@ -32,6 +32,18 @@ from forecasting.models.FastSpectralNet import FastViTFlaringModel
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["NCCL_DEBUG"] = "WARN"
+# Shared memory optimizations
+os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads
+os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL threads
+
+def print_gpu_memory(stage=""):
+    """Print GPU memory usage for monitoring"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        print(f"GPU Memory {stage} - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+    else:
+        print(f"No GPU available for memory monitoring {stage}")
 
 def resolve_config_variables(config_dict):
     """Recursively resolve ${variable} references within the config"""
@@ -75,11 +87,27 @@ with open(args.config, 'r') as stream:
 # Resolve variables like ${base_data_dir}
 config_data = resolve_config_variables(config_data)
 
-# Debug: Print resolved paths
-print("Resolved paths:")
-print(f"AIA dir: {config_data['data']['aia_dir']}")
-print(f"SXR dir: {config_data['data']['sxr_dir']}")
-print(f"Checkpoints dir: {config_data['data']['checkpoints_dir']}")
+# GPU Memory Isolation for Multi-GPU Systems
+gpu_id = config_data.get('gpu_id', 0)
+if gpu_id != -1:  # Only if using GPU
+    # Set CUDA device visibility to only the specified GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    print(f"Set CUDA_VISIBLE_DEVICES to GPU {gpu_id}")
+    
+    # Clear any existing CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"Cleared CUDA cache for GPU {gpu_id}")
+        
+    # Set memory allocation strategy for better isolation
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,roundup_power2_divisions:16"
+    
+    # Disable memory sharing between processes
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    
+    print(f"GPU Memory Isolation configured for GPU {gpu_id}")
+else:
+    print("Using CPU - no GPU memory isolation needed")
 
 # Debug: Print resolved paths
 print("Resolved paths:")
@@ -106,13 +134,16 @@ data_loader = AIA_GOESDataModule(
     sxr_val_dir=config_data['data']['sxr_dir']+"/val",
     sxr_test_dir=config_data['data']['sxr_dir']+"/test",
     batch_size=config_data['batch_size'],
-    num_workers=os.cpu_count(),
+    num_workers=min(8, os.cpu_count()),  # Limit workers to prevent shm issues
     sxr_norm=sxr_norm,
     wavelengths=training_wavelengths,
     oversample=config_data['oversample'],
     balance_strategy=config_data['balance_strategy'],
 )
 data_loader.setup()
+
+# Monitor memory after data loading
+print_gpu_memory("after data loading")
 
 # Logger
 #wb_name = f"{instrument}_{n}" if len(combined_parameters) > 1 else "aia_sxr_model"
@@ -133,8 +164,9 @@ plot_samples = plot_data  # Keep as list of ((aia, sxr), target)
 #sxr_callback = SXRPredictionLogger(plot_samples)
 
 sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
-# Attention map callback
-attention = AttentionMapCallback()
+# Attention map callback - get patch size from config
+patch_size = config_data.get('vit_custom', {}).get('patch_size', 8)
+attention = AttentionMapCallback(patch_size=patch_size)
 
 
 class PTHCheckpointCallback(Callback):
@@ -308,7 +340,9 @@ elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
 elif config_data['selected_model'] == 'ViTPatch':
-    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=get_base_weights(data_loader, sxr_norm))
+    # Calculate base weights only if configured to do so
+    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
 
 elif config_data['selected_model'] == 'FusionViTHybrid':
     # Expect a 'fusion' section in YAML
@@ -338,12 +372,32 @@ elif config_data['selected_model'] == 'FusionViTHybrid':
 else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
 
+# Monitor memory after model creation
+print_gpu_memory("after model creation")
+
+# Set device based on config
+gpu_id = config_data.get('gpu_id', 0)
+if gpu_id == -1:
+    accelerator = "cpu"
+    devices = 1
+    print("Using CPU for training")
+else:
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        # When CUDA_VISIBLE_DEVICES is set, PyTorch Lightning only sees GPU 0
+        devices = [0]  # Always use device 0 since we've isolated to specific GPU
+        print(f"Using GPU {gpu_id} for training (mapped to device 0 after CUDA_VISIBLE_DEVICES)")
+    else:
+        accelerator = "cpu"
+        devices = 1
+        print(f"GPU {gpu_id} not available, falling back to CPU")
+
 # Trainer
 if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViTPatch' or config_data['selected_model'] == 'FusionViTHybrid':
     trainer = Trainer(
         default_root_dir=config_data['data']['checkpoints_dir'],
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
+        accelerator=accelerator,
+        devices=devices,
         max_epochs=config_data['epochs'],
         callbacks=[attention, checkpoint_callback],
         logger=wandb_logger,
@@ -352,8 +406,8 @@ if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'V
 else:
     trainer = Trainer(
         default_root_dir=config_data['data']['checkpoints_dir'],
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
+        accelerator=accelerator,
+        devices=devices,
         max_epochs=config_data['epochs'],
         callbacks=[checkpoint_callback],
         logger=wandb_logger,
