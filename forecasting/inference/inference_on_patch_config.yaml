@@ -27,5 +27,6 @@ data:
   sxr_norm_path:
     "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-altered-loss-epoch=36-val_total_loss=0.0387.ckpt"
+    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-epoch=54-val_total_loss=0.0365.ckpt"
+
 
