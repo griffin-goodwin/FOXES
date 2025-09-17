@@ -90,7 +90,7 @@ class ImagePredictionLogger_SXR(Callback):
 
 
 class AttentionMapCallback(Callback):
-    def __init__(self, log_every_n_epochs=1, num_samples=4, save_dir="attention_maps"):
+    def __init__(self, log_every_n_epochs=1, num_samples=4, save_dir="attention_maps", patch_size=8):
         """
         Callback to visualize attention maps during training.
 
@@ -98,8 +98,10 @@ class AttentionMapCallback(Callback):
             log_every_n_epochs: How often to log attention maps
             num_samples: Number of samples to visualize
             save_dir: Directory to save attention maps
+            patch_size: Size of patches used in the model
         """
         super().__init__()
+        self.patch_size = patch_size
         self.log_every_n_epochs = log_every_n_epochs
         self.num_samples = num_samples
         self.save_dir = save_dir
@@ -142,7 +144,7 @@ class AttentionMapCallback(Callback):
                     attention_weights,
                     sample_idx,
                     trainer.current_epoch,
-                    patch_size=16
+                    patch_size=self.patch_size
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(map)})
                 plt.close(map)
