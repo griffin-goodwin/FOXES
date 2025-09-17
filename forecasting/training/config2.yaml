@@ -67,5 +67,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-patch-model
+  wb_name: vit-patch-model-2d-embeddings
   notes: Regression from AIA images (6 channels) to GOES SXR flux
