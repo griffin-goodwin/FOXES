@@ -292,8 +292,8 @@ def get_base_weights(data_loader, sxr_norm):
     x_count = max(x_count, 1)
 
     # Inverse frequency weighting
-    quiet_weight = total / (quiet_count + c_count)
-    c_weight = total / (quiet_count + c_count)
+    quiet_weight = total / (quiet_count)
+    c_weight = total / (c_count)
     m_weight = total / m_count
     x_weight = total / x_count
 

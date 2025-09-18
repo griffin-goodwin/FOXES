@@ -83,7 +83,7 @@ class ViT(pl.LightningModule):
         )
 
         #Also calculate huber loss for logging
-        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=0.3)
+        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=.3)
 
 
         # Log adaptation info
@@ -341,10 +341,10 @@ class SXRRegressionDynamicLoss:
     def _get_base_weights(self):
         #Calculate the base weights based on the number of samples in each class within training data
         return {
-            'quiet': 1.2110,
-            'c_class': 1.2110,
-            'm_class': 6.3106,
-            'x_class': 63.4350
+            'quiet': 1.5,    # Increase from current value
+            'c_class': 1.0,  # Keep as baseline
+            'm_class': 8.0,  # Maintain M-class focus
+            'x_class': 20.0  # Maintain X-class focus
         }
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
@@ -461,7 +461,7 @@ class SXRRegressionDynamicLoss:
         sxr_un_np = sxr_un.detach().cpu().numpy()
 
         #Huber loss
-        error = F.huber_loss(preds_norm, sxr_norm, delta=0.3, reduction='none')
+        error = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
         error = error.detach().cpu().numpy()
 
     
