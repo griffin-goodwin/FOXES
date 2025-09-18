@@ -180,3 +180,5 @@ cython_debug/
 .cursorignore
 
 wandb/
+
+*.png
