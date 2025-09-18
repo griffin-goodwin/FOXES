@@ -341,10 +341,10 @@ class SXRRegressionDynamicLoss:
     def _get_base_weights(self):
         #Calculate the base weights based on the number of samples in each class within training data
         return {
-            'quiet': 1.0,
-            'c_class': 2.0,
-            'm_class': 10.0,
-            'x_class': 20.0
+            'quiet': 1.2110,
+            'c_class': 1.2110,
+            'm_class': 6.3106,
+            'x_class': 63.4350
         }
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
@@ -360,16 +360,16 @@ class SXRRegressionDynamicLoss:
 
         # Get continuous multipliers per class with custom params
         quiet_mult = self._get_performance_multiplier(
-            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.2, sxrclass='quiet'
+            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.05, sxrclass='quiet'  # Was 0.2
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.3, sxrclass='c_class'  
+            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'    # Was 0.3
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.4, sxrclass='m_class'
+            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'   # Was 0.4
         )
         x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=.5, sxrclass='x_class'
+            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=0.12, sxrclass='x_class'  # Was 0.5
         )
 
         quiet_weight = self.base_weights['quiet'] * quiet_mult
