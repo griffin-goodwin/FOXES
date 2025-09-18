@@ -55,14 +55,19 @@ def create_inference_config(base_config, checkpoint_path, output_path, weight_pa
     return config_path
 
 
-def create_evaluation_config(base_eval_config, model_csv_path, output_dir, model_name):
+def create_evaluation_config(base_eval_config, model_csv_path, output_dir, model_name, weight_path):
     """Create evaluation config for specific model"""
     with open(base_eval_config, 'r') as f:
         config = yaml.safe_load(f)
     
+    # Resolve config variables
+    from forecasting.inference.evaluation import resolve_config_variables
+    config = resolve_config_variables(config)
+    
     # Update paths
     config['model_predictions']['main_model_csv'] = model_csv_path
     config['evaluation']['output_dir'] = output_dir
+    config['data']['weight_path'] = weight_path  # Update weight path for this model
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -119,6 +124,17 @@ def run_evaluation(evaluation_config_path, model_name):
         with open(evaluation_config_path, 'r') as f:
             config = yaml.safe_load(f)
         
+        # Generate timestamps for movie frames if time_range is available
+        timestamps = None
+        if 'time_range' in config:
+            from forecasting.inference.evaluation import generate_timestamps
+            timestamps = generate_timestamps(
+                config['time_range']['start_time'],
+                config['time_range']['end_time'],
+                config['time_range']['interval_minutes']
+            )
+            print(f"Generated {len(timestamps)} timestamps for movie frames")
+        
         # Create evaluator
         evaluator = SolarFlareEvaluator(
             csv_path=config['model_predictions']['main_model_csv'],
@@ -129,8 +145,8 @@ def run_evaluation(evaluation_config_path, model_name):
             sxr_cutoff=config['evaluation']['sxr_cutoff']
         )
         
-        # Run evaluation
-        evaluator.run_full_evaluation()
+        # Run evaluation with timestamps for movie generation
+        evaluator.run_full_evaluation(timestamps=timestamps)
         print(f"Evaluation completed successfully for {model_name}!")
         return True
         
@@ -230,7 +246,8 @@ def main():
                 args.base_eval_config,
                 model_csv_path,
                 model_output_dir,
-                model_name
+                model_name,
+                weight_path
             )
             
             # Run inference (unless skipped)
