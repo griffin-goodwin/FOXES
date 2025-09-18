@@ -13,15 +13,14 @@ data:
     "${base_data_dir}/SXR-SPLIT"
   sxr_norm_path:
     "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
-  checkpoint_path:
-    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-epoch=54-val_total_loss=0.0365.ckpt"
+
 
 
 analysis:
   # Time period selection for testing analysis
   time_period:
-    start_time: "2012-08-05 00:00:00"  # Start time for analysis
-    end_time: "2023-08-14 00:00:00"    # End time for analysis
+    start_time: "2023-08-05 00:00:00"  # Start time for analysis
+    end_time: "2023-08-06 00:00:00"    # End time for analysis
     # Set to null to analyze all available data
     # start_time: null
     # end_time: null
@@ -37,7 +36,7 @@ analysis:
   output:
     output_dir: "${base_data_dir}/flux_analysis_output"
     create_visualizations: true
-    max_visualizations: 10
+    max_visualizations: 100
     visualization_threshold: 0.00005  # Only save figures for predictions above this threshold (5e-5)
-    create_movie: false
+    create_movie: true
     movie_fps: 2
