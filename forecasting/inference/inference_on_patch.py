@@ -122,6 +122,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
 
                 # Save all weights in this batch at once
                 if config_data and 'weight_path' in config_data:
+                    print(f"Saving {len(batch_weights)} attention weights to {config_data['weight_path']}")
                     save_batch_weights(batch_weights, batch_idx, batch_size, times, config_data['weight_path'])
 
             # Process and save flux contributions
@@ -164,7 +165,7 @@ def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path)
     for i, weight in enumerate(batch_weights):
         global_idx = batch_idx * batch_size + i
         if global_idx < len(times):  # Make sure we don't go out of bounds
-            filepath = weight_path + f"{times[global_idx]}"
+            filepath = os.path.join(weight_path, f"{times[global_idx]}")
             save_args.append((weight, filepath))
 
     # Save all weights in this batch in parallel
