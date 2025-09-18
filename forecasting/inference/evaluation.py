@@ -26,7 +26,8 @@ class SolarFlareEvaluator:
                  aia_dir=None,
                  weight_path=None,
                  baseline_csv_path=None,
-                 output_dir="./solar_flare_evaluation"):
+                 output_dir="./solar_flare_evaluation",
+                 sxr_cutoff=None):
         """
         Initialize the solar flare evaluation system with baseline comparison.
 
@@ -36,6 +37,7 @@ class SolarFlareEvaluator:
             weight_path (str): Path to main model attention weights directory (optional)
             baseline_csv_path (str): Path to baseline model prediction results CSV
             output_dir (str): Base output directory for results
+            sxr_cutoff (float): Minimum SXR value threshold for ground truth filtering (optional)
         """
         # Set paths
         self.csv_path = csv_path
@@ -43,6 +45,7 @@ class SolarFlareEvaluator:
         self.weight_path = weight_path
         self.baseline_csv_path = baseline_csv_path
         self.output_dir = output_dir
+        self.sxr_cutoff = sxr_cutoff
         
         # Determine if we're in baseline-only mode
         self.baseline_only_mode = (csv_path is None or not os.path.exists(csv_path)) and baseline_csv_path is not None
@@ -72,6 +75,13 @@ class SolarFlareEvaluator:
                 self.df = pd.read_csv(self.baseline_csv_path)
                 outlier_threshold = 1 # 0.01
                 self.mask = self.df['predictions'] < outlier_threshold
+                
+                # Apply SXR cutoff filter if specified
+                if self.sxr_cutoff is not None:
+                    sxr_mask = self.df['groundtruth'] >= self.sxr_cutoff
+                    self.mask = self.mask & sxr_mask
+                    print(f"Applied SXR cutoff filter: ground truth >= {self.sxr_cutoff}")
+                
                 self.df = self.df[self.mask]
                 self.y_true = self.df['groundtruth'].values
                 #add 20% uncertainty to ground truth
@@ -96,6 +106,13 @@ class SolarFlareEvaluator:
                 self.df = pd.read_csv(self.csv_path)
                 outlier_threshold = 999999 # 0.01
                 self.mask = self.df['predictions'] < outlier_threshold
+                
+                # Apply SXR cutoff filter if specified
+                if self.sxr_cutoff is not None:
+                    sxr_mask = self.df['groundtruth'] >= self.sxr_cutoff
+                    self.mask = self.mask & sxr_mask
+                    print(f"Applied SXR cutoff filter: ground truth >= {self.sxr_cutoff}")
+                
                 self.df = self.df[self.mask]
                 self.y_true = self.df['groundtruth'].values
                 #add 20% uncertainty to ground truth
@@ -914,6 +931,10 @@ def main():
     print(f"Output directory: {evaluation['output_dir']}")
     print(f"Time range: {time_range['start_time']} to {time_range['end_time']}")
     print(f"Number of timestamps: {len(timestamps)}")
+    if evaluation.get('sxr_cutoff') is not None:
+        print(f"SXR cutoff filter: ground truth >= {evaluation['sxr_cutoff']}")
+    else:
+        print("SXR cutoff filter: disabled")
     
     # Check if we're in baseline-only mode
     main_csv = model_predictions['main_model_csv']
@@ -928,7 +949,8 @@ def main():
         baseline_csv_path=model_predictions['baseline_csv'],
         aia_dir=data['aia_dir'],
         weight_path=data['weight_path'],
-        output_dir=evaluation['output_dir']
+        output_dir=evaluation['output_dir'],
+        sxr_cutoff=evaluation.get('sxr_cutoff')
     )
     
     # Run complete evaluation
