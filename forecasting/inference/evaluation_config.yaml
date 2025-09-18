@@ -6,18 +6,18 @@ output_base_dir: "/mnt/data/COMBINED/solar_flare_comparison_results"
 # Model prediction files
 # Note: When main_model_csv is None or doesn't exist, the evaluator will run in baseline-only mode
 model_predictions:
-  main_model_csv: ${base_data_dir}/output/patch.csv  # Set to null for baseline-only mode
-  baseline_csv: "${base_data_dir}/output/patch.csv"
+  main_model_csv: ${base_data_dir}/output/rs.csv  # Set to null for baseline-only mode
+  baseline_csv: ""
 
 # Data directories
 data:
   aia_dir: "${base_data_dir}/AIA-SPLIT/test/"
-  weight_path: "/mnt/data/COMBINED/patch_weights"  # Path to attention weights (empty if not available)
+  weight_path: "/mnt/data/COMBINED/rs_weights"  # Path to attention weights (empty if not available)
 
 # Evaluation parameters
 evaluation:
-  output_dir: "${output_base_dir}/patch"
-  sxr_cutoff: 0.0000001  # Set to filter ground truth values (e.g., 1e-6 for values >= 1e-6)
+  output_dir: "${output_base_dir}/rs"
+  sxr_cutoff:   # Set to filter ground truth values (e.g., 1e-6 for values >= 1e-6)
                     # Examples: 1e-6 (C-class and above), 1e-5 (M-class and above), 1e-4 (X-class only)
   
 # Time range for evaluation
