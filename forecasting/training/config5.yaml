@@ -7,7 +7,7 @@ wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # GPU configuration
 gpu_id: 2  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
 # Model configuration
-selected_model: "vit"  # Options: "hybrid", "vit", "fusion", "vitpatch"
+selected_model: "ViTPatch"  # Options: "hybrid", "vit", "fusion", "vitpatch"
 batch_size:    64
 epochs:        250
 oversample: false
@@ -71,5 +71,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-patch-model-2d-embeddings-reduced-sensitivity
+  wb_name: vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights
   notes: Regression from AIA images (6 channels) to GOES SXR flux
