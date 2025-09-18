@@ -40,6 +40,6 @@ data:
   sxr_norm_path:
     "/mnt/data/ML-READY/SXR/normalized_sxr.npy"
   checkpoint_path:
-    "/mnt/data/ML-READY/new-checkpoint/baseline-model-more-complex-STEREO-epoch=113-val_total_loss=0.0449.ckpt"
+    "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-claude-suggested-weights-epoch=30-val_total_loss=0.0385.ckpt"
 
 
