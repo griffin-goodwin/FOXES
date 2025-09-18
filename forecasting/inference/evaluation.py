@@ -19,6 +19,38 @@ import matplotlib.ticker as mticker
 import matplotlib.patheffects as pe
 import matplotlib.gridspec as gridspec
 import sunpy.visualization.colormaps as cm
+import matplotlib.font_manager as fm
+from matplotlib import rcParams
+import colormaps as cmaps
+
+
+
+def setup_barlow_font():
+    """Setup Barlow font for matplotlib plots"""
+    try:
+        # Try to find Barlow font with more specific search
+        barlow_fonts = []
+        for font in fm.fontManager.ttflist:
+            if 'barlow' in font.name.lower() or 'barlow' in font.fname.lower():
+                barlow_fonts.append(font.name)
+        
+        if barlow_fonts:
+            rcParams['font.family'] = 'Barlow'
+            print(f"Using Barlow font: {barlow_fonts[0]}")
+        else:
+            # Try alternative approach - directly specify font file
+            barlow_path = '/usr/share/fonts/truetype/barlow/Barlow-Regular.ttf'
+            if os.path.exists(barlow_path):
+                # Add the font file directly to matplotlib
+                fm.fontManager.addfont(barlow_path)
+                rcParams['font.family'] = 'Barlow'
+                print(f"Using Barlow font from: {barlow_path}")
+            else:
+                # Fallback to sans-serif
+                rcParams['font.family'] = 'sans-serif'
+                print("Barlow font not found, using default sans-serif")
+    except Exception as e:
+        print(f"Font setup error: {e}, using default font")
 
 class SolarFlareEvaluator:
     def __init__(self,
@@ -248,7 +280,7 @@ class SolarFlareEvaluator:
 
     def _plot_regression_comparison(self):
         """Generate regression comparison plot with MAE contours and residuals plot"""
-
+        setup_barlow_font()
         flare_classes = {
             'A1.0': (1e-8, 1e-7),
             'B1.0': (1e-7, 1e-6),
@@ -263,11 +295,15 @@ class SolarFlareEvaluator:
             ax_top = ax.twiny()
             ax_top.set_xlim(ax.get_xlim())
             ax_top.set_xscale('log')
+            # Make secondary axis background transparent
+            ax_top.patch.set_alpha(0.0)
 
             # Create secondary axis for flare classes (right)
             ax_right = ax.twinx()
             ax_right.set_ylim(ax.get_ylim())
             ax_right.set_yscale('log')
+            # Make secondary axis background transparent
+            ax_right.patch.set_alpha(0.0)
 
             # Set flare class tick positions and labels
             flare_positions = []
@@ -282,18 +318,18 @@ class SolarFlareEvaluator:
 
             if flare_positions:
                 ax_top.set_xticks(flare_positions)
-                ax_top.set_xticklabels(flare_labels,fontsize=12)
-                ax_top.tick_params()
+                ax_top.set_xticklabels(flare_labels, fontsize=12, color='white', fontfamily='Barlow')
+                ax_top.tick_params(colors='white')
 
                 ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_top.tick_params(which='minor')
+                ax_top.tick_params(which='minor', colors='white')
 
                 ax_right.set_yticks(flare_positions)
-                ax_right.set_yticklabels(flare_labels,fontsize=12)
-                ax_right.tick_params()
+                ax_right.set_yticklabels(flare_labels, fontsize=12, color='white', fontfamily='Barlow')
+                ax_right.tick_params(colors='white')
 
                 ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_right.tick_params(which='minor')
+                ax_right.tick_params(which='minor', colors='white')
 
         def draw_mae_contours(plot_ax, min_val, max_val):
             """Draw MAE contours on the 1-to-1 plot"""
@@ -304,10 +340,9 @@ class SolarFlareEvaluator:
 
             # Define flare classes
             flare_classes_mae = {
-                'A': (1e-8, 1e-7, "#3F7CAC"),
+                'A': (1e-8, 1e-7, "#FFAAA5"),
                 'B': (1e-7, 1e-6,  "#FFAAA5"),
                 'C': (1e-6, 1e-5, "#FFAAA5"),
-
                 'M': (1e-5, 1e-4, "#FFAAA5"),
                 'X': (1e-4, 1e-3, "#FFAAA5")
             }
@@ -336,13 +371,11 @@ class SolarFlareEvaluator:
                 # Plot MAE contours on the 1-to-1 plot
                 if class_name == 'X':
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
-                                         alpha=0.75,
-                                         label=f'MAE',color=color)
+                                        alpha=0.75,
+                                        label=f'MAE',color=color)
                 else:
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
-                                         alpha=0.75,color=color)
-
-
+                                        alpha=0.75,color=color)
 
         min_val = min(min(self.y_true), min(self.y_pred))
         max_val = max(max(self.y_true), max(self.y_pred))
@@ -350,9 +383,10 @@ class SolarFlareEvaluator:
 
         shared_norm = LogNorm(vmin=1, vmax=None)
 
-
+        # Create figure with transparent background but solid plot area
         fig, (ax1) = plt.subplots(1, 1, figsize=(10, 6))
-            #ax2 = fig.add_subplot(gs[1], sharex=ax1)  # Residuals plot
+        # Set figure background to transparent
+        fig.patch.set_alpha(0.0)
 
         # Main model plot (1-to-1 with MAE contours)
         min_val = min(min(self.y_true), min(self.y_pred))
@@ -360,22 +394,44 @@ class SolarFlareEvaluator:
 
         # Perfect prediction line
         ax1.plot([min_val, max_val], [min_val, max_val],
-                 label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
+                label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
 
         # 2D histogram
         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-                        cmap='bone', norm=shared_norm, alpha=1)
+                        cmap=cmaps.fire_dark, norm=shared_norm, alpha=1)
 
         # Draw MAE contours on main plot
         draw_mae_contours(ax1, min_val, max_val)
 
-        ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)',fontsize=12)
-        ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)',fontsize=12)
-        ax1.tick_params(labelsize=12)
+        # Set plot area background to dark blue-purple that complements fire colormap
+        ax1.set_facecolor('#FFEEE6')  # Dark blue-purple background for plot area
+        ax1.patch.set_alpha(1.0)      # Make sure axes patch is opaque
+
+        # Set labels and styling
+        ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)', fontsize=14, color='white', fontfamily='Barlow')
+        ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)', fontsize=14, color='white', fontfamily='Barlow')
+        ax1.tick_params(labelsize=12, colors='white')
+        
+        # Set tick labels to Barlow font
+        for label in ax1.get_xticklabels():
+            label.set_fontfamily('Barlow')
+        for label in ax1.get_yticklabels():
+            label.set_fontfamily('Barlow')
+        
         title = 'Baseline Model Performance with MAE Overlay' if self.baseline_only_mode else 'FOXES Model Performance with MAE Overlay'
-        ax1.set_title(title,fontsize=12)
-        ax1.legend(loc='upper left')
-        ax1.grid(True, alpha=0.5)
+        #ax1.set_title(title, fontsize=16, color='white', pad=20, fontfamily='Barlow')
+        
+        # Style the legend
+        legend = ax1.legend(loc='upper left', frameon=True, fancybox=True, shadow=True, prop={'family': 'Barlow', 'size': 12})
+        legend.get_frame().set_facecolor('#FFEEE6')
+        legend.get_frame().set_alpha(0.9)
+        for text in legend.get_texts():
+            text.set_color('black')
+            text.set_fontsize(12)
+            text.set_fontfamily('Barlow')
+        
+        # Grid styling
+        ax1.grid(True, alpha=0.3, color='black', linestyle='-', linewidth=0.5)
         ax1.tick_params()
         ax1.set_xscale('log')
         ax1.set_yscale('log')
@@ -383,22 +439,30 @@ class SolarFlareEvaluator:
         # Add minor ticks for main plot
         ax1.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
         ax1.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-        ax1.tick_params(which='minor')
-        ax1.grid(True, which='minor', alpha=0.25, linewidth=0.25, linestyle='--')
+        ax1.tick_params(which='minor', colors='white')
+        ax1.grid(True, which='minor', alpha=0.15, linewidth=0.25, linestyle='--', color='black')
 
         # Add flare class axes to main plot
         add_flare_class_axes(ax1, min_val, max_val)
 
-        # Residuals plot (bottom subplot)
-        #h_resid = plot_residuals(ax2, min_val, max_val)
-
+        # Colorbar styling
         cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)
-        cbar.ax.yaxis.set_tick_params(labelsize=12)
-        plt.setp(cbar.ax.yaxis.get_ticklabels())
-        cbar.set_label( "Count", fontsize=12)
+        cbar.ax.yaxis.set_tick_params(labelsize=12, colors='white')
+        cbar.set_label("Count", fontsize=14, color='white', fontfamily='Barlow')
+        cbar.ax.tick_params(colors='white')
+        
+        # Make colorbar background match the plot area
+        cbar.ax.set_facecolor('#1a1a3a')
+        cbar.ax.patch.set_alpha(1.0)
+        
+        # Set colorbar tick labels to Barlow font
+        for label in cbar.ax.get_yticklabels():
+            label.set_fontfamily('Barlow')
 
+        # Save with transparent background - now only the figure background will be transparent
         plot_path = os.path.join(self.comparison_dir, "regression_comparison.png")
-        plt.savefig(plot_path, dpi=500, bbox_inches='tight')
+        plt.savefig(plot_path, dpi=500, bbox_inches='tight', 
+                    facecolor='none')  # Explicitly set facecolor to none
         plt.close()
         print(f"Saved regression comparison plot to {plot_path}")
 
