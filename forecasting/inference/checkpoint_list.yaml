@@ -2,14 +2,14 @@
 # This file contains a list of model checkpoints to evaluate
 
 checkpoints:
-  - name: "claude-epoch39"
-    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-claude-suggested-weights-epoch=39-val_total_loss=0.0395.ckpt"
+  - name: "rs-epoch66"
+    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-epoch=66-val_total_loss=0.0342.ckpt"
     
-  - name: "rs-base-epoch39"
-    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-epoch=39-val_total_loss=0.0467.ckpt"
+  # - name: "rs-base-epoch43"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-epoch=43-val_total_loss=0.0470.ckpt"
     
-  - name: "rs-epoch50"
-    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-epoch=50-val_total_loss=0.0382.ckpt"
+  # - name: "rs-epoch50"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-epoch=50-val_total_loss=0.0382.ckpt"
 
 # Add more checkpoints as needed
 # Each checkpoint should have:
