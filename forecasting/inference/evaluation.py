@@ -450,7 +450,10 @@ class SolarFlareEvaluator:
         cbar.ax.yaxis.set_tick_params(labelsize=12, colors='white')
         cbar.set_label("Count", fontsize=14, color='white', fontfamily='Barlow')
         cbar.ax.tick_params(colors='white')
-        
+        #make cbar small ticks white
+        cbar.ax.yaxis.set_tick_params(colors='white')
+        cbar.ax.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
+        cbar.ax.tick_params(which='minor', colors='white')
         # Make colorbar background match the plot area
         cbar.ax.set_facecolor('#1a1a3a')
         cbar.ax.patch.set_alpha(1.0)
@@ -512,6 +515,10 @@ class SolarFlareEvaluator:
 
     def load_attention_map(self, timestamp):
         """Load attention map for given timestamp"""
+        if not self.weight_path or not os.path.exists(self.weight_path):
+            print(f"Weight path not available: {self.weight_path}")
+            return None
+            
         filepath = os.path.join(self.weight_path, f"{timestamp}")
         try:
             attention = np.loadtxt(filepath, delimiter=",")
@@ -623,8 +630,8 @@ class SolarFlareEvaluator:
             aia_data = self.load_aia_image(timestamp)
             attention_data = self.load_attention_map(timestamp)
 
-            if aia_data is None or attention_data is None:
-                print(f"Worker {os.getpid()}: Skipping {timestamp} (missing data)")
+            if aia_data is None:
+                print(f"Worker {os.getpid()}: Skipping {timestamp} (missing AIA data)")
                 return None
 
             # Get SXR data from CSV
@@ -633,40 +640,22 @@ class SolarFlareEvaluator:
             # Generate frame
             save_path = os.path.join(self.frames_dir, f"{timestamp}.png")
 
-            # Create figure
+            # Setup Barlow font
+            setup_barlow_font()
+
+            # Create figure with transparent background
             fig = plt.figure(figsize=(10, 5))
-            # #fig.patch.set_facecolor('#1a1a2e')
+            fig.patch.set_alpha(0.0)  # Transparent background
             gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.0)
 
             # Right gridspec for SXR plot (column 3) with more padding
             gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0)
-
-            # gs_left = fig.add_gridspec(2, 3, left=0.0, right=1, top=1, bottom=0.52,
-            #                           width_ratios=[1, 1], hspace=0.14, wspace=0.14)
-            #
-            # # Bottom gridspec for SXR plot (1 row, 1 column)
-            # gs_right = fig.add_gridspec(1, 1, left=0, right=1, top=0.48, bottom=0)
 
             wavs = ['94', '131', '171', '193', '211', '304']
             att_max = np.percentile(attention_data, 100)
             att_min = np.percentile(attention_data, 0)
             att_norm = AsinhNorm(vmin=att_min, vmax=att_max, clip=False)
             max_attention_idx = np.unravel_index(np.argmax(attention_data), attention_data.shape)
-            max_y, max_x = max_attention_idx
-            # Plot AIA images with attention maps
-            # for i in range(6):
-            #     row = i // 3
-            #     col = i % 3
-            #     ax = fig.add_subplot(gs_left[row, col])
-            #
-            #     aia_img = aia_data[i]
-            #     ax.imshow(aia_img, cmap="gray", origin='lower')
-            #     ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.35)
-            #     # Plot star at maximum attention location
-            #     # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
-            #     #         markeredgecolor='white', markeredgewidth=1)
-            #     ax.set_title(f'AIA {wavs[i]} Å', fontsize=12)
-            #     ax.axis('off')
 
             row = 0
             col = 0
@@ -675,16 +664,20 @@ class SolarFlareEvaluator:
             aia_img = aia_data[1]
 
             ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
-            ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5)
+            ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5,norm=att_norm)
             # Plot star at maximum attention location
             # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
             #         markeredgecolor='white', markeredgewidth=1)
-            ax.set_title(f'AIA {wavs[1]} Å', fontsize=12)
+            ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow', color='white')
             ax.axis('off')
 
 
             # Plot SXR data with uncertainty bands
             sxr_ax = fig.add_subplot(gs_right[:, 0])
+            
+            # Set SXR plot background to match regression plot
+            sxr_ax.set_facecolor('#FFEEE6')  # Light background for SXR plot
+            sxr_ax.patch.set_alpha(1.0)      # Make sure axes patch is opaque
 
             if sxr_window is not None and not sxr_window.empty:
                 # Plot ground truth (no uncertainty)
@@ -775,24 +768,35 @@ class SolarFlareEvaluator:
 
                     info_text = "\n".join(info_lines)
                     sxr_ax.text(0.02, 0.98, info_text, transform=sxr_ax.transAxes,
-                                fontsize=8, verticalalignment='top',
+                                fontsize=8, verticalalignment='top', fontfamily='Barlow',
                                 bbox=dict(boxstyle='round', alpha=0.7, facecolor='white'))
 
                 sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
                 sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
-                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12,)
-                sxr_ax.set_xlabel('Time', fontsize=12)
+                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow', color='white')
+                sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color='white')
                 title = 'Baseline Prediction vs. Ground Truth Comparison' if self.baseline_only_mode else 'FOXES Prediction vs. Ground Truth Comparison'
-                sxr_ax.set_title(title, fontsize=12)
-                sxr_ax.legend(fontsize=8, loc='upper right')
-                legend1 = sxr_ax.legend()
-                # legend1.get_frame().set_facecolor('black')
-                # legend1.get_frame().set_edgecolor('white')
-                # for text in legend1.get_texts():
-                #     text.set_color('white')
-                sxr_ax.grid(True, alpha=0.3)
-                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12)
-                sxr_ax.tick_params(axis='y', labelsize=12)
+                sxr_ax.set_title(title, fontsize=12, fontfamily='Barlow', color='white')
+                
+                # Style the legend to match regression plot
+                legend1 = sxr_ax.legend(fontsize=8, loc='upper right', prop={'family': 'Barlow', 'size': 8})
+                legend1.get_frame().set_facecolor('#FFEEE6')
+                legend1.get_frame().set_alpha(0.9)
+                for text in legend1.get_texts():
+                    text.set_color('black')
+                    text.set_fontfamily('Barlow')
+                
+                sxr_ax.grid(True, alpha=0.3, color='black')
+                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors='white')
+                sxr_ax.tick_params(axis='y', labelsize=12, colors='white')
+                
+                # Set tick labels to Barlow font and white color
+                for label in sxr_ax.get_xticklabels():
+                    label.set_fontfamily('Barlow')
+                    label.set_color('white')
+                for label in sxr_ax.get_yticklabels():
+                    label.set_fontfamily('Barlow')
+                    label.set_color('white')
                 # for spine in sxr_ax.spines.values():
                 #     spine.set_color('white')
                 try:
@@ -801,16 +805,16 @@ class SolarFlareEvaluator:
                     pass  # Skip log scale if data doesn't support it
             else:
                 sxr_ax.text(0.5, 0.5, 'No SXR Data\nAvailable',
-                            transform=sxr_ax.transAxes, fontsize=12,
+                            transform=sxr_ax.transAxes, fontsize=12, fontfamily='Barlow',
                             horizontalalignment='center', verticalalignment='center')
-                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12)
+                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow')
             #
             # for spine in sxr_ax.spines.values():
             #     spine.set_color('white')
 
             #plt.suptitle(f'Timestamp: {timestamp}', fontsize=14)
             #plt.tight_layout()
-            plt.savefig(save_path, dpi=500)
+            plt.savefig(save_path, dpi=500, facecolor='none', transparent=True)
             plt.close()
 
             print(f"Worker {os.getpid()}: Completed {timestamp}")
@@ -821,7 +825,7 @@ class SolarFlareEvaluator:
             plt.close('all')  # Clean up any open figures
             return None
 
-    def create_attention_movie(self, timestamps):
+    def create_attention_movie(self, timestamps, auto_cleanup=True):
         """Generate attention visualization movie with baseline comparison and uncertainties"""
         print(f"Generated {len(timestamps)} timestamps to process")
 
@@ -876,13 +880,19 @@ class SolarFlareEvaluator:
         print(f"Total time: {total_time:.2f} seconds")
         print(f"✅ Movie saved to: {movie_path}")
 
-        # Optional: Clean up frame files
-        cleanup = input("Delete individual frame files? (y/n): ").lower().strip()
-        if cleanup == 'y':
+        #Optional: Clean up frame files
+        if auto_cleanup:
             for frame_path in frame_paths:
                 if os.path.exists(frame_path):
-                    os.remove(frame_path)
-            print("Frame files deleted")
+                    #os.remove(frame_path)
+                    print("Frame files not deleted")
+        else:
+            cleanup = input("Delete individual frame files? (y/n): ").lower().strip()
+            if cleanup == 'y':
+                for frame_path in frame_paths:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                print("Frame files deleted")
 
     def run_full_evaluation(self, timestamps=None):
         """Run complete evaluation pipeline with baseline comparison and uncertainties"""
