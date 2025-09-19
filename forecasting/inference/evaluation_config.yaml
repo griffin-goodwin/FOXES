@@ -17,7 +17,7 @@ data:
 # Evaluation parameters
 evaluation:
   output_dir: "${output_base_dir}/rs"
-  sxr_cutoff:   # Set to filter ground truth values (e.g., 1e-6 for values >= 1e-6)
+  sxr_cutoff: 0.0000001   # Set to filter ground truth values (e.g., 1e-6 for values >= 1e-6)
                     # Examples: 1e-6 (C-class and above), 1e-5 (M-class and above), 1e-4 (X-class only)
   
 # Time range for evaluation
