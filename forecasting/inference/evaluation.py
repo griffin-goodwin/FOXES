@@ -344,7 +344,7 @@ class SolarFlareEvaluator:
                 'B': (1e-7, 1e-6,  "#FFAAA5"),
                 'C': (1e-6, 1e-5, "#FFAAA5"),
                 'M': (1e-5, 1e-4, "#FFAAA5"),
-                'X': (1e-4, 1e-3, "#FFAAA5")
+                'X': (1e-4, 1e-2, "#FFAAA5")
             }
 
             for class_name, (min_flux, max_flux, color) in flare_classes_mae.items():
@@ -646,10 +646,10 @@ class SolarFlareEvaluator:
             # Create figure with transparent background
             fig = plt.figure(figsize=(10, 5))
             fig.patch.set_alpha(0.0)  # Transparent background
-            gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.0)
+            gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.1)
 
             # Right gridspec for SXR plot (column 3) with more padding
-            gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0)
+            gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0.1)
 
             wavs = ['94', '131', '171', '193', '211', '304']
             att_max = np.percentile(attention_data, 100)
@@ -675,9 +675,9 @@ class SolarFlareEvaluator:
             # Plot SXR data with uncertainty bands
             sxr_ax = fig.add_subplot(gs_right[:, 0])
             
-            # Set SXR plot background to match regression plot
-            sxr_ax.set_facecolor('#FFEEE6')  # Light background for SXR plot
-            sxr_ax.patch.set_alpha(1.0)      # Make sure axes patch is opaque
+            # Set SXR plot background to have light background inside plot area
+            sxr_ax.set_facecolor('#FFEEE6')  # Light background for SXR plot area
+            sxr_ax.patch.set_alpha(1.0)      # Make axes patch opaque
 
             if sxr_window is not None and not sxr_window.empty:
                 # Plot ground truth (no uncertainty)
@@ -787,8 +787,10 @@ class SolarFlareEvaluator:
                     text.set_fontfamily('Barlow')
                 
                 sxr_ax.grid(True, alpha=0.3, color='black')
-                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors='white')
-                sxr_ax.tick_params(axis='y', labelsize=12, colors='white')
+                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors='white', 
+                                )
+                sxr_ax.tick_params(axis='y', labelsize=12, colors='white',
+                                )
                 
                 # Set tick labels to Barlow font and white color
                 for label in sxr_ax.get_xticklabels():
@@ -797,8 +799,10 @@ class SolarFlareEvaluator:
                 for label in sxr_ax.get_yticklabels():
                     label.set_fontfamily('Barlow')
                     label.set_color('white')
-                # for spine in sxr_ax.spines.values():
-                #     spine.set_color('white')
+                
+                # Set graph border (spines) to white
+                for spine in sxr_ax.spines.values():
+                    spine.set_color('white')
                 try:
                     sxr_ax.set_yscale('log')
                 except:
@@ -814,7 +818,7 @@ class SolarFlareEvaluator:
 
             #plt.suptitle(f'Timestamp: {timestamp}', fontsize=14)
             #plt.tight_layout()
-            plt.savefig(save_path, dpi=500, facecolor='none', transparent=True)
+            plt.savefig(save_path, dpi=500, facecolor='none',bbox_inches='tight')
             plt.close()
 
             print(f"Worker {os.getpid()}: Completed {timestamp}")
