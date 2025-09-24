@@ -24,6 +24,7 @@ from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
 from forecasting.models.vision_transformer_custom import ViT
 from forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
 from forecasting.models.vit_patch_model import ViT as ViTPatch
+from forecasting.models.vit_patch_model_uncertainty import ViTUncertainty
 from forecasting.models import FusionViTHybrid
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
 from pytorch_lightning.callbacks import Callback
@@ -343,6 +344,10 @@ elif config_data['selected_model'] == 'ViTPatch':
     # Calculate base weights only if configured to do so
     base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
     model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
+
+elif config_data['selected_model'] == 'ViTUncertainty':
+    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+    model = ViTUncertainty(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
 
 elif config_data['selected_model'] == 'FusionViTHybrid':
     # Expect a 'fusion' section in YAML
