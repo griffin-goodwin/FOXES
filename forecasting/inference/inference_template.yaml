@@ -44,10 +44,10 @@ vit_custom:
   num_channels: 6
   num_classes: 1
   patch_size: 16
-  num_patches: 4096
+  num_patches: 1024
   hidden_dim: 512
-  num_heads: 16
-  num_layers: 3
+  num_heads: 8
+  num_layers: 6
   dropout: 0.1
 
 # Data paths

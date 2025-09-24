@@ -2,22 +2,19 @@
 # This file contains a list of model checkpoints to evaluate
 
 checkpoints:
-<<<<<<< HEAD
-  - name: "rs-epoch66"
-    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-epoch=66-val_total_loss=0.0342.ckpt"
-    
-  # - name: "rs-base-epoch43"
-  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-epoch=43-val_total_loss=0.0470.ckpt"
-=======
-  - name: "2d-embed"
-    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-epoch=70-val_total_loss=0.0360.ckpt"
-    
-  # - name: "rs-base-epoch39"
-  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-epoch=39-val_total_loss=0.0467.ckpt"
->>>>>>> 3d436f6d4c6b15827a7e8e923a105d7ba89b2c7c
-    
-  # - name: "rs-epoch50"
-  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-epoch=50-val_total_loss=0.0382.ckpt"
+  # - name: "claude-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-claude-suggested-weights-final-20250921_225446.pth"
+  # - name: "rs-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-final-20250921_185953.pth"
+  # - name: "baseweights-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-final-20250921_223323.pth"
+  - name: "claude-mse"
+    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-mse-claude-epoch=62-val_total_loss=0.1904.ckpt"
+  - name: "baseweights-mse"
+    checkpoint_path: /mnt/data/COMBINED/new-checkpoint/vit-mse-base-weights-epoch=62-val_total_loss=0.2893.ckpt"
+  # - name: "stereo-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-STEREO-final-20250921_183739.pth"
+
 
 # Add more checkpoints as needed
 # Each checkpoint should have:
