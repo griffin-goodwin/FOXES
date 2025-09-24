@@ -12,7 +12,7 @@ Stereo: "false"
 
 # Model configuration
 model: "vit"  # Options: "vit", "hybrid", "vitpatch", "fusion"
-wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
+wavelengths: [171, 193, 211, 304]  # AIA wavelengths in Angstroms
 
 # MC Dropout configuration
 mc:
@@ -41,7 +41,7 @@ model_params:
 # Model architecture parameters (should match training config)
 vit_custom:
   embed_dim: 512
-  num_channels: 6
+  num_channels: 4
   num_classes: 1
   patch_size: 16
   num_patches: 1024

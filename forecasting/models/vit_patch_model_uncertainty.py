@@ -24,7 +24,7 @@ def normalize_sxr(unnormalized_values, sxr_norm):
 def unnormalize_sxr(normalized_values, sxr_norm):
     return 10 ** (normalized_values * float(sxr_norm[1].item()) + float(sxr_norm[0].item())) - 1e-8
 
-class ViT(pl.LightningModule):
+class ViTUncertainty(pl.LightningModule):
     def __init__(self, model_kwargs, sxr_norm, base_weights=None):
         super().__init__()
         self.model_kwargs = model_kwargs
@@ -42,6 +42,11 @@ class ViT(pl.LightningModule):
     
     def forward(self, x, return_attention=True):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
+
+    def forward_for_callback(self, x, return_attention=True):
+        """Forward method compatible with AttentionMapCallback"""
+        global_flux_raw, attention_weights, patch_flux_raw, patch_error = self.forward(x, return_attention=return_attention)
+        return global_flux_raw, attention_weights    
 
     def configure_optimizers(self):
         # Use AdamW with weight decay for better regularization
@@ -72,19 +77,21 @@ class ViT(pl.LightningModule):
 
     def _calculate_loss(self, batch, mode="train"):
         imgs, sxr = batch
-        raw_preds, raw_patch_contributions = self.model(imgs,self.sxr_norm)
+        raw_preds, raw_patch_contributions, raw_error = self.model(imgs,self.sxr_norm)
         raw_preds_squeezed = torch.squeeze(raw_preds)
         sxr_un = unnormalize_sxr(sxr, self.sxr_norm)
 
         norm_preds_squeezed = normalize_sxr(raw_preds_squeezed, self.sxr_norm)
+        raw_error_squeezed = torch.squeeze(raw_error)
         # Use adaptive rare event loss
-        loss, weights = self.adaptive_loss.calculate_loss(
-            norm_preds_squeezed, sxr, sxr_un
+        loss, error_loss, weights = self.adaptive_loss.calculate_loss(
+            norm_preds_squeezed, sxr, sxr_un, raw_error_squeezed
         )
 
         #Also calculate huber loss for logging
         huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=.3)
         #huber_loss = F.mse_loss(norm_preds_squeezed, sxr)
+
 
 
         # Log adaptation info
@@ -100,7 +107,8 @@ class ViT(pl.LightningModule):
                      prog_bar=True, logger=True, sync_dist=True)
             self.log("train_huber_loss", huber_loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
-
+            self.log("train_error_loss", error_loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
             # Detailed diagnostics only every 200 steps
             if self.global_step % 200 == 0:
                 multipliers = self.adaptive_loss.get_current_multipliers()
@@ -117,6 +125,7 @@ class ViT(pl.LightningModule):
                 self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
             self.log("val_total_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_error_loss", error_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         return loss
 
@@ -153,7 +162,7 @@ class VisionTransformer(nn.Module):
             num_layers,
             patch_size,
             num_patches,
-            dropout,
+            dropout
 
     ):
         """Vision Transformer that outputs flux contributions per patch.
@@ -184,6 +193,7 @@ class VisionTransformer(nn.Module):
         ])
 
         self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, 1))
+        self.error_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, 1))
         self.dropout = nn.Dropout(dropout)
 
         # Parameters/Embeddings
@@ -201,14 +211,14 @@ class VisionTransformer(nn.Module):
         x = self.input_layer(x)
 
         # Add CLS token and positional encoding
-        cls_token = self.cls_token.repeat(B, 1, 1)
-        x = torch.cat([cls_token, x], dim=1)
+        #cls_token = self.cls_token.repeat(B, 1, 1)
+        #x = torch.cat([cls_token, x], dim=1)
         #x = x + self.pos_embedding[:, : T + 1]
         x = self._add_2d_positional_encoding(x)
 
         # Apply Transformer blocks
         x = self.dropout(x)
-        x = x.transpose(0, 1)  # [T+1, B, embed_dim]
+        x = x.transpose(0, 1)  # [T, B, embed_dim]
 
         attention_weights = []
         for block in self.transformer_blocks:
@@ -217,32 +227,37 @@ class VisionTransformer(nn.Module):
                 attention_weights.append(attn_weights)
             else:
                 x = block(x)
-
-        patch_embeddings = x[1:].transpose(0, 1)  # [B, num_patches, embed_dim]
+        #Extract patch logits and total error
+        patch_embeddings = x.transpose(0, 1)  # [B, num_patches, embed_dim]
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)  # normalized log predictions [B, num_patches]
+        patch_error = self.error_head(patch_embeddings).squeeze(-1)  # [B, num_patches]
+
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
         patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=1e-15, max=1)
+        patch_error_raw = torch.clamp(10 ** (patch_error * std + mean)- 1e-8, min=1e-30, max=1)
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
+        #Calculate total error as sqrt of sum of squares of patch errors
+        total_error = torch.sqrt(patch_error_raw.pow(2).sum(dim=1, keepdim=True))
         
         # Ensure global flux is never zero (add small epsilon if needed)
         global_flux_raw = torch.clamp(global_flux_raw, min=1e-15)
 
         if return_attention:
-            return global_flux_raw, attention_weights, patch_flux_raw
+            return global_flux_raw, attention_weights, patch_flux_raw, total_error
         else:
-            return global_flux_raw, patch_flux_raw
+            return global_flux_raw, patch_flux_raw, total_error
         
     def _add_2d_positional_encoding(self, x):
         """Add learned 2D positional encoding to patch embeddings"""
         B, T, embed_dim = x.shape
-        num_patches = T - 1  # Exclude CLS token
+        num_patches = T  # Exclude CLS token
         
         # Reshape patches to 2D grid: [B, grid_h, grid_w, embed_dim]
-        patch_embeddings = x[:, 1:, :].reshape(B, self.grid_h, self.grid_w, embed_dim)
+        patch_embeddings = x.reshape(B, self.grid_h, self.grid_w, embed_dim)
         
         # Add learned 2D positional encoding
         # Broadcasting: [B, grid_h, grid_w, embed_dim] + [1, grid_h, grid_w, embed_dim]
@@ -251,17 +266,9 @@ class VisionTransformer(nn.Module):
         # Reshape back to sequence format: [B, num_patches, embed_dim]
         patch_embeddings = patch_embeddings.reshape(B, num_patches, embed_dim)
         
-        # Combine with CLS token
-        cls_token = x[:, :1, :]  # [B, 1, embed_dim]
-        x = torch.cat([cls_token, patch_embeddings], dim=1)
-        
-        return x
+        return patch_embeddings
     
-    def forward_for_callback(self, x, return_attention=True):
-        """Forward method compatible with AttentionMapCallback"""
-        global_flux_raw, attention_weights, patch_flux_raw = self.forward(x, return_attention=return_attention)
-        # Callback expects (outputs, attention_weights, _)
-        return global_flux_raw, attention_weights    
+
 
 
 class AttentionBlock(nn.Module):
@@ -348,14 +355,21 @@ class SXRRegressionDynamicLoss:
             'x_class': 20.0  # Maintain X-class focus
         }
 
-    def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
+    def calculate_loss(self, preds_norm, sxr_norm, sxr_un, raw_error):
         base_loss = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
+        #Calculate loss between error and raw error
+        error = abs(sxr_norm - preds_norm)
+        error_loss = F.huber_loss(raw_error, error, reduction='none')
+        
+
         #base_loss = F.mse_loss(preds_norm, sxr_norm, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
         self._update_tracking(sxr_un, sxr_norm, preds_norm)
-        weighted_loss = base_loss * weights
-        loss = weighted_loss.mean()
-        return loss, weights
+        weighted_loss = base_loss * weights 
+        error_weight = .2
+        error_loss = error_weight * error_loss.mean()
+        loss = weighted_loss.mean() + error_loss
+        return loss, error_loss, weights
 
     def _get_adaptive_weights(self, sxr_un):
         device = sxr_un.device
