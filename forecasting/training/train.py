@@ -26,7 +26,10 @@ from forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIr
 from forecasting.models.vit_patch_model import ViT as ViTPatch
 from forecasting.models.vit_patch_model_uncertainty import ViTUncertainty
 from forecasting.models import FusionViTHybrid
+from forecasting.models.CNN_Patch import CNNPatch
+from forecasting.models.vit_patch_model_local import ViTLocal
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
+
 from pytorch_lightning.callbacks import Callback
 
 from forecasting.models.FastSpectralNet import FastViTFlaringModel
@@ -337,6 +340,9 @@ elif config_data['selected_model'] == 'hybrid':
         cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
         cosine_eta_min=config_data['megsai']['cosine_eta_min']
     )
+elif config_data['selected_model'] == 'CNNPatch':
+    model = CNNPatch(model_kwargs=config_data['cnn_patch'], sxr_norm = sxr_norm)
+
 elif config_data['selected_model'] == 'ViT':
     model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
 
@@ -344,6 +350,10 @@ elif config_data['selected_model'] == 'ViTPatch':
     # Calculate base weights only if configured to do so
     base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
     model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
+
+elif config_data['selected_model'] == 'ViTLocal':
+    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+    model = ViTLocal(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
 
 elif config_data['selected_model'] == 'ViTUncertainty':
     base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
