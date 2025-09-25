@@ -83,7 +83,7 @@ class FlareDownloadProcessor:
                 # Re-raise non-HTTP errors immediately
                 raise
 
-    def process_download(self, time_before_start=timedelta(minutes=120), time_after_end=timedelta(minutes=120), 
+    def process_download(self, time_before_start=timedelta(minutes=15), time_after_end=timedelta(minutes=15), 
                         start_time=None, end_time=None):
         """
         Process downloads either in flare mode or time span mode.
@@ -174,7 +174,7 @@ class FlareDownloadProcessor:
                             print(f"  ✗ Failed to download data for {d}: {e}")
                             if "Connection refused" in str(e) or "timeout" in str(e).lower():
                                 print(f"  Waiting 5 seconds before continuing...")
-                                time.sleep(5)
+                                time.sleep(1)
                             continue
                 else:
                     print(f"  ⏭ Skipping batch {batch_count} (all dates already completed)")
@@ -182,7 +182,7 @@ class FlareDownloadProcessor:
                 # Delay between batches
                 if batch_end < end_time:
                     print("Waiting 5 seconds before next batch...")
-                    time.sleep(5)
+                    time.sleep(1)
                 
                 current_time = batch_end
             
@@ -310,9 +310,9 @@ class FlareDownloadProcessor:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download flare events and associated SDO data.')
-    parser.add_argument('--start_date', type=str, default='2023-6-15',
+    parser.add_argument('--start_date', type=str, default='2024-05-01',
                         help='Start date for downloading data (YYYY-MM-DD)')
-    parser.add_argument('--end_date', type=str, default='2023-07-15',
+    parser.add_argument('--end_date', type=str, default='2024-06-01',
                         help='End date for downloading data (YYYY-MM-DD)')
     parser.add_argument('--start_time', type=str, default=None,
                         help='Start time for time span mode (YYYY-MM-DD HH:MM:SS)')
