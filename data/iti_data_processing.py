@@ -14,9 +14,32 @@ from multiprocessing import Pool
 from tqdm import tqdm
 
 # Configuration for all wavelengths to process
-wavelengths = [94, 131, 171, 193, 211, 304]
-base_input_folder = '/mnt/data/SDO-AIA-flaring'
-output_folder = '/mnt/data/AIA_ITI'
+# Load configuration from environment or use defaults
+import os
+import json
+
+def load_config():
+    """Load configuration from environment or use defaults."""
+    if 'PIPELINE_CONFIG' in os.environ:
+        try:
+            config = json.loads(os.environ['PIPELINE_CONFIG'])
+            return config
+        except:
+            pass
+    
+    # Default configuration
+    return {
+        'iti': {
+            'wavelengths': [94, 131, 171, 193, 211, 304],
+            'input_folder': '/mnt/data/AUGUST/SDO-AIA-timespan',
+            'output_folder': '/mnt/data/AUGUST/AIA_ITI'
+        }
+    }
+
+config = load_config()
+wavelengths = config['iti']['wavelengths']
+base_input_folder = config['iti']['input_folder']
+output_folder = config['iti']['output_folder']
 os.makedirs(output_folder, exist_ok=True)
 
 sdo_norms = {
