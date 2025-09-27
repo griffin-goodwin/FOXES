@@ -13,29 +13,57 @@ import re
 warnings.filterwarnings('ignore')
 
 # =============================================================================
-# CONFIGURATION - Change these paths as needed
+# CONFIGURATION - Load from environment or use defaults
 # =============================================================================
 # 
-# To change directories, simply modify the variables below:
-# - All paths are relative to your system
-# - Directories will be created automatically if they don't exist
-# - Use absolute paths for best results
+# Configuration is loaded from environment variables set by the pipeline orchestrator
+# or falls back to default values if running standalone
 #
 # =============================================================================
 
+import os
+import json
+
+def load_config():
+    """Load configuration from environment or use defaults."""
+    if 'PIPELINE_CONFIG' in os.environ:
+        try:
+            config = json.loads(os.environ['PIPELINE_CONFIG'])
+            return config
+        except:
+            pass
+    
+    # Default configuration
+    return {
+        'alignment': {
+            'goes_data_dir': "/mnt/data/NEW-FLARE/combined",
+            'aia_processed_dir': "/mnt/data/NEW-FLARE/AIA_processed",
+            'output_sxr_a_dir': "/mnt/data/NEW-FLARE/GOES-SXR-A",
+            'output_sxr_b_dir': "/mnt/data/NEW-FLARE/GOES-SXR-B",
+            'aia_missing_dir': "/mnt/data/NEW-FLARE/AIA_ITI_MISSING"
+        },
+        'processing': {
+            'batch_size_multiplier': 4,
+            'min_batch_size': 1,
+            'max_processes': None
+        }
+    }
+
+config = load_config()
+
 # Input directories
-GOES_DATA_DIR = "/mnt/data/NEW-FLARE/combined"  # Directory containing GOES CSV files
-AIA_PROCESSED_DIR = "/mnt/data/NEW-FLARE/AIA_processed"  # Directory with processed AIA files
+GOES_DATA_DIR = config['alignment']['goes_data_dir']
+AIA_PROCESSED_DIR = config['alignment']['aia_processed_dir']
 
 # Output directories
-OUTPUT_SXR_A_DIR = "/mnt/data/NEW-FLARE/GOES-SXR-A"  # Output directory for SXR-A data
-OUTPUT_SXR_B_DIR = "/mnt/data/NEW-FLARE/GOES-SXR-B"  # Output directory for SXR-B data
-AIA_MISSING_DIR = "/mnt/data/NEW-FLARE/AIA_ITI_MISSING"  # Directory for AIA files with missing GOES data
+OUTPUT_SXR_A_DIR = config['alignment']['output_sxr_a_dir']
+OUTPUT_SXR_B_DIR = config['alignment']['output_sxr_b_dir']
+AIA_MISSING_DIR = config['alignment']['aia_missing_dir']
 
 # Processing configuration
-BATCH_SIZE_MULTIPLIER = 4  # Number of batches per process (adjust for performance)
-MIN_BATCH_SIZE = 1  # Minimum batch size
-MAX_PROCESSES = None  # Maximum number of processes (None = use all CPU cores)
+BATCH_SIZE_MULTIPLIER = config['processing']['batch_size_multiplier']
+MIN_BATCH_SIZE = config['processing']['min_batch_size']
+MAX_PROCESSES = config['processing']['max_processes']
 
 # =============================================================================
 
