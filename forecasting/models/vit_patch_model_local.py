@@ -200,8 +200,7 @@ class VisionTransformerLocal(nn.Module):
         B, T, _ = x.shape
         x = self.input_layer(x)
 
-        # Add CLS token and positional encoding
-        #x = x + self.pos_embedding[:, : T + 1]
+        # Add positional encoding (no CLS token for local attention)
         x = self._add_2d_positional_encoding(x)
 
         # Apply Transformer blocks
@@ -237,7 +236,7 @@ class VisionTransformerLocal(nn.Module):
     def _add_2d_positional_encoding(self, x):
         """Add learned 2D positional encoding to patch embeddings"""
         B, T, embed_dim = x.shape
-        num_patches = T  # Exclude CLS token
+        num_patches = T  # All tokens are patches (no CLS token)
         
         # Reshape patches to 2D grid: [B, grid_h, grid_w, embed_dim]
         patch_embeddings = x.reshape(B, self.grid_h, self.grid_w, embed_dim)
@@ -247,9 +246,9 @@ class VisionTransformerLocal(nn.Module):
         patch_embeddings = patch_embeddings + self.pos_embedding_2d
         
         # Reshape back to sequence format: [B, num_patches, embed_dim]
-        patch_embeddings = patch_embeddings.reshape(B, num_patches, embed_dim)
+        x = patch_embeddings.reshape(B, num_patches, embed_dim)
                 
-        return patch_embeddings
+        return x
     
     def forward_for_callback(self, x, return_attention=True):
         """Forward method compatible with AttentionMapCallback"""
@@ -329,7 +328,10 @@ class LocalAttentionBlock(nn.Module):
         num_patches = self.num_patches  # 32x32 patches
         grid_size = int(math.sqrt(num_patches))
         
+        # Create mask for patches only: [num_patches, num_patches]
         mask = torch.zeros(num_patches, num_patches)
+        
+        # Patches can only attend to nearby patches
         for i in range(num_patches):
             row_i, col_i = i // grid_size, i % grid_size
             for j in range(num_patches):
