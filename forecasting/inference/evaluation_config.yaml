@@ -27,8 +27,8 @@ evaluation:
 #   interval_minutes: 1
 
 time_range:
-  start_time: "2014-08-01T00:00:00"
-  end_time: "2014-08-31T23:59:00"
+  start_time: "2023-08-05T00:00:00"
+  end_time: "2023-08-07T23:59:00"
   interval_minutes: 1
 
 # Plotting parameters
