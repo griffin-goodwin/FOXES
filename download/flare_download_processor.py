@@ -320,7 +320,7 @@ if __name__ == '__main__':
                         help='End time for time span mode (YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--chunk_size', type=int, default=2000,
                         help='Number of days per chunk for processing (default: 180)')
-    parser.add_argument('--download_dir', type=str, default='/mnt/data',
+    parser.add_argument('--download_dir', type=str, default='/mnt/data/ADDED-FLARE',
                         help='Directory to save downloaded data (default: /mnt/data)')
     parser.add_argument('--time_span_mode', action='store_true',
                         help='Use time span mode for 1-minute cadence downloads')

@@ -28,11 +28,11 @@ iti:
   - 211
   - 304
 alignment:
-  goes_data_dir: /mnt/data/NEW-FLARE/combined
-  aia_processed_dir: /mnt/data/NEW-FLARE/AIA_processed
-  output_sxr_a_dir: /mnt/data/NEW-FLARE/GOES-SXR-A
-  output_sxr_b_dir: /mnt/data/NEW-FLARE/GOES-SXR-B
-  aia_missing_dir: /mnt/data/NEW-FLARE/AIA_ITI_MISSING
+  goes_data_dir: /mnt/data/AUGUST/combined
+  aia_processed_dir: /mnt/data/AUGUST/AIA_processed
+  output_sxr_a_dir: /mnt/data/AUGUST/GOES-SXR-A
+  output_sxr_b_dir: /mnt/data/AUGUST/GOES-SXR-B
+  aia_missing_dir: /mnt/data/AUGUST/AIA_ITI_MISSING
 processing:
   max_processes: null
   batch_size_multiplier: 4
