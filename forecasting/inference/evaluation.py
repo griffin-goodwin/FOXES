@@ -622,7 +622,7 @@ class SolarFlareEvaluator:
             return None, None, None
 
     def generate_frame_worker(self, timestamp):
-        """Worker function to generate a single frame with uncertainty bands"""
+        """Worker function to generate a single frame"""
         try:
             print(f"Worker {os.getpid()}: Processing {timestamp}")
 
@@ -665,9 +665,7 @@ class SolarFlareEvaluator:
 
             ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
             ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5,norm=att_norm)
-            # Plot star at maximum attention location
-            # ax.plot(max_x, max_y, marker='*', markersize=10, color='cyan',
-            #         markeredgecolor='white', markeredgewidth=1)
+
             ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow', color='white')
             ax.axis('off')
 
@@ -687,67 +685,29 @@ class SolarFlareEvaluator:
                 gt = sxr_window['groundtruth'].values
                 uncertainties = sxr_window['groundtruth_uncertainty'].values
 
-                # Create upper and lower bounds (assuming uncertainty is standard deviation)
-                upper_bound = gt + uncertainties
-                lower_bound = gt - uncertainties
-
                 # Ensure bounds are positive for log scale
                 lower_bound = np.maximum(lower_bound, 1e-12)
-
-                #sxr_ax.fill_between(sxr_window['timestamp'], lower_bound, upper_bound,
-                                    #alpha=0.3, color="#F78E69")
 
                 # Plot model predictions with uncertainty bands
                 model_label = 'Baseline Model' if self.baseline_only_mode else 'FOXES Model'
                 model_color = "#94ECBE" if self.baseline_only_mode else "#C0B9DD"
-                vit_prediction_line = sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
+                sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
                                                   label=model_label, linewidth=2.5, alpha=1, markersize=5,
                                                   color=model_color)
 
-                # Add uncertainty bands for model if available
-                if 'uncertainty' in sxr_window.columns and sxr_window['uncertainty'].notna().any():
-                    predictions = sxr_window['predictions'].values
-                    uncertainties = sxr_window['uncertainty'].values
-
-                    # Create upper and lower bounds (assuming uncertainty is standard deviation)
-                    upper_bound = predictions + uncertainties
-                    lower_bound = predictions - uncertainties
-
-                    # Ensure bounds are positive for log scale
-                    lower_bound = np.maximum(lower_bound, 1e-12)
-
-                    sxr_ax.fill_between(sxr_window['timestamp'], lower_bound, upper_bound,
-                                        alpha=0.3, color=model_color)
-
-                # Plot baseline predictions with uncertainty bands if available and not in baseline-only mode
+                # Plot baseline predictions if available and not in baseline-only mode
                 if not self.baseline_only_mode and 'baseline_predictions' in sxr_window.columns and sxr_window[
                     'baseline_predictions'].notna().any():
                     baseline_line = sxr_ax.plot(sxr_window['timestamp'], sxr_window['baseline_predictions'],
                                                 label='Baseline Model', linewidth=1.5, alpha=1, markersize=5,
                                                 color="#94ECBE")
 
-                    # Add uncertainty bands for baseline model if available
-                    if 'baseline_uncertainty' in sxr_window.columns and sxr_window[
-                        'baseline_uncertainty'].notna().any():
-                        baseline_predictions = sxr_window['baseline_predictions'].values
-                        baseline_uncertainties = sxr_window['baseline_uncertainty'].values
-
-                        # Create upper and lower bounds
-                        baseline_upper = baseline_predictions + baseline_uncertainties
-                        baseline_lower = baseline_predictions - baseline_uncertainties
-
-                        # Ensure bounds are positive for log scale
-                        baseline_lower = np.maximum(baseline_lower, 1e-12)
-
-                        sxr_ax.fill_between(sxr_window['timestamp'], baseline_lower, baseline_upper,
-                                           alpha=0.3, color="#94ECBE")
-
                 # Mark current time
                 if sxr_current is not None:
                     sxr_ax.axvline(target_time, color='black', linestyle='--',
                                    linewidth=2, alpha=0.4, label='Current Time')
 
-                    # Create info text with all available values including uncertainties
+                    # Create info text with all available values
                     model_name = 'Baseline' if self.baseline_only_mode else 'FOXES'
                     info_lines = ["Current Values:",
                                   f"Ground Truth: {sxr_current['groundtruth']:.2e}",
@@ -812,12 +772,6 @@ class SolarFlareEvaluator:
                             transform=sxr_ax.transAxes, fontsize=12, fontfamily='Barlow',
                             horizontalalignment='center', verticalalignment='center')
                 sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow')
-            #
-            # for spine in sxr_ax.spines.values():
-            #     spine.set_color('white')
-
-            #plt.suptitle(f'Timestamp: {timestamp}', fontsize=14)
-            #plt.tight_layout()
             plt.savefig(save_path, dpi=500, facecolor='none',bbox_inches='tight')
             plt.close()
 

@@ -15,7 +15,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
 import forecasting.models as models
-from forecasting.models.vision_transformer_custom import ViT
+from forecasting.models.vision_transformer_custom import ViT as ViTCustom
+from forecasting.models.vit_patch_model import ViT as ViTPatch
+from forecasting.models.vit_patch_model_local import ViTLocal
 from forecasting.models.linear_and_hybrid import HybridIrradianceModel, LinearIrradianceModel  # Add your hybrid and linear model imports
 from torch.nn import HuberLoss
 from forecasting.training.callback import unnormalize_sxr
@@ -30,58 +32,11 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def has_attention_weights(model):
     """Check if model supports attention weights"""
-    return hasattr(model, 'attention') or isinstance(model, ViT)
+    return hasattr(model, 'attention') or isinstance(model, ViTCustom) or isinstance(model, ViTPatch) or isinstance(model, ViTLocal)
 
-#Does not return SXR data or use Dataloader for solo dataset
-def evaluate_solo_dataset(model, dataset, batch_size=16, times=None, config_data=None, save_weights=True, input_size = 512, patch_size = 16):
-    """Optimized generator for SolO dataset without Dataloader"""
-    model.eval()
-    supports_attention = has_attention_weights(model) and save_weights
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataset):
-            # Correct unpacking based on your data structure
-            aia_imgs = batch[0]  # Get aia_img from inputs
-            # Move to device (it's already a tensor)
-            aia_imgs = aia_imgs.to(device, non_blocking=True)
-
-            # Get model predictions for entire batch
-            pred = model(aia_imgs)
-
-            # Handle different model output formats
-            if isinstance(pred, tuple) and len(pred) > 1:
-                predictions = pred[0]  # Shape: [batch_size, ...]
-                weights = pred[1] if supports_attention else None  # Shape: [batch_size, heads, L, S ...]
-            else:
-                predictions = pred
-                weights = None
-
-            # Process entire batch at once for weights if needed
-            batch_weights = []
-            if supports_attention and weights is not None:
-                current_batch_size = predictions.shape[0]
-                for i in range(current_batch_size):
-                    last_layer_attention = weights[-1][i]  # Get i-th item from batch [num_heads, seq_len, seq_len]
-                    avg_attention = last_layer_attention.mean(dim=0)  # [seq_len, seq_len]
-
-                    cls_attention = avg_attention[0, 1:].cpu()  # [num_patches] - 1D array
-
-                    grid_h, grid_w = input_size // patch_size, input_size // patch_size  # Should be 64, 64
-
-                    attention_map = cls_attention.reshape(grid_h, grid_w)  # [64, 64]
-
-                    batch_weights.append(attention_map.numpy())
-
-                if config_data and 'weight_path' in config_data:
-                    save_batch_weights(batch_weights, batch_idx, batch_size, times, config_data['weight_path'])
-
-            current_batch_size = predictions.shape[0]
-            for i in range(current_batch_size):
-                global_idx = batch_idx * batch_size + i
-                weight_data = batch_weights[i] if (supports_attention and batch_weights) else None
-                yield (predictions[i].cpu().numpy(),
-                       weight_data, global_idx)
-
+def is_localized_attention_model(model):
+    """Check if model uses localized attention (no CLS token)"""
+    return isinstance(model, ViTLocal)
 
 
 def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_data=None, save_weights=True, input_size = 512, patch_size = 16):
@@ -101,7 +56,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             aia_imgs = aia_imgs.to(device, non_blocking=True)
 
             # Get model predictions for entire batch
-            pred = model(aia_imgs)
+            if supports_attention:
+                pred = model(aia_imgs, return_attention=True)
+            else:
+                pred = model(aia_imgs)
 
             # Handle different model output formats
             if isinstance(pred, tuple) and len(pred) > 1:
@@ -115,23 +73,49 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             batch_weights = []
             if supports_attention and weights is not None:
                 current_batch_size = predictions.shape[0]
+                is_localized = is_localized_attention_model(model)
+                
                 for i in range(current_batch_size):
-                    # Process attention weights for this item - matching callback approach
-                    #select last layer and appropriate item from batch
-                    last_layer_attention = weights[-1][i]  # Get i-th item from batch [num_heads, seq_len, seq_len]
-                    # Average across attention heads
-                    avg_attention = last_layer_attention.mean(dim=0)  # [seq_len, seq_len]
+                    try:
+                        # Process attention weights for this item
+                        last_layer_attention = weights[-1][i]  # Get i-th item from batch [num_heads, seq_len, seq_len]
+                        
+                        # Check for None or invalid values
+                        if last_layer_attention is None:
+                            print(f"Warning: last_layer_attention is None for sample {i}")
+                            continue
+                            
+                        # Average across attention heads
+                        avg_attention = last_layer_attention.mean(dim=0)  # [seq_len, seq_len]
+                        
+                        # Check for NaN or invalid values
+                        if torch.isnan(avg_attention).any():
+                            print(f"Warning: NaN values in avg_attention for sample {i}")
+                            continue
 
-                    # Get attention from CLS token to patches (exclude CLS->CLS)
-                    cls_attention = avg_attention[0, 1:].cpu()  # [num_patches] - 1D array
+                        if is_localized:
+                            # For ViTLocal (no CLS token), create attention map by averaging attention TO each patch
+                            # This gives us how much each patch is "attended to" by its neighbors
+                            patch_attention = avg_attention.mean(dim=0).cpu()  # [num_patches] - average attention received by each patch
+                        else:
+                            # For regular ViT (with CLS token), get attention from CLS token to patches
+                            cls_attention = avg_attention[0, 1:].cpu()  # [num_patches] - CLS token attention to patches
+                            patch_attention = cls_attention
 
-                    # Calculate grid size based on patch size (assuming 8x8 patches)
-                    grid_h, grid_w = input_size // patch_size, input_size // patch_size  # Should be 64, 64
+                        # Calculate grid size based on patch size
+                        grid_h, grid_w = input_size // patch_size, input_size // patch_size
 
-                    # Reshape CLS attention to spatial grid
-                    attention_map = cls_attention.reshape(grid_h, grid_w)  # [64, 64]
+                        # Reshape patch attention to spatial grid
+                        attention_map = patch_attention.reshape(grid_h, grid_w)
 
-                    batch_weights.append(attention_map.numpy())
+                        batch_weights.append(attention_map.numpy())
+                        
+                    except Exception as e:
+                        print(f"Error processing attention weights for sample {i}: {e}")
+                        # Add a zero attention map as fallback
+                        grid_h, grid_w = input_size // patch_size, input_size // patch_size
+                        fallback_map = torch.zeros(grid_h * grid_w).reshape(grid_h, grid_w).numpy()
+                        batch_weights.append(fallback_map)
 
                 # Save all weights in this batch at once
                 if config_data and 'weight_path' in config_data:
@@ -145,98 +129,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 yield (predictions[i].cpu().numpy(), sxr[i].cpu().numpy(),
                        weight_data, global_idx)
 
-#Evaluate model with batches using mc dropout
-def evaluate_model_on_dataset_mc_dropout(model, dataset, batch_size=16, times=None, config_data=None, save_weights=True,
-                                         input_size=512, patch_size=16, runs=100, sxr_norm=None):
-    """Streaming MC Dropout - processes each batch with multiple forward passes without loading all data"""
-
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
-    supports_attention = has_attention_weights(model) and save_weights
-
-    print(f"Starting streaming MC Dropout with {runs} forward passes per batch...")
-
-    for batch_idx, batch in enumerate(loader):
-        aia_imgs = batch[0]  # Shape: [batch_size, ...]
-        sxr = batch[1]
-        aia_imgs = aia_imgs.to(device, non_blocking=True)
-        current_batch_size = aia_imgs.shape[0]
-
-        if (batch_idx * batch_size) % 100 == 0:
-            print(
-                f"Processing batch {batch_idx + 1}, samples {batch_idx * batch_size + 1}-{batch_idx * batch_size + current_batch_size}")
-
-        # Storage for this batch's MC predictions
-        # Shape: [runs, batch_size, prediction_dims...]
-        batch_predictions = []
-        batch_weights = [] if supports_attention else None
-
-        # Perform MC dropout runs for this batch
-        for run in range(runs):
-            #Set seed based on run
-            torch.manual_seed(run)  # Ensure different dropout masks for each run
-
-            model.train()  # Enable dropout
-
-            with torch.no_grad():
-                pred = model(aia_imgs)
-
-                if isinstance(pred, tuple) and len(pred) > 1:
-                    predictions = pred[0]  # [batch_size, ...]
-                    weights = pred[1] if supports_attention else None
-                else:
-                    predictions = pred
-                    weights = None
-
-                # Store predictions for this run
-                batch_predictions.append(predictions.cpu().numpy())
-
-                # Process attention weights for this run
-                if supports_attention and weights is not None:
-                    run_weights = []
-                    for i in range(current_batch_size):
-                        last_layer_attention = weights[-1][i]  # [num_heads, seq_len, seq_len]
-                        avg_attention = last_layer_attention.mean(dim=0)  # [seq_len, seq_len]
-                        cls_attention = avg_attention[0, 1:].cpu()  # [num_patches]
-
-                        grid_h, grid_w = input_size // patch_size, input_size // patch_size
-                        attention_map = cls_attention.reshape(grid_h, grid_w)
-                        run_weights.append(attention_map.numpy())
-
-                    if batch_weights is None:
-                        batch_weights = []
-                    batch_weights.append(run_weights)  # [runs, batch_size, grid_h, grid_w]
-
-        # Convert to numpy and compute statistics
-        # batch_predictions: [runs, batch_size, prediction_dims...]
-        batch_predictions = np.array(batch_predictions)
-
-        # Compute mean and std across runs (axis=0)
-        # Result shapes: [batch_size, prediction_dims...]
-        mean_predictions = np.mean(unnormalize_sxr(batch_predictions,sxr_norm=sxr_norm), axis=0)
-        uncertainties = np.std(unnormalize_sxr(batch_predictions,sxr_norm=sxr_norm), axis=0)
-
-        # Process attention weights if available
-        mean_weights = None
-        if supports_attention and batch_weights:
-            # batch_weights: [runs, batch_size, grid_h, grid_w]
-            batch_weights = np.array(batch_weights)
-            # mean_weights: [batch_size, grid_h, grid_w]
-            mean_weights = np.mean(batch_weights, axis=0)
-
-            # Save weights if required
-            if config_data and 'weight_path' in config_data:
-                save_batch_weights(list(mean_weights), batch_idx, batch_size, times, config_data['weight_path'])
-
-        # Yield results for each sample in the batch
-        for i in range(current_batch_size):
-            global_idx = batch_idx * batch_size + i
-            weight_data = mean_weights[i] if mean_weights is not None else None
-
-            yield (mean_predictions[i],  # Mean prediction across MC runs
-                   sxr[i].cpu().numpy(),  # Ground truth
-                   uncertainties[i],  # Uncertainty (std) across MC runs
-                   weight_data,  # Mean attention weights
-                   global_idx)  # Sample index
 
 def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path):
     """Save all weights in a batch efficiently"""
@@ -252,8 +144,9 @@ def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path)
     save_args = []
     for i, weight in enumerate(batch_weights):
         global_idx = batch_idx * batch_size + i
-        if global_idx < len(times):  # Make sure we don't go out of bounds
-            filepath = weight_path + f"{times[global_idx]}"
+        if global_idx < len(times):# Make sure we don't go out of bounds
+            #Save to weight path using os join
+            filepath = os.path.join(weight_path, f"{times[global_idx]}")
             save_args.append((weight, filepath))
 
     # Save all weights in this batch in parallel
@@ -283,7 +176,11 @@ def load_model_from_config(config_data):
     if ".ckpt" in checkpoint_path:
         # Lightning checkpoint format
         if model_type.lower() == 'vit':
-            model = ViT.load_from_checkpoint(checkpoint_path)
+            model = ViTCustom.load_from_checkpoint(checkpoint_path)
+        elif model_type.lower() == 'vitpatch':
+            model = ViTPatch.load_from_checkpoint(checkpoint_path)
+        elif model_type.lower() == 'vitlocal':
+            model = ViTLocal.load_from_checkpoint(checkpoint_path)
         elif model_type.lower() == 'hybrid' or model_type.lower() == 'hybridirradiancemodel':
             # Try to load with saved hyperparameters first, then fall back to config parameters
             try:
@@ -427,113 +324,51 @@ def main():
 
     print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
-    if config_data['mc']['active'] == "false":
-        print("Running inference without MC Dropout")
-        for prediction, sxr, weight, idx in evaluate_model_on_dataset(
-                model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
-        ):
-            # Unnormalize prediction
+    print("Running inference...")
+    for prediction, sxr, weight, idx in evaluate_model_on_dataset(
+            model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
+    ):
+        # Unnormalize prediction only if not ViTPatch / ViTLocal
+        if not isinstance(model, ViTPatch) and not isinstance(model, ViTLocal):
             pred = unnormalize_sxr(prediction, sxr_norm)
-
-            # Store results
-            predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
-            ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
-            timestamp.append(str(times[idx]))
-
-            # Progress update
-            if (idx + 1) % 50 == 0:
-                print(f"Processed {idx + 1}/{total_samples}")
-
-        if save_weights:
-            print("All weights saved during batch processing!")
         else:
-            print("Inference completed (no weights saved)!")
+            pred = prediction
 
-        # Create and save results DataFrame
-        print("Creating output DataFrame...")
-        output_df = pd.DataFrame({
-            'timestamp': timestamp,
-            'predictions': predictions,
-            'groundtruth': ground
-        })
+        # Store results
+        predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
+        ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
+        timestamp.append(str(times[idx]))
 
-        print(output_df.head())
-        #Make output directory if it doesn't exist
-        output_dir = Path(config_data['output_path']).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_df.to_csv(config_data['output_path'], index=False)
-        print(f"Predictions saved to {config_data['output_path']}")
+        # Progress update
+        if (idx + 1) % 50 == 0:
+            print(f"Processed {idx + 1}/{total_samples}")
+
+    if save_weights:
+        print("All weights saved during batch processing!")
     else:
-        print("Running inference with MC Dropout")
-        if config_data['mc']['active'] == "false":
-            print("Running inference without MC Dropout")
-            for prediction, sxr, weight, idx in evaluate_model_on_dataset(
-                    model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
-            ):
-                # Unnormalize prediction
-                pred = unnormalize_sxr(prediction, sxr_norm)
+        print("Inference completed (no weights saved)!")
 
-                # Store results
-                predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
-                ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
-                timestamp.append(str(times[idx]))
+    # Create and save results DataFrame
+    print("Creating output DataFrame...")
+    output_df = pd.DataFrame({
+        'timestamp': timestamp,
+        'predictions': predictions,
+        'groundtruth': ground
+    })
 
-                # Progress update
-                if (idx + 1) % 50 == 0:
-                    print(f"Processed {idx + 1}/{total_samples}")
+    print(output_df.head())
+    #Make output directory if it doesn't exist
+    output_dir = Path(config_data['output_path']).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_df.to_csv(config_data['output_path'], index=False)
+    print(f"Predictions saved to {config_data['output_path']}")
 
-            # Create and save results DataFrame
-            print("Creating output DataFrame...")
-            output_df = pd.DataFrame({
-                'timestamp': timestamp,
-                'predictions': predictions,
-                'groundtruth': ground
-            })
-
-        else:
-            #print("Running inference with MC Dropout")
-            uncertainties = []  # Add this to store uncertainties
-            mc_runs = config_data['mc']['runs']  # Allow configurable MC runs
-
-            # Choose between batch processing or single-sample processing
-            # Use single-sample for very large datasets or memory constraints
-
-            print(f"Using batch MC Dropout with {mc_runs} runs per batch")
-            mc_generator = evaluate_model_on_dataset_mc_dropout(
-                model, dataset, batch_size, times, config_data, save_weights,
-                input_size, patch_size, runs=mc_runs, sxr_norm=sxr_norm
-            )
-
-            for prediction, sxr, uncertainty, weight, idx in mc_generator:
-                # Unnormalize prediction and uncertainty
-                #pred = unnormalize_sxr(prediction, sxr_norm)
-                #unc = unnormalize_sxr(uncertainty, sxr_norm)
-
-                # Store results
-                predictions.append(prediction.item() if hasattr(prediction, 'item') else float(prediction))
-                ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
-                uncertainties.append(uncertainty.item() if hasattr(uncertainty, 'item') else float(uncertainty))
-                timestamp.append(str(times[idx]))
-
-                # Progress update
-                if (idx + 1) % 50 == 0:
-                    print(f"Processed {idx + 1}/{total_samples}")
-
-            # Create and save results DataFrame with uncertainty
-            print("Creating output DataFrame with uncertainty...")
-            output_df = pd.DataFrame({
-                'timestamp': timestamp,
-                'predictions': predictions,
-                'groundtruth': ground,
-                'uncertainty': uncertainties  # Add uncertainty column
-            })
-
-        print(output_df.head())
-        # Make output directory if it doesn't exist
-        output_dir = Path(config_data['output_path']).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_df.to_csv(config_data['output_path'], index=False)
-        print(f"Predictions saved to {config_data['output_path']}")
+    print(output_df.head())
+    # Make output directory if it doesn't exist
+    output_dir = Path(config_data['output_path']).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_df.to_csv(config_data['output_path'], index=False)
+    print(f"Predictions saved to {config_data['output_path']}")
 
 
 if __name__ == '__main__':
