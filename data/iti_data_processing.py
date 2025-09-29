@@ -144,7 +144,7 @@ else:
     print(f"Processing {len(unprocessed_indices)} unprocessed samples")
 
     if unprocessed_indices:
-        with Pool(processes=90) as pool:
+        with Pool(processes=os.cpu_count()) as pool:
             list(tqdm(pool.imap(save_sample, unprocessed_indices), total=len(unprocessed_indices)))
             print("AIA data processing completed.")
     else:
