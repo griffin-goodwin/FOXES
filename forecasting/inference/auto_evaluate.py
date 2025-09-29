@@ -52,7 +52,7 @@ def detect_model_type(checkpoint_path):
         # Default to vit for backward compatibility
         return 'vit'
 
-def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/COMBINED"):
+def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/NO-OVERLAP"):
     """Create inference config for checkpoint"""
     
     # Detect model type
@@ -69,10 +69,10 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
         'Stereo': 'false',
         'base_data_dir': base_data_dir,
         'data': {
-            'aia_dir': f"{base_data_dir}/AIA-SPLIT/",
+            'aia_dir': f"{base_data_dir}/AIA/",
             'checkpoint_path': checkpoint_path,
-            'sxr_dir': f"{base_data_dir}/SXR-SPLIT/",
-            'sxr_norm_path': f"{base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
+            'sxr_dir': f"{base_data_dir}/SXR/",
+            'sxr_norm_path': f"{base_data_dir}/SXR/normalized_sxr.npy"
         },
         'model': model_type,
         'wavelengths': [94, 131, 171, 193, 211, 304],
@@ -128,14 +128,14 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     
     return config, output_dir
 
-def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/COMBINED"):
+def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP"):
     """Create evaluation config"""
     
     config = {
         'base_data_dir': base_data_dir,
         'output_base_dir': f"{base_data_dir}/solar_flare_comparison_results",
         'data': {
-            'aia_dir': f"{base_data_dir}/AIA-SPLIT/test/",
+            'aia_dir': f"{base_data_dir}/AIA/test/",
             'weight_path': f"{output_dir}/weights"
         },
         'model_predictions': {
@@ -209,7 +209,7 @@ def main():
     parser.add_argument('-checkpoint_dir', type=str, help='Directory containing checkpoint files')
     parser.add_argument('-checkpoint_path', type=str, help='Specific checkpoint file path')
     parser.add_argument('-model_name', type=str, required=True, help='Name for the model (used for output naming)')
-    parser.add_argument('-base_data_dir', type=str, default='/mnt/data/COMBINED', help='Base data directory')
+    parser.add_argument('-base_data_dir', type=str, default='/mnt/data/NO-OVERLAP', help='Base data directory')
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
     

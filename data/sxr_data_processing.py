@@ -22,7 +22,7 @@ class SXRDataProcessor:
         Directory where combined GOES data will be saved.
     """
 
-    def __init__(self, data_dir: str = '/mnt/data/downloads/goes_data', output_dir: str = '/downloads/goes_combined'):
+    def __init__(self, data_dir: str = '/mnt/data/AUGUST/GOES-timespan', output_dir: str = '/mnt/data/AUGUST/combined'):
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
@@ -194,9 +194,9 @@ class SXRDataProcessor:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Preprocess GOES X-ray data.')
-    parser.add_argument('--data_dir', type=str, default='/mnt/data/NEW-FLARE/GOES-flaring',
+    parser.add_argument('--data_dir', type=str, default='/mnt/data/AUGUST/GOES-timespan',
                         help='Directory where downloaded GOES data is stored.')
-    parser.add_argument('--output_dir', type=str, default='/mnt/data/NEW-FLARE/combined',
+    parser.add_argument('--output_dir', type=str, default='/mnt/data/AUGUST/combined',
                         help='Directory where combined GOES data will be saved.')
     args = parser.parse_args()
     
