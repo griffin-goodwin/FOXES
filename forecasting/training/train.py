@@ -344,7 +344,8 @@ elif config_data['selected_model'] == 'CNNPatch':
     model = CNNPatch(model_kwargs=config_data['cnn_patch'], sxr_norm = sxr_norm)
 
 elif config_data['selected_model'] == 'ViT':
-    model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm)
+    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+    model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
 
 elif config_data['selected_model'] == 'ViTPatch':
     # Calculate base weights only if configured to do so
