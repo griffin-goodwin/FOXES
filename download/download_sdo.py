@@ -2,8 +2,10 @@ import argparse
 import logging
 import multiprocessing
 import os
+import time
 from datetime import timedelta, datetime
 from urllib import request
+from urllib.error import URLError, HTTPError
 
 
 import drms
@@ -25,7 +27,7 @@ class SDODownloader:
         wavelengths (list): List of wavelengths to download.
         n_workers (int): Number of worker threads for parallel download.
     """
-    def __init__(self, base_path, email, wavelengths=['94', '131', '171', '193', '211', '304'], n_workers=8, cadence=60):
+    def __init__(self, base_path, email, wavelengths=['94', '131', '171', '193', '211', '304'], n_workers=4, cadence=60):
         self.ds_path = base_path
         self.wavelengths = [str(wl) for wl in wavelengths]
         self.n_workers = n_workers
@@ -52,7 +54,33 @@ class SDODownloader:
                 return map_path
             # load map
             url = 'http://jsoc.stanford.edu' + segment
-            request.urlretrieve(url, filename=map_path)
+            
+            # Retry download with exponential backoff
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Create a custom opener with timeout
+                    opener = request.build_opener()
+                    opener.addheaders = [('User-Agent', 'Mozilla/5.0 (compatible; SDO-Downloader/1.0)')]
+                    request.install_opener(opener)
+                    
+                    # Download with timeout
+                    request.urlretrieve(url, filename=map_path)
+                    break
+                    
+                except (URLError, HTTPError) as e:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                        logging.warning(f'Download attempt {attempt + 1} failed for {url}: {e}')
+                        logging.warning(f'Retrying in {wait_time} seconds...')
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logging.error(f'All download attempts failed for {url}: {e}')
+                        raise e
+                except Exception as e:
+                    logging.error(f'Unexpected error downloading {url}: {e}')
+                    raise e
 
             header['DATE_OBS'] = header['DATE__OBS']
             header = header_to_fits(MetaDict(header))
@@ -109,6 +137,9 @@ class SDODownloader:
 
         with multiprocessing.Pool(self.n_workers) as p:
             p.map(self.download, queue)
+        
+        # Add a small delay to be respectful to the server
+        time.sleep(.1)
         logging.info('Finished: %s' % id)
 
     def fetchDataFallback(self, date):
@@ -177,6 +208,8 @@ class SDODownloader:
         with multiprocessing.Pool(self.n_workers) as p:
             p.map(self.download, queue)
 
+        # Add a small delay to be respectful to the server
+        time.sleep(.1)
         logging.info('Finished: %s' % id)
 
 
