@@ -204,7 +204,7 @@ class FlareDownloadProcessor:
                 end_time = event['event_endtime'] + time_after_end
                 self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
                                                 start_time.strftime('%Y-%m-%d'),
-                                                end_time.strftime('%Y-%m-%d'), max_workers=os.cpu_count()-1)
+                                                end_time.strftime('%Y-%m-%d'), max_workers=12)
                 processed_dates = set()
                 for d in [start_time + i * timedelta(minutes=1) for i in
                           range((end_time - start_time) // timedelta(minutes=1))]:
@@ -255,7 +255,7 @@ class FlareDownloadProcessor:
                                    range((end_time - start_time) // sampling_interval)]
                 
                 # Process in smaller batches to avoid overwhelming the server
-                batch_size = 900  # Smaller batches
+                batch_size = 100  # Smaller batches
                 for i in range(0, len(dates_to_process), batch_size):
                     batch = dates_to_process[i:i + batch_size]
                     print(f"Processing batch {i//batch_size + 1}/{(len(dates_to_process) + batch_size - 1)//batch_size} ({len(batch)} dates)")
@@ -286,7 +286,7 @@ class FlareDownloadProcessor:
                                     # If it's a connection error, wait longer before retrying
                                     if "Connection refused" in str(e) or "timeout" in str(e).lower():
                                         print(f"  Waiting 10 seconds before continuing...")
-                                        time.sleep(5)
+                                        time.sleep(10)
                                     continue
                             else:
                                 print(f"  ⏭ Data already exists for {d}, skipping download")
