@@ -182,3 +182,7 @@ cython_debug/
 wandb/
 
 *.png
+
+*.csv
+
+notebooks_tests/

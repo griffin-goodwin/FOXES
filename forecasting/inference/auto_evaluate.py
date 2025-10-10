@@ -63,6 +63,10 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{output_dir}/weights", exist_ok=True)
     
+    # Create flux directory for patch-based models
+    if model_type in ['vitpatch', 'vitlocal']:
+        os.makedirs(f"{output_dir}/flux", exist_ok=True)
+    
     # Generate config
     config = {
         'SolO': 'false',
@@ -109,6 +113,10 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
         'weight_path': f"{output_dir}/weights"
     }
     
+    # Add flux_path for patch-based models
+    if model_type in ['vitpatch', 'vitlocal']:
+        config['flux_path'] = f"{output_dir}/flux/"
+    
     # Add model-specific configs
     if model_type == 'fusion':
         config['fusion'] = {
@@ -144,11 +152,11 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
         },
         'evaluation': {
             'output_dir': output_dir,
-            'sxr_cutoff': 1e-7
+            'sxr_cutoff': 1e-9
         },
         'time_range': {
-            'start_time': '2023-08-05T00:00:00',
-            'end_time': '2023-08-07T23:59:00',
+            'start_time': '2023-08-08T20:00:00',
+            'end_time': '2023-08-08T23:59:00',
             'interval_minutes': 1
         },
         'plotting': {
