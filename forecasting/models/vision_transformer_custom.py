@@ -27,7 +27,7 @@ class ViT(pl.LightningModule):
         filtered_kwargs = dict(model_kwargs)
         filtered_kwargs.pop('lr', None)
         self.model = VisionTransformer(**filtered_kwargs)
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=1500, base_weights=base_weights)
+        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=base_weights)
         self.sxr_norm = sxr_norm
 
     def forward(self, x, return_attention=True):
