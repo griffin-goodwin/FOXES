@@ -1,18 +1,17 @@
-
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/COMBINED"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/COMBINED"    # Change this line for different datasets
+base_data_dir: "/mnt/data/NO-OVERLAP"  # Change this line for different datasets
+base_checkpoint_dir: "/mnt/data/NO-OVERLAP"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 
 # GPU configuration
-gpu_id: 3  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
+gpu_id: 0  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
 # Model configuration
-selected_model: "ViTPatch"  # Options: "hybrid", "vit", "fusion", "vitpatch"
+selected_model: "ViT"  # Options: "hybrid", "vit", "fusion", "vitpatch"
 batch_size:    64
 epochs:        250
 oversample: false
 balance_strategy: "upsample_minority"
-calculate_base_weights: false  # Whether to calculate class-based weights for loss function
+calculate_base_weights: true  # Whether to calculate class-based weights for loss function
 
 megsai:
   architecture: "cnn"
@@ -51,15 +50,22 @@ fusion:
     cnn_model: "updated"
     cnn_dp: 0.75
 
+cnn_patch:
+    num_channels: 6
+    patch_size: 16
+    num_patches: 1024
+    dropout: 0.1
+    hidden_dim: 256
+    lr: 0.0001
 
 # Data paths (automatically constructed from base directories)
 data:
   aia_dir:
-    "${base_data_dir}/AIA-SPLIT"
+    "${base_data_dir}/AIA"
   sxr_dir:
-    "${base_data_dir}/SXR-SPLIT"
+    "${base_data_dir}/SXR"
   sxr_norm_path:
-    "${base_data_dir}/SXR-SPLIT/normalized_sxr.npy"
+    "${base_data_dir}/SXR/normalized_sxr.npy"
   checkpoints_dir:
     "${base_checkpoint_dir}/new-checkpoint/"
 
@@ -71,5 +77,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-mse-claude
+  wb_name: vit-basic-neurip
   notes: Regression from AIA images (6 channels) to GOES SXR flux

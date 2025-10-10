@@ -685,6 +685,10 @@ class SolarFlareEvaluator:
                 gt = sxr_window['groundtruth'].values
                 uncertainties = sxr_window['groundtruth_uncertainty'].values
 
+                # Calculate uncertainty bounds
+                lower_bound = gt - uncertainties
+                upper_bound = gt + uncertainties
+                
                 # Ensure bounds are positive for log scale
                 lower_bound = np.maximum(lower_bound, 1e-12)
 
@@ -729,7 +733,7 @@ class SolarFlareEvaluator:
                     info_text = "\n".join(info_lines)
                     sxr_ax.text(0.02, 0.98, info_text, transform=sxr_ax.transAxes,
                                 fontsize=8, verticalalignment='top', fontfamily='Barlow',
-                                bbox=dict(boxstyle='round', alpha=0.7, facecolor='white'))
+                                bbox=dict(boxstyle='round', alpha=0.9, facecolor='#FFEEE6'))
 
                 sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
                 sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data

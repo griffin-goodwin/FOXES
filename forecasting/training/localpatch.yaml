@@ -7,12 +7,12 @@ wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 # GPU configuration
 gpu_id: 0  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
 # Model configuration
-selected_model: "ViT"  # Options: "hybrid", "vit", "fusion", "vitpatch"
+selected_model: "ViTLocal"  # Options: "hybrid", "vit", "fusion", "vitpatch"
 batch_size:    64
 epochs:        250
 oversample: false
 balance_strategy: "upsample_minority"
-calculate_base_weights: true  # Whether to calculate class-based weights for loss function
+calculate_base_weights: false  # Whether to calculate class-based weights for loss function
 
 megsai:
   architecture: "cnn"
@@ -78,5 +78,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: vit-basic-neurip
+  wb_name: vit-local-patch
   notes: Regression from AIA images (6 channels) to GOES SXR flux

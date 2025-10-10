@@ -46,6 +46,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
 
     # Check if this model supports attention weights
     supports_attention = has_attention_weights(model) and save_weights
+    save_flux = config_data and 'flux_path' in config_data
+    sxr_norm = np.load(
+        config_data['data']['sxr_norm_path']) if config_data and 'data' in config_data and 'sxr_norm_path' in \
+                                                 config_data['data'] else None
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
@@ -61,13 +65,19 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             else:
                 pred = model(aia_imgs)
 
-            # Handle different model output formats
-            if isinstance(pred, tuple) and len(pred) > 1:
+            # Handle different model output formats - patch models return 3 values when return_attention=True
+            if isinstance(pred, tuple) and len(pred) >= 3:
+                predictions = pred[0]  # sxr predictions: [batch_size, ...]
+                weights = pred[1] if supports_attention else None  # attention_weights: [batch_size, heads, L, S ...]
+                flux_contributions = pred[2] if save_flux else None  # flux_contributions: [batch_size, num_patches]
+            elif isinstance(pred, tuple) and len(pred) > 1:
                 predictions = pred[0]  # Shape: [batch_size, ...]
                 weights = pred[1] if supports_attention else None  # Shape: [batch_size, heads, L, S ...]
+                flux_contributions = None
             else:
                 predictions = pred
                 weights = None
+                flux_contributions = None
 
             # Process entire batch at once for weights if needed
             batch_weights = []
@@ -121,13 +131,56 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 if config_data and 'weight_path' in config_data:
                     save_batch_weights(batch_weights, batch_idx, batch_size, times, config_data['weight_path'])
 
+            # Process and save flux contributions
+            batch_flux_contributions = []
+            if save_flux and flux_contributions is not None:
+                current_batch_size = predictions.shape[0]
+                for i in range(current_batch_size):
+                    # Get flux contributions for this sample and reshape to spatial grid
+                    flux_contrib = flux_contributions[i].cpu()  # [num_patches]
+                    # Reshape flux contributions to spatial grid (same as attention maps)
+                    grid_h, grid_w = input_size // patch_size, input_size // patch_size  # Should be 32x32 for 512/16
+                    flux_contrib_map = flux_contrib.reshape(grid_h, grid_w)  # [grid_h, grid_w]
+                    batch_flux_contributions.append(flux_contrib_map.numpy())
+
+                # Save flux contributions
+                save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times,
+                                              config_data['flux_path'], sxr_norm)
+
             # Yield batch results
             current_batch_size = predictions.shape[0]
             for i in range(current_batch_size):
                 global_idx = batch_idx * batch_size + i
                 weight_data = batch_weights[i] if (supports_attention and batch_weights) else None
+                flux_data = batch_flux_contributions[i] if batch_flux_contributions else None
                 yield (predictions[i].cpu().numpy(), sxr[i].cpu().numpy(),
-                       weight_data, global_idx)
+                       weight_data, flux_data, global_idx)
+
+
+def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
+    """Save all flux contributions in a batch efficiently - same format as attention weights"""
+    flux_dir = Path(flux_path)
+    flux_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use ThreadPoolExecutor to save files in parallel
+    def save_single_flux(args):
+        flux_contrib, filepath = args
+        # Note: flux contributions are already reshaped to 2D spatial maps
+        # Unnormalize flux contributions before saving if needed
+        np.savetxt(filepath, flux_contrib, delimiter=",")
+
+    # Prepare arguments for parallel saving
+    save_args = []
+    for i, flux_contrib in enumerate(batch_flux_contributions):
+        global_idx = batch_idx * batch_size + i
+        if global_idx < len(times):  # Make sure we don't go out of bounds
+            # Save with same naming convention as attention weights (without "flux_" prefix)
+            filepath = flux_path + f"{times[global_idx]}"
+            save_args.append((flux_contrib, filepath))
+
+    # Save all flux contributions in this batch in parallel
+    with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
+        executor.map(save_single_flux, save_args)
 
 
 def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path):
@@ -290,6 +343,13 @@ def main():
     else:
         print("Will save attention weights during inference")
 
+    # Check if flux contributions should be saved
+    save_flux = config_data and 'flux_path' in config_data
+    if save_flux:
+        print("Will save flux contributions during inference")
+    else:
+        print("No flux path specified - skipping flux contribution saving")
+
     # Enable optimizations
     torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
 
@@ -305,7 +365,7 @@ def main():
     elif config_data['Stereo'] == "true":
         dataset = AIA_GOESDataset(
             aia_dir=config_data['Stereo_data']['stereo_img_dir'],
-            sxr_dir=config_data['Stereo_data']['sxr_dir'] + '/test', wavelengths= [94,131,171,193], only_prediction=True
+            sxr_dir=config_data['Stereo_data']['sxr_dir'] + '/test', wavelengths= [171,193,211,304], only_prediction=True
         )
     else:
         dataset = AIA_GOESDataset(
@@ -325,7 +385,7 @@ def main():
     print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
     print("Running inference...")
-    for prediction, sxr, weight, idx in evaluate_model_on_dataset(
+    for prediction, sxr, weight, flux_data, idx in evaluate_model_on_dataset(
             model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
     ):
         # Unnormalize prediction only if not ViTPatch / ViTLocal
@@ -347,6 +407,9 @@ def main():
         print("All weights saved during batch processing!")
     else:
         print("Inference completed (no weights saved)!")
+
+    if save_flux:
+        print("All flux contributions saved during batch processing!")
 
     # Create and save results DataFrame
     print("Creating output DataFrame...")

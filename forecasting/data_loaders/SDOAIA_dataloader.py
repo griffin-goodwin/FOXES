@@ -219,6 +219,9 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
             sxr_val = self.sxr_transform(sxr_val)
 
         return aia_img, torch.tensor(sxr_val, dtype=torch.float32)
+    def __gettimestamp__(self, idx):
+        timestamp = self.samples[idx]
+        return timestamp
 
 class AIA_GOESDataModule(LightningDataModule):
     """PyTorch Lightning DataModule for AIA and SXR data."""
