@@ -60,7 +60,7 @@ def split_data(input_folder, output_dir, data_type, flare_events_csv=None, repar
             ],
             'test': [
                 (pd.to_datetime("2023-08-01").replace(hour=0, minute=0, second=0, microsecond=0),
-                 pd.to_datetime("2023-08-31").replace(hour=23, minute=59, second=59, microsecond=999999))
+                 pd.to_datetime("2025-09-01").replace(hour=23, minute=59, second=59, microsecond=999999))
             ]
         }
         #print the buffer strategy date ranges
