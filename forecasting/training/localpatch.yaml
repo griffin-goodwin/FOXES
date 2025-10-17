@@ -8,22 +8,11 @@ wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 gpu_id: 0  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
 # Model configuration
 selected_model: "ViTLocal"  # Options: "hybrid", "vit", "fusion", "vitpatch"
-batch_size:    64
+batch_size:    128
 epochs:        250
 oversample: false
 balance_strategy: "upsample_minority"
 calculate_base_weights: false  # Whether to calculate class-based weights for loss function
-
-megsai:
-  architecture: "cnn"
-  seed: 42
-  lr: 0.0001
-  cnn_model: "updated"
-  cnn_dp: 0.2
-  weight_decay: 1e-5
-  cosine_restart_T0: 50
-  cosine_restart_Tmult: 2
-  cosine_eta_min: 1e-7
 
 vit_custom:
     embed_dim: 512
@@ -37,27 +26,6 @@ vit_custom:
     dropout: 0.1
     lr: 0.0001
 
-
-fusion:
-  scalar_branch: "hybrid"        # or "linear"
-  lr: 0.0001
-  lambda_vit_to_target: 0.3
-  lambda_scalar_to_target: 0.1
-  learnable_gate: true
-  gate_init_bias: 5.0
-  scalar_kwargs:
-    d_input: 6
-    d_output: 1
-    cnn_model: "updated"
-    cnn_dp: 0.75
-
-cnn_patch:
-    num_channels: 6
-    patch_size: 16
-    num_patches: 1024
-    dropout: 0.1
-    hidden_dim: 256
-    lr: 0.0001
 
 # Data paths (automatically constructed from base directories)
 data:
