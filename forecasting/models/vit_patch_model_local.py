@@ -53,7 +53,7 @@ class ViTLocal(pl.LightningModule):
 
         scheduler = CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=50,  # Restart every 20 epochs
+            T_0=250,  # Restart every 20 epochs
             T_mult=2,  # Double the cycle length after each restart
             eta_min=1e-7  # Minimum learning rate
         )
@@ -84,31 +84,31 @@ class ViTLocal(pl.LightningModule):
 
         #Also calculate huber loss for logging
         huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=.3)
-        #huber_loss = F.mse_loss(norm_preds_squeezed, sxr)
-
+        mse_loss = F.mse_loss(norm_preds_squeezed, sxr)
+        mae_loss = F.l1_loss(norm_preds_squeezed, sxr)
+        rmse_loss = torch.sqrt(mse_loss)
 
         # Log adaptation info
         if mode == "train":
             # Always log learning rate (every step)
             current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-            self.log('learning_rate', current_lr, on_step=True, on_epoch=False,
+            self.log('train/learning_rate', current_lr, on_step=True, on_epoch=False,
                      prog_bar=True, logger=True, sync_dist=True)
-
-
-            #self.log("sparsity_entropy_loss", sparsity_or_entropy, on_step=True, on_epoch=True, )
-            self.log("train_total_loss", loss, on_step=True, on_epoch=True,
+            self.log("train/total_loss", loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
-            self.log("train_huber_loss", huber_loss, on_step=True, on_epoch=True,
+            self.log("train/huber_loss", huber_loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
-
+            self.log("train/mse_loss", mse_loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+            self.log("train/mae_loss", mae_loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+            self.log("train/rmse_loss", rmse_loss, on_step=True, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
             # Detailed diagnostics only every 200 steps
             if self.global_step % 200 == 0:
                 multipliers = self.adaptive_loss.get_current_multipliers()
                 for key, value in multipliers.items():
                     self.log(f"adaptive/{key}", value, on_step=True, on_epoch=False)
-
-                self.log("adaptive/avg_weight", weights.mean(), on_step=True, on_epoch=False)
-                self.log("adaptive/max_weight", weights.max(), on_step=True, on_epoch=False)
 
         if mode == "val":
             # Validation: typically only log epoch aggregates
@@ -117,6 +117,9 @@ class ViTLocal(pl.LightningModule):
                 self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
             self.log("val_total_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_mse_loss", mse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_mae_loss", mae_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_rmse_loss", rmse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         return loss
 
@@ -129,18 +132,6 @@ class ViTLocal(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         self._calculate_loss(batch, mode="test")
 
-    def apply_wavelength_dropout(self, x, dropout_prob=0.3):
-        """Randomly zero out some wavelengths during training"""
-        if self.training and torch.rand(1).item() < dropout_prob:
-            # x shape: [B, H, W, num_channels]
-            num_keep = torch.randint(1, self.model_kwargs['num_channels'], (1,)).item()
-            keep_indices = torch.randperm(self.model_kwargs['num_channels'])[:num_keep]
-
-            mask = torch.zeros(self.model_kwargs['num_channels'], device=x.device)
-            mask[keep_indices] = 1.0
-
-            x = x * mask.view(1, 1, 1, -1)
-        return x
 
 
 class VisionTransformerLocal(nn.Module):
@@ -452,9 +443,6 @@ class SXRRegressionDynamicLoss:
         mean_weight = torch.mean(weights)
         weights = weights / (mean_weight)
 
-        # Clamp extreme weights
-        #weights = torch.clamp(weights, min=0.01, max=40.0)
-
         # Save for logging
         self.current_multipliers = {
             'quiet_mult': quiet_mult,
@@ -479,15 +467,6 @@ class SXRRegressionDynamicLoss:
             'x_class': {'min_samples': 1000, 'recent_window': 300}
         }
 
-        # target_errors = {
-        #     'quiet': 0.15,
-        #     'c_class': 0.08,
-        #     'm_class': 0.05,
-        #     'x_class': 0.05
-        # }
-        
-        #target = target_errors[sxrclass]
-
         if len(error_history) < class_params[sxrclass]['min_samples']:
             return 1.0
 
@@ -495,39 +474,16 @@ class SXRRegressionDynamicLoss:
         recent = np.mean(list(error_history)[-recent_window:])
         overall = np.mean(list(error_history))
 
-        # if overall < 1e-10:
-        #     return 1.0
-
         ratio = recent / overall
         multiplier = np.exp(sensitivity * (ratio - 1))
         return np.clip(multiplier, min_multiplier, max_multiplier)
 
-
-        
-        # if len(error_history) < class_params[sxrclass]['min_samples']:
-        #     return 1.0
-        
-        # recent = np.mean(list(error_history)[-class_params[sxrclass]['recent_window']:])
-        
-        # if recent > target:  # Not meeting target - increase weight
-        #     excess_error = (recent - target) / target
-        #     multiplier = 1.0 + sensitivity * excess_error
-        # else:  # Meeting/exceeding target
-        #     if sxrclass == 'quiet':
-        #         # Can reduce quiet weight significantly
-        #         multiplier = max(0.5, 1.0 - 0.5 * (target - recent) / target)
-        #     else:
-        #         # Keep important classes weighted well even when performing good
-        #         multiplier = max(0.8, 1.0 - 0.2 * (target - recent) / target)
-        
-        # return np.clip(multiplier, min_multiplier, max_multiplier)
 
     def _update_tracking(self, sxr_un, sxr_norm, preds_norm):
         sxr_un_np = sxr_un.detach().cpu().numpy()
 
         #Huber loss
         error = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
-        #error = F.mse_loss(preds_norm, sxr_norm, reduction='none')
         error = error.detach().cpu().numpy()
 
     

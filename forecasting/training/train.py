@@ -315,81 +315,12 @@ def get_base_weights(data_loader, sxr_norm):
         'x_class': x_weight
     }
 
-# Model
-if config_data['selected_model'] == 'linear':
-    model = LinearIrradianceModel(
-        d_input= len(config_data['wavelengths']),
-        d_output=1,
-        lr= config_data['megsai']['lr'],
-        loss_func=HuberLoss(),
-        weight_decay=config_data['megsai']['weight_decay'],
-        cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
-        cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
-        cosine_eta_min=config_data['megsai']['cosine_eta_min']
-    )
-elif config_data['selected_model'] == 'hybrid':
-    model = HybridIrradianceModel(
-        d_input= len(config_data['wavelengths']),
-        d_output=1,
-        cnn_model=config_data['megsai']['cnn_model'],
-        ln_model=True,
-        cnn_dp=config_data['megsai']['cnn_dp'],
-        lr=config_data['megsai']['lr'],
-        weight_decay=config_data['megsai']['weight_decay'],
-        cosine_restart_T0=config_data['megsai']['cosine_restart_T0'],
-        cosine_restart_Tmult=config_data['megsai']['cosine_restart_Tmult'],
-        cosine_eta_min=config_data['megsai']['cosine_eta_min']
-    )
-elif config_data['selected_model'] == 'CNNPatch':
-    model = CNNPatch(model_kwargs=config_data['cnn_patch'], sxr_norm = sxr_norm)
 
-elif config_data['selected_model'] == 'ViT':
-    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
-    model = ViT(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
-
-elif config_data['selected_model'] == 'ViTPatch':
-    # Calculate base weights only if configured to do so
-    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
-    model = ViTPatch(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
-
-elif config_data['selected_model'] == 'ViTLocal':
+if config_data['selected_model'] == 'ViTLocal':
     base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
     model = ViTLocal(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
-
-elif config_data['selected_model'] == 'ViTUncertainty':
-    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
-    model = ViTUncertainty(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
-
-elif config_data['selected_model'] == 'FusionViTHybrid':
-    # Expect a 'fusion' section in YAML
-    fusion_cfg = config_data.get('fusion', {})
-    scalar_branch = fusion_cfg.get('scalar_branch', 'hybrid')
-    scalar_kwargs = fusion_cfg.get('scalar_kwargs', {
-        'd_input': len(config_data['wavelengths']),
-        'd_output': 1,
-        'cnn_model': config_data.get('megsai', {}).get('cnn_model', 'updated'),
-        'cnn_dp': config_data.get('megsai', {}).get('cnn_dp', 0.75),
-        'lr': fusion_cfg.get('lr', config_data.get('megsai', {}).get('lr', 1e-4)),
-    })
-    vit_kwargs = config_data.get('vit_custom', {})
-
-    model = FusionViTHybrid(
-        vit_kwargs=vit_kwargs,
-        scalar_branch=scalar_branch,
-        scalar_kwargs=scalar_kwargs,
-        sxr_norm=sxr_norm,
-        lr=fusion_cfg.get('lr', 1e-4),
-        lambda_vit_to_target=fusion_cfg.get('lambda_vit_to_target', 0.3),
-        lambda_scalar_to_target=fusion_cfg.get('lambda_scalar_to_target', 0.1),
-        learnable_gate=fusion_cfg.get('learnable_gate', True),
-        gate_init_bias=fusion_cfg.get('gate_init_bias', 5.0),
-    )
-
 else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
-
-# Monitor memory after model creation
-print_gpu_memory("after model creation")
 
 # Set device based on config
 gpu_id = config_data.get('gpu_id', 0)
@@ -409,27 +340,15 @@ else:
         print(f"GPU {gpu_id} not available, falling back to CPU")
 
 # Trainer
-if config_data['selected_model'] == 'ViT' or config_data['selected_model'] == 'ViTPatch' or config_data['selected_model'] == 'FusionViTHybrid':
-    trainer = Trainer(
-        default_root_dir=config_data['data']['checkpoints_dir'],
-        accelerator=accelerator,
-        devices=devices,
-        max_epochs=config_data['epochs'],
-        callbacks=[attention, checkpoint_callback],
-        logger=wandb_logger,
-        log_every_n_steps=10,
-    )
-else:
-    trainer = Trainer(
-        default_root_dir=config_data['data']['checkpoints_dir'],
-        accelerator=accelerator,
-        devices=devices,
-        max_epochs=config_data['epochs'],
-        callbacks=[checkpoint_callback],
-        logger=wandb_logger,
-        log_every_n_steps=10,
-    )
-# Save checkpoint
+trainer = Trainer(
+    default_root_dir=config_data['data']['checkpoints_dir'],
+    accelerator=accelerator,
+    devices=devices,
+    max_epochs=config_data['epochs'],
+    callbacks=[attention, checkpoint_callback],
+    logger=wandb_logger,
+    log_every_n_steps=10,
+)
 trainer.fit(model, data_loader)
 
 # Save final PyTorch checkpoint with model and state_dict
