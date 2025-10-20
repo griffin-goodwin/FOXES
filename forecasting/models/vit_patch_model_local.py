@@ -108,7 +108,7 @@ class ViTLocal(pl.LightningModule):
             if self.global_step % 200 == 0:
                 multipliers = self.adaptive_loss.get_current_multipliers()
                 for key, value in multipliers.items():
-                    self.log(f"adaptive/{key}", value, on_step=True, on_epoch=False)
+                    self.log(f"adaptive/{key}", value, on_step=True, on_epoch=False, sync_dist=True)
 
         if mode == "val":
             # Validation: typically only log epoch aggregates
@@ -177,9 +177,8 @@ class VisionTransformerLocal(nn.Module):
         self.mlp_head = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, 1))
         self.dropout = nn.Dropout(dropout)
 
-        # Parameters/Embeddings
-        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        self.pos_embedding = nn.Parameter(torch.randn(1, 1 + num_patches, embed_dim))
+        # Parameters/Embeddings - using 2D positional encoding for local attention
+        # No CLS token needed for local attention architecture
         self.grid_h = int(math.sqrt(num_patches))
         self.grid_w = int(math.sqrt(num_patches))
         self.pos_embedding_2d = nn.Parameter(torch.randn(1, self.grid_h, self.grid_w, embed_dim))
@@ -289,7 +288,7 @@ class AttentionBlock(nn.Module):
 
 
 class LocalAttentionBlock(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, num_heads, num_patches, dropout=0.0, local_window=3):
+    def __init__(self, embed_dim, hidden_dim, num_heads, num_patches, dropout=0.0, local_window=9):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads

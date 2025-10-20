@@ -1,14 +1,19 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/NO-OVERLAP"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/NO-OVERLAP"    # Change this line for different datasets
+base_data_dir: "/mnt/data/PAPER_DATA_B"  # Change this line for different datasets
+base_checkpoint_dir: "/mnt/data/PAPER_DATA_B"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 
 # GPU configuration
-gpu_id: 0  # GPU device ID to use (0, 1, 2, etc.) or -1 for CPU only
+# Options:
+#   - Single GPU: gpu_ids: 0  or  gpu_ids: [0]
+#   - Multi GPU: gpu_ids: [0, 1]  (uses both GPU 0 and 1)
+#   - All GPUs: gpu_ids: "all"  (uses all available GPUs)
+#   - CPU only: gpu_ids: -1
+gpu_ids: "all"  # Use both GPUs
 # Model configuration
 selected_model: "ViTLocal"  # Options: "hybrid", "vit", "fusion", "vitpatch"
-batch_size:    128
+batch_size:    48
 epochs:        250
 oversample: false
 balance_strategy: "upsample_minority"
@@ -20,9 +25,9 @@ vit_custom:
     num_classes: 1
     patch_size: 16
     num_patches: 1024
-    hidden_dim: 512
+    hidden_dim: 2048
     num_heads: 8
-    num_layers: 6
+    num_layers: 10
     dropout: 0.1
     lr: 0.0001
 
@@ -40,11 +45,11 @@ data:
 
 wandb:
   entity: jayantbiradar619-university-of-arizona # Use your exact W&B username
-  project: Model Testing
+  project: Paper
   job_type: training
   tags:
     - aia
     - sxr
     - regression
-  wb_name: vit-local-patch
+  wb_name: paper-testing-16-patch-deeper-model-9x9-attention
   notes: Regression from AIA images (6 channels) to GOES SXR flux
