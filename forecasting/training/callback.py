@@ -90,7 +90,7 @@ class ImagePredictionLogger_SXR(Callback):
 
 
 class AttentionMapCallback(Callback):
-    def __init__(self, log_every_n_epochs=1, num_samples=4, save_dir="attention_maps", patch_size=8):
+    def __init__(self, log_every_n_epochs=1, num_samples=4, save_dir="attention_maps", patch_size=8, use_local_attention=False):
         """
         Callback to visualize attention maps during training.
 
@@ -99,12 +99,14 @@ class AttentionMapCallback(Callback):
             num_samples: Number of samples to visualize
             save_dir: Directory to save attention maps
             patch_size: Size of patches used in the model
+            use_local_attention: If True, visualize local attention patterns instead of CLS token attention
         """
         super().__init__()
         self.patch_size = patch_size
         self.log_every_n_epochs = log_every_n_epochs
         self.num_samples = num_samples
         self.save_dir = save_dir
+        self.use_local_attention = use_local_attention
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer.current_epoch % self.log_every_n_epochs == 0:
@@ -125,8 +127,8 @@ class AttentionMapCallback(Callback):
             # Move to device
             imgs = imgs[:self.num_samples].to(pl_module.device)
 
-            # Get predictions with attention weights
-            #Dynamically extract attention weights from the model
+            # Get predictions with attention weights and patch contributions
+            patch_flux_raw = None
             try:
                 outputs, attention_weights  = pl_module(imgs, return_attention=True)
             except:
@@ -134,7 +136,7 @@ class AttentionMapCallback(Callback):
                 if hasattr(pl_module, 'model') and hasattr(pl_module.model, 'forward'):
                     try:
                         print("Using model's forward method")
-                        outputs, attention_weights, _ = pl_module.model(imgs, pl_module.sxr_norm, return_attention=True)
+                        outputs, attention_weights, patch_flux_raw = pl_module.model(imgs, pl_module.sxr_norm, return_attention=True)
                     except:
                         print("Using model's forward method failed")
                         outputs, attention_weights = pl_module.forward_for_callback(imgs, return_attention=True)
@@ -149,12 +151,13 @@ class AttentionMapCallback(Callback):
                     attention_weights,
                     sample_idx,
                     trainer.current_epoch,
-                    patch_size=self.patch_size
+                    patch_size=self.patch_size,
+                    patch_flux=patch_flux_raw[sample_idx] if patch_flux_raw is not None else None
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(map)})
                 plt.close(map)
 
-    def _plot_attention_map(self, image, attention_weights, sample_idx, epoch, patch_size):
+    def _plot_attention_map(self, image, attention_weights, sample_idx, epoch, patch_size, patch_flux=None):
         """
         Plot attention map for a single image.
 
@@ -164,50 +167,44 @@ class AttentionMapCallback(Callback):
             sample_idx: Index of the sample in the batch
             epoch: Current epoch number
             patch_size: Size of patches
+            patch_flux: Optional tensor of patch flux contributions [num_patches]
         """
         # Convert image to numpy and transpose
         img_np = image.cpu().numpy()
         if len(img_np.shape) == 3 and img_np.shape[0] in [1, 3]:  # Check if channels first
             img_np = np.transpose(img_np, (1, 2, 0))
 
+        # Calculate grid size
+        H, W = img_np.shape[:2]
+        grid_h, grid_w = H // patch_size, W // patch_size
 
         # Get attention from the last layer
         last_layer_attention = attention_weights[-1]  # [B, num_heads, seq_len, seq_len]
-
+        
         # Extract attention for this sample
         sample_attention = last_layer_attention[sample_idx]  # [num_heads, seq_len, seq_len]
-
+        
         # Average across heads
         avg_attention = sample_attention.mean(dim=0)  # [seq_len, seq_len]
 
-        # Get attention from CLS token to patches (exclude CLS->CLS)
-        cls_attention = avg_attention[0, 1:].cpu()  # [num_patches]
+        if self.use_local_attention:
+            # For local attention: visualize attention patterns from center patch
+            # and average attention across all patches
+            center_patch_idx = (grid_h * grid_w) // 2  # Center patch
+            center_attention = avg_attention[center_patch_idx, :].cpu()  # [num_patches]
+            
+            # Average attention pattern (how much each patch attends to others on average)
+            avg_attention_map = avg_attention.mean(dim=0).cpu()  # [num_patches]
+            
+            attention_map = avg_attention_map.reshape(grid_h, grid_w)
+            center_map = center_attention.reshape(grid_h, grid_w)
+        else:
+            # For CLS token attention: visualize attention from CLS to patches
+            cls_attention = avg_attention[0, 1:].cpu()  # [num_patches]
+            attention_map = cls_attention.reshape(grid_h, grid_w)
+            center_map = None
 
-        # Calculate grid size - NOW USING CORRECT DIMENSIONS
-        H, W = img_np.shape[:2]  # Now this is correct after transpose
-        grid_h, grid_w = H // patch_size, W // patch_size
-
-        # Reshape attention to spatial grid
-        attention_map = cls_attention.reshape(grid_h, grid_w)
-
-        # Create figure with subplots
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-        # Plot 1: Original image
-        # if img_np.shape[2] == 1:  # Grayscale
-        #     img_display = (img_np[:, :, 0] + 1) / 2
-        #     axes[0].imshow(img_display, cmap='gray')
-        # elif img_np.shape[2] == 3:  # RGB
-        #     # Normalize RGB image properly
-        #     img_display = (img_np + 1) / 2  # Assuming images are in [-1, 1] range
-        #     img_display = np.clip(img_display, 0, 1)  # Ensure valid range
-        #     axes[0].imshow(img_display)
-        # else:  # Multi-channel (6 channels in your case)
-        #     # Option 1: Display first channel as grayscale
-        #     img_display = (img_np[:, :, 0] + 1) / 2
-        #     axes[0].imshow(img_display, cmap='gray')
-
-            # Option 2: Create RGB composite from 3 channels (uncomment if preferred)
+        # Prepare image display
         if len(img_np[0,0,:]) >= 6:  # Ensure we have enough channels
             rgb_channels = [0, 2, 4]  # Select which channels to use for R, G, B
             img_display = np.stack([(img_np[:, :, i] + 1) / 2 for i in rgb_channels], axis=2)
@@ -216,32 +213,88 @@ class AttentionMapCallback(Callback):
             # If not enough channels, use grayscale
             img_display = (img_np[:, :, 0] + 1) / 2
             img_display = np.stack([img_display] * 3, axis=2)
-        axes[0].imshow(img_display)
-        axes[0].set_title(f'Original Image (Epoch {epoch})')
-        axes[0].axis('off')
 
-        # Plot 2: Attention heatmap
-        attention_np = np.log1p(attention_map.numpy())
-        # Resize attention map to match image size
-        attention_resized = zoom(attention_np, (H / grid_h, W / grid_w), order=1)
+        # Create figure with appropriate number of subplots
+        if self.use_local_attention and patch_flux is not None:
+            # Show: Original, Avg Attention, Center Attention, Patch Flux
+            fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+            
+            # Plot 1: Original image
+            axes[0].imshow(img_display)
+            axes[0].set_title(f'Original Image (Epoch {epoch})')
+            axes[0].axis('off')
+            
+            # Plot 2: Average attention pattern
+            attention_np = np.log1p(attention_map.numpy())
+            attention_resized = zoom(attention_np, (H / grid_h, W / grid_w), order=1)
+            im1 = axes[1].imshow(attention_resized, cmap='hot')
+            axes[1].set_title('Avg Attention (All Patches)')
+            axes[1].axis('off')
+            plt.colorbar(im1, ax=axes[1])
+            
+            # Plot 3: Center patch attention
+            center_np = np.log1p(center_map.numpy())
+            center_resized = zoom(center_np, (H / grid_h, W / grid_w), order=1)
+            im2 = axes[2].imshow(center_resized, cmap='viridis')
+            axes[2].set_title('Center Patch Attention')
+            axes[2].axis('off')
+            plt.colorbar(im2, ax=axes[2])
+            
+            # Plot 4: Patch flux contributions
+            flux_map = patch_flux.cpu().reshape(grid_h, grid_w)
+            flux_np = np.log1p(flux_map.numpy())
+            flux_resized = zoom(flux_np, (H / grid_h, W / grid_w), order=1)
+            im3 = axes[3].imshow(flux_resized, cmap='plasma')
+            axes[3].set_title('Log Patch Flux Contributions')
+            axes[3].axis('off')
+            plt.colorbar(im3, ax=axes[3])
+            
+        elif self.use_local_attention:
+            # Show: Original, Avg Attention, Center Attention
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            # Plot 1: Original image
+            axes[0].imshow(img_display)
+            axes[0].set_title(f'Original Image (Epoch {epoch})')
+            axes[0].axis('off')
+            
+            # Plot 2: Average attention pattern
+            attention_np = np.log1p(attention_map.numpy())
+            attention_resized = zoom(attention_np, (H / grid_h, W / grid_w), order=1)
+            im1 = axes[1].imshow(attention_resized, cmap='hot')
+            axes[1].set_title('Avg Attention (All Patches)')
+            axes[1].axis('off')
+            plt.colorbar(im1, ax=axes[1])
+            
+            # Plot 3: Center patch attention
+            center_np = np.log1p(center_map.numpy())
+            center_resized = zoom(center_np, (H / grid_h, W / grid_w), order=1)
+            im2 = axes[2].imshow(center_resized, cmap='viridis')
+            axes[2].set_title('Center Patch Attention')
+            axes[2].axis('off')
+            plt.colorbar(im2, ax=axes[2])
+        else:
+            # Original CLS token visualization
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            # Plot 1: Original image
+            axes[0].imshow(img_display)
+            axes[0].set_title(f'Original Image (Epoch {epoch})')
+            axes[0].axis('off')
 
-        # Create colormap for attention - FIX: Use the scalar values, not RGB
-        im = axes[1].imshow(attention_resized, cmap='hot')
-        axes[1].set_title(f'Attention Map (Sample {sample_idx})')
-        axes[1].axis('off')
-        # FIXED: Create colorbar from the scalar image, not RGB
-        plt.colorbar(im, ax=axes[1])
+            # Plot 2: Attention heatmap
+            attention_np = np.log1p(attention_map.numpy())
+            attention_resized = zoom(attention_np, (H / grid_h, W / grid_w), order=1)
+            im = axes[1].imshow(attention_resized, cmap='hot')
+            axes[1].set_title(f'Attention Map (Sample {sample_idx})')
+            axes[1].axis('off')
+            plt.colorbar(im, ax=axes[1])
 
-        # Plot 3: Overlay attention on image
-        #img_display_overlay = (img_np[:, :, 0] + 1) / 2
-        axes[2].imshow(img_display)
-
-        # Overlay attention with proper alpha blending
-        axes[2].imshow(attention_resized, cmap='hot', alpha=0.5)
-        axes[2].set_title(f'Log-Scaled Attention Overlay (Sample {sample_idx})')
-        axes[2].axis('off')
-
-        plt.tight_layout()
+            # Plot 3: Overlay attention on image
+            axes[2].imshow(img_display)
+            axes[2].imshow(attention_resized, cmap='hot', alpha=0.5)
+            axes[2].set_title(f'Log-Scaled Attention Overlay (Sample {sample_idx})')
+            axes[2].axis('off')
 
         plt.tight_layout()
         return fig
