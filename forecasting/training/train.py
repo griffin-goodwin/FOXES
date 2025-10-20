@@ -13,7 +13,6 @@ import numpy as np
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-from torch.nn import MSELoss, HuberLoss
 from pathlib import Path
 import sys
 # Add project root to Python path
@@ -21,33 +20,13 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataModule
-from forecasting.models.vision_transformer_custom import ViT
-from forecasting.models.linear_and_hybrid import LinearIrradianceModel, HybridIrradianceModel
-from forecasting.models.vit_patch_model import ViT as ViTPatch
-from forecasting.models.vit_patch_model_uncertainty import ViTUncertainty
-from forecasting.models import FusionViTHybrid
-from forecasting.models.CNN_Patch import CNNPatch
+
 from forecasting.models.vit_patch_model_local import ViTLocal
 from callback import ImagePredictionLogger_SXR, AttentionMapCallback
 
 from pytorch_lightning.callbacks import Callback
 
-from forecasting.models.FastSpectralNet import FastViTFlaringModel
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["NCCL_DEBUG"] = "WARN"
-# Shared memory optimizations
-os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP threads
-os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL threads
-
-def print_gpu_memory(stage=""):
-    """Print GPU memory usage for monitoring"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1e9
-        reserved = torch.cuda.memory_reserved() / 1e9
-        print(f"GPU Memory {stage} - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
-    else:
-        print(f"No GPU available for memory monitoring {stage}")
 
 def resolve_config_variables(config_dict):
     """Recursively resolve ${variable} references within the config"""
@@ -91,27 +70,6 @@ with open(args.config, 'r') as stream:
 # Resolve variables like ${base_data_dir}
 config_data = resolve_config_variables(config_data)
 
-# GPU Memory Isolation for Multi-GPU Systems
-gpu_id = config_data.get('gpu_id', 0)
-if gpu_id != -1:  # Only if using GPU
-    # Set CUDA device visibility to only the specified GPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    print(f"Set CUDA_VISIBLE_DEVICES to GPU {gpu_id}")
-    
-    # Clear any existing CUDA cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        print(f"Cleared CUDA cache for GPU {gpu_id}")
-        
-    # Set memory allocation strategy for better isolation
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,roundup_power2_divisions:16"
-    
-    # Disable memory sharing between processes
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    
-    print(f"GPU Memory Isolation configured for GPU {gpu_id}")
-else:
-    print("Using CPU - no GPU memory isolation needed")
 
 # Debug: Print resolved paths
 print("Resolved paths:")
@@ -120,12 +78,6 @@ print(f"SXR dir: {config_data['data']['sxr_dir']}")
 print(f"Checkpoints dir: {config_data['data']['checkpoints_dir']}")
 
 sxr_norm = np.load(config_data['data']['sxr_norm_path'])
-
-n = 0
-
-torch.manual_seed(config_data['megsai']['seed'])
-np.random.seed(config_data['megsai']['seed'])
-
 training_wavelengths = config_data['wavelengths']
 
 
@@ -145,10 +97,6 @@ data_loader = AIA_GOESDataModule(
     balance_strategy=config_data['balance_strategy'],
 )
 data_loader.setup()
-
-# Monitor memory after data loading
-print_gpu_memory("after data loading")
-
 # Logger
 #wb_name = f"{instrument}_{n}" if len(combined_parameters) > 1 else "aia_sxr_model"
 wandb_logger = WandbLogger(
@@ -158,7 +106,7 @@ wandb_logger = WandbLogger(
     tags=config_data['wandb']['tags'],
     name=config_data['wandb']['wb_name'],
     notes=config_data['wandb']['notes'],
-    config=config_data['megsai']
+    config=config_data
 )
 
 # Logging callback
@@ -169,8 +117,8 @@ plot_samples = plot_data  # Keep as list of ((aia, sxr), target)
 
 sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
 # Attention map callback - get patch size from config
-patch_size = config_data.get('vit_custom', {}).get('patch_size', 8)
-attention = AttentionMapCallback(patch_size=patch_size)
+patch_size = config_data.get('vit_custom', {}).get('patch_size', 16)
+attention = AttentionMapCallback(patch_size=patch_size, use_local_attention=True)
 
 
 class PTHCheckpointCallback(Callback):
@@ -323,27 +271,63 @@ else:
     raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
 
 # Set device based on config
-gpu_id = config_data.get('gpu_id', 0)
-if gpu_id == -1:
+# Support both old 'gpu_id' and new 'gpu_ids' config keys for backward compatibility
+gpu_config = config_data.get('gpu_ids', config_data.get('gpu_id', 0))
+
+if gpu_config == -1:
+    # CPU only
     accelerator = "cpu"
     devices = 1
+    strategy = "auto"
     print("Using CPU for training")
-else:
+elif gpu_config == "all":
+    # Use all available GPUs
     if torch.cuda.is_available():
         accelerator = "gpu"
-        # When CUDA_VISIBLE_DEVICES is set, PyTorch Lightning only sees GPU 0
-        devices = [0]  # Always use device 0 since we've isolated to specific GPU
-        print(f"Using GPU {gpu_id} for training (mapped to device 0 after CUDA_VISIBLE_DEVICES)")
+        devices = -1  # -1 means use all available GPUs
+        num_gpus = torch.cuda.device_count()
+        strategy = "auto"
+        print(f"Using all available GPUs ({num_gpus} GPUs)")
+        if num_gpus > 1:
+            print(f"Multi-GPU training with DDP: Effective batch size = {config_data['batch_size']} x {num_gpus} GPUs = {config_data['batch_size'] * num_gpus}")
     else:
         accelerator = "cpu"
         devices = 1
-        print(f"GPU {gpu_id} not available, falling back to CPU")
+        strategy = "auto"
+        print("No GPUs available, falling back to CPU")
+elif isinstance(gpu_config, list):
+    # Multiple specific GPUs
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        devices = gpu_config
+        strategy = "auto"
+        print(f"Using GPUs: {gpu_config}")
+        if len(gpu_config) > 1:
+            print(f"Multi-GPU training with DDP: Effective batch size = {config_data['batch_size']} x {len(gpu_config)} GPUs = {config_data['batch_size'] * len(gpu_config)}")
+    else:
+        accelerator = "cpu"
+        devices = 1
+        strategy = "auto"
+        print("No GPUs available, falling back to CPU")
+else:
+    # Single GPU (integer)
+    if torch.cuda.is_available():
+        accelerator = "gpu"
+        devices = [gpu_config]
+        strategy = "auto"
+        print(f"Using GPU {gpu_config}")
+    else:
+        accelerator = "cpu"
+        devices = 1
+        strategy = "auto"
+        print(f"GPU {gpu_config} not available, falling back to CPU")
 
 # Trainer
 trainer = Trainer(
     default_root_dir=config_data['data']['checkpoints_dir'],
     accelerator=accelerator,
     devices=devices,
+    strategy=strategy,
     max_epochs=config_data['epochs'],
     callbacks=[attention, checkpoint_callback],
     logger=wandb_logger,
@@ -359,6 +343,5 @@ torch.save({
     'state_dict': model.state_dict()
 }, final_checkpoint_path)
 print(f"Saved final PyTorch checkpoint: {final_checkpoint_path}")
-n += 1
 # Finalize
 wandb.finish()
