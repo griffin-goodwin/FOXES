@@ -102,7 +102,7 @@ Project FOXES
 
 ### 1) Clone
 ```
-git https://github.com/griffin-goodwin/FOXES.git
+git clone https://github.com/griffin-goodwin/FOXES.git
 cd FOXES
 ```
 ### 2) Create an environment (conda or mamba )
