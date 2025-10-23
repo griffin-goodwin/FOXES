@@ -2,11 +2,16 @@
 """
 Batch Evaluation Script for Solar Flare Models
 
-This script runs inference and evaluation for a list of model checkpoints,
-saving results with appropriate naming conventions.
+This script automates running inference and evaluation across multiple model checkpoints.
+It dynamically creates inference and evaluation configuration files for each model,
+executes inference, computes evaluation metrics, and logs the results.
 
-Usage:
-    python batch_evaluation.py -checkpoints checkpoint_list.yaml -base_config base_config.yaml
+Usage
+-----
+    python batch_evaluation.py -checkpoints checkpoint_list.yaml -base_config base_config.yaml -base_eval_config eval_config.yaml
+
+Each model in the checkpoint list is processed sequentially, and results are saved in
+organized subdirectories within a user-defined output directory.
 """
 
 import argparse
@@ -27,14 +32,48 @@ from forecasting.inference.evaluation import SolarFlareEvaluator
 
 
 def load_checkpoint_list(checkpoint_file):
-    """Load list of checkpoints from YAML file"""
+    """
+    Load a list of model checkpoints from a YAML file.
+
+    Parameters
+    ----------
+    checkpoint_file : str
+        Path to YAML file containing a list of checkpoints under the key `checkpoints`.
+
+    Returns
+    -------
+    list of dict
+        List of dictionaries, each containing:
+        - `name`: model name (string)
+        - `checkpoint_path`: absolute or relative checkpoint path (string)
+    """
     with open(checkpoint_file, 'r') as f:
         data = yaml.safe_load(f)
     return data['checkpoints']
 
 
 def create_inference_config(base_config, checkpoint_path, output_path, weight_path, model_name):
-    """Create inference config for specific checkpoint"""
+    """
+    Create an inference configuration file for a specific model checkpoint.
+
+    Parameters
+    ----------
+    base_config : str
+        Path to a base inference configuration template YAML file.
+    checkpoint_path : str
+        Path to the model checkpoint to be evaluated.
+    output_path : str
+        Path where prediction CSVs will be saved.
+    weight_path : str
+        Directory where model attention or patch weights will be stored.
+    model_name : str
+        Name of the model (used to name the temporary config file).
+
+    Returns
+    -------
+    str
+        Path to the newly created temporary inference configuration YAML.
+    """
     with open(base_config, 'r') as f:
         config = yaml.safe_load(f)
     
@@ -56,23 +95,40 @@ def create_inference_config(base_config, checkpoint_path, output_path, weight_pa
 
 
 def create_evaluation_config(base_eval_config, model_csv_path, output_dir, model_name, weight_path):
-    """Create evaluation config for specific model"""
+    """
+    Create an evaluation configuration file for a specific model.
+
+    Parameters
+    ----------
+    base_eval_config : str
+        Path to a base evaluation configuration template YAML.
+    model_csv_path : str
+        Path to the model predictions CSV file.
+    output_dir : str
+        Directory where evaluation results will be saved.
+    model_name : str
+        Model identifier used for naming temporary config files.
+    weight_path : str
+        Directory containing model attention weights.
+
+    Returns
+    -------
+    str
+        Path to the generated temporary evaluation configuration YAML file.
+    """
     with open(base_eval_config, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Resolve config variables
     from forecasting.inference.evaluation import resolve_config_variables
     config = resolve_config_variables(config)
     
     # Update paths
     config['model_predictions']['main_model_csv'] = model_csv_path
     config['evaluation']['output_dir'] = output_dir
-    config['data']['weight_path'] = weight_path  # Update weight path for this model
+    config['data']['weight_path'] = weight_path
     
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save config
     config_path = f"temp_evaluation_config_{model_name}.yaml"
     with open(config_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
@@ -81,7 +137,29 @@ def create_evaluation_config(base_eval_config, model_csv_path, output_dir, model
 
 
 def run_inference(inference_config_path, model_name, input_size=512, patch_size=8, batch_size=16, no_weights=False):
-    """Run inference using inference_on_patch.py"""
+    """
+    Run model inference using `inference_on_patch.py`.
+
+    Parameters
+    ----------
+    inference_config_path : str
+        Path to the inference configuration YAML.
+    model_name : str
+        Model name for logging.
+    input_size : int, optional
+        Input image size (default: 512).
+    patch_size : int, optional
+        Patch size for ViT models (default: 8).
+    batch_size : int, optional
+        Batch size used during inference (default: 16).
+    no_weights : bool, optional
+        If True, disables saving attention weights for faster inference.
+
+    Returns
+    -------
+    bool
+        True if inference completes successfully, False otherwise.
+    """
     print(f"\n{'='*60}")
     print(f"Running inference for model: {model_name}")
     print(f"{'='*60}")
@@ -114,7 +192,21 @@ def run_inference(inference_config_path, model_name, input_size=512, patch_size=
 
 
 def run_evaluation(evaluation_config_path, model_name):
-    """Run evaluation using SolarFlareEvaluator"""
+    """
+    Run evaluation using the `SolarFlareEvaluator` class.
+
+    Parameters
+    ----------
+    evaluation_config_path : str
+        Path to the evaluation configuration YAML.
+    model_name : str
+        Name of the model being evaluated.
+
+    Returns
+    -------
+    bool
+        True if evaluation completes successfully, False otherwise.
+    """
     print(f"\n{'='*60}")
     print(f"Running evaluation for model: {model_name}")
     print(f"{'='*60}")
@@ -124,7 +216,7 @@ def run_evaluation(evaluation_config_path, model_name):
         with open(evaluation_config_path, 'r') as f:
             config = yaml.safe_load(f)
         
-        # Generate timestamps for movie frames if time_range is available
+        # Generate timestamps if specified
         timestamps = None
         if 'time_range' in config:
             from forecasting.inference.evaluation import generate_timestamps
@@ -135,7 +227,7 @@ def run_evaluation(evaluation_config_path, model_name):
             )
             print(f"Generated {len(timestamps)} timestamps for movie frames")
         
-        # Create evaluator
+        # Initialize evaluator
         evaluator = SolarFlareEvaluator(
             csv_path=config['model_predictions']['main_model_csv'],
             aia_dir=config['data']['aia_dir'],
@@ -145,7 +237,6 @@ def run_evaluation(evaluation_config_path, model_name):
             sxr_cutoff=config['evaluation']['sxr_cutoff']
         )
         
-        # Run evaluation with timestamps for movie generation
         evaluator.run_full_evaluation(timestamps=timestamps)
         print(f"Evaluation completed successfully for {model_name}!")
         return True
@@ -156,7 +247,14 @@ def run_evaluation(evaluation_config_path, model_name):
 
 
 def cleanup_temp_files(model_name):
-    """Clean up temporary config files"""
+    """
+    Remove temporary inference and evaluation YAML configuration files.
+
+    Parameters
+    ----------
+    model_name : str
+        Name of the model used to identify the temp config files.
+    """
     temp_files = [
         f"temp_inference_config_{model_name}.yaml",
         f"temp_evaluation_config_{model_name}.yaml"
@@ -169,6 +267,29 @@ def cleanup_temp_files(model_name):
 
 
 def main():
+    """
+    Main entry point for batch evaluation of solar flare models.
+
+    Workflow:
+    ----------
+    1. Loads a list of checkpoints from a YAML file.
+    2. Creates temporary inference and evaluation configs for each model.
+    3. Runs inference (unless skipped).
+    4. Runs evaluation to compute metrics and generate plots.
+    5. Records and summarizes results for all models in a YAML report.
+
+    Command-line Arguments
+    ----------------------
+    -checkpoints : YAML file listing checkpoints to evaluate.
+    -base_config : Base inference config template.
+    -base_eval_config : Base evaluation config template.
+    -output_base_dir : Directory to store all model outputs.
+    -input_size : Input image size.
+    -patch_size : Patch size for transformer-based models.
+    -batch_size : Batch size for inference.
+    --no_weights : Skip saving attention weights.
+    --skip_inference : Skip inference step and only evaluate results.
+    """
     parser = argparse.ArgumentParser(description='Batch evaluation for solar flare models')
     parser.add_argument('-checkpoints', type=str, required=True, 
                        help='YAML file containing list of checkpoints to evaluate')
@@ -197,11 +318,7 @@ def main():
     # Create base output directory
     os.makedirs(args.output_base_dir, exist_ok=True)
     
-    # Results tracking
-    results = {
-        'successful': [],
-        'failed': []
-    }
+    results = {'successful': [], 'failed': []}
     
     print(f"Starting batch evaluation for {len(checkpoints)} checkpoints")
     print(f"Output base directory: {args.output_base_dir}")
@@ -216,7 +333,6 @@ def main():
         print(f"Checkpoint: {checkpoint_path}")
         print(f"{'='*80}")
         
-        # Check if checkpoint exists
         if not os.path.exists(checkpoint_path):
             print(f"ERROR: Checkpoint not found: {checkpoint_path}")
             results['failed'].append({
@@ -226,48 +342,30 @@ def main():
             })
             continue
         
-        # Create model-specific output paths
         model_output_dir = os.path.join(args.output_base_dir, model_name)
         model_csv_path = os.path.join(model_output_dir, f"{model_name}_predictions.csv")
         weight_path = os.path.join(model_output_dir, "weights")
         
         try:
-            # Create inference config
             inference_config_path = create_inference_config(
-                args.base_config, 
-                checkpoint_path, 
-                model_csv_path, 
-                weight_path, 
-                model_name
+                args.base_config, checkpoint_path, model_csv_path, weight_path, model_name
             )
             
-            # Create evaluation config
             evaluation_config_path = create_evaluation_config(
-                args.base_eval_config,
-                model_csv_path,
-                model_output_dir,
-                model_name,
-                weight_path
+                args.base_eval_config, model_csv_path, model_output_dir, model_name, weight_path
             )
             
-            # Run inference (unless skipped)
             inference_success = True
             if not args.skip_inference:
                 inference_success = run_inference(
-                    inference_config_path,
-                    model_name,
-                    args.input_size,
-                    args.patch_size,
-                    args.batch_size,
-                    args.no_weights
+                    inference_config_path, model_name, args.input_size,
+                    args.patch_size, args.batch_size, args.no_weights
                 )
             
-            # Run evaluation
             evaluation_success = False
             if inference_success or args.skip_inference:
                 evaluation_success = run_evaluation(evaluation_config_path, model_name)
             
-            # Track results
             if inference_success and evaluation_success:
                 results['successful'].append({
                     'name': model_name,
@@ -293,7 +391,6 @@ def main():
             })
         
         finally:
-            # Clean up temporary files
             cleanup_temp_files(model_name)
     
     # Print summary
@@ -314,7 +411,6 @@ def main():
         for result in results['failed']:
             print(f"  - {result['name']}: {result['error']}")
     
-    # Save results summary
     summary_path = os.path.join(args.output_base_dir, "batch_evaluation_summary.yaml")
     with open(summary_path, 'w') as f:
         yaml.dump(results, f, default_flow_style=False)
