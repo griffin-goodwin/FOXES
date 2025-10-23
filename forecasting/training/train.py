@@ -1,3 +1,14 @@
+"""
+Training script for the AIA-GOES multimodal solar flare forecasting model using PyTorch Lightning.
+
+This script:
+1. Loads configuration from a YAML file with variable substitution (e.g., ${base_dir} references).
+2. Initializes the AIA-GOES DataModule.
+3. Configures logging with Weights & Biases.
+4. Builds and trains a Vision Transformer (ViTLocal) model.
+5. Computes dynamic base class weights for flare categories (Quiet, C, M, X).
+6. Saves model checkpoints (.ckpt and .pth formats).
+"""
 
 import argparse
 import os
@@ -29,8 +40,22 @@ from pytorch_lightning.callbacks import Callback
 
 
 def resolve_config_variables(config_dict):
-    """Recursively resolve ${variable} references within the config"""
+    """
+    Recursively resolve variable references within a YAML config dictionary.
 
+    This function substitutes placeholders like `${variable}` with the
+    corresponding values defined at the root level of the configuration.
+
+    Parameters
+    ----------
+    config_dict : dict
+        Configuration dictionary loaded from a YAML file.
+
+    Returns
+    -------
+    dict
+        Configuration dictionary with all ${variable} references resolved.
+    """
     # Extract variables defined at root level (like base_data_dir, base_checkpoint_dir)
     variables = {}
     for key, value in config_dict.items():
@@ -38,8 +63,8 @@ def resolve_config_variables(config_dict):
             variables[key] = value
 
     def substitute_value(value, variables):
+        """Helper function to replace ${var_name} with actual values."""
         if isinstance(value, str):
-            # Replace ${var_name} with actual values
             pattern = r'\$\{([^}]+)\}'
             for match in re.finditer(pattern, value):
                 var_name = match.group(1)
@@ -48,6 +73,7 @@ def resolve_config_variables(config_dict):
         return value
 
     def recursive_substitute(obj, variables):
+        """Recursively substitute variables in nested structures."""
         if isinstance(obj, dict):
             return {k: recursive_substitute(v, variables) for k, v in obj.items()}
         elif isinstance(obj, list):
@@ -122,6 +148,25 @@ attention = AttentionMapCallback(patch_size=patch_size, use_local_attention=True
 
 
 class PTHCheckpointCallback(Callback):
+    """
+    Custom PyTorch Lightning callback to save model checkpoints in `.pth` format.
+
+    This is in addition to Lightning's `.ckpt` files, allowing for
+    standalone PyTorch model loading without Lightning dependencies.
+
+    Parameters
+    ----------
+    dirpath : str
+        Directory to save checkpoints.
+    monitor : str, optional
+        Metric name to monitor for best model saving (default: 'val_total_loss').
+    mode : str, optional
+        Optimization direction: 'min' or 'max' (default: 'min').
+    save_top_k : int, optional
+        Number of best checkpoints to keep (default: 1).
+    filename_prefix : str, optional
+        Prefix for checkpoint filenames.
+    """
     def __init__(self, dirpath, monitor='val_total_loss', mode='min', save_top_k=1, filename_prefix="model"):
         self.dirpath = dirpath
         self.monitor = monitor
@@ -131,6 +176,16 @@ class PTHCheckpointCallback(Callback):
         self.best_score = float('inf') if mode == 'min' else float('-inf')
 
     def on_validation_end(self, trainer, pl_module):
+        """
+        Save the model checkpoint as a `.pth` file if validation metric improves.
+
+        Parameters
+        ----------
+        trainer : pytorch_lightning.Trainer
+            Lightning trainer instance.
+        pl_module : pytorch_lightning.LightningModule
+            The model being trained.
+        """
         current_score = trainer.callback_metrics.get(self.monitor)
         if current_score is None:
             return
@@ -172,7 +227,23 @@ pth_callback = PTHCheckpointCallback(
 )
 
 def process_batch(batch_data, sxr_norm, c_threshold, m_threshold, x_threshold):
-    """Process a single batch and return counts for different flare classes."""
+    """
+    Process a batch of SXR data to count flare occurrences in different intensity classes.
+
+    Parameters
+    ----------
+    batch_data : tuple
+        Tuple containing (batch, batch_idx).
+    sxr_norm : np.ndarray
+        Normalization parameters for SXR values.
+    c_threshold, m_threshold, x_threshold : float
+        Thresholds defining flare intensity categories.
+
+    Returns
+    -------
+    dict
+        Dictionary containing counts for quiet, C, M, and X class flares.
+    """
     from forecasting.models.vit_patch_model import unnormalize_sxr
     
     batch, batch_idx = batch_data
@@ -198,6 +269,23 @@ def process_batch(batch_data, sxr_norm, c_threshold, m_threshold, x_threshold):
     }
 
 def get_base_weights(data_loader, sxr_norm):
+    """
+    Compute inverse-frequency weights for flare classes based on training data.
+
+    The weights help balance loss contributions from imbalanced flare categories.
+
+    Parameters
+    ----------
+    data_loader : AIA_GOESDataModule
+        Initialized DataModule providing the train_dataloader.
+    sxr_norm : np.ndarray
+        Normalization parameters for SXR.
+
+    Returns
+    -------
+    dict
+        Dictionary containing class weights for quiet, C, M, and X classes.
+    """
     print("Calculating base weights from DataModule...")
     
     # Thresholds for SXR classes
@@ -275,12 +363,18 @@ else:
 gpu_config = config_data.get('gpu_ids', config_data.get('gpu_id', 0))
 
 if gpu_config == -1:
+    """
+    Use CPU for training if GPU config is set to -1.
+    """
     # CPU only
     accelerator = "cpu"
     devices = 1
     strategy = "auto"
     print("Using CPU for training")
 elif gpu_config == "all":
+    """
+    Use all available GPUs if GPU config is set to 'all'.
+    """
     # Use all available GPUs
     if torch.cuda.is_available():
         accelerator = "gpu"
@@ -296,6 +390,9 @@ elif gpu_config == "all":
         strategy = "auto"
         print("No GPUs available, falling back to CPU")
 elif isinstance(gpu_config, list):
+    """
+    Use specific GPU IDs if provided as a list.
+    """
     # Multiple specific GPUs
     if torch.cuda.is_available():
         accelerator = "gpu"
@@ -310,6 +407,9 @@ elif isinstance(gpu_config, list):
         strategy = "auto"
         print("No GPUs available, falling back to CPU")
 else:
+    """
+    Use a single GPU or CPU based on availability.
+    """
     # Single GPU (integer)
     if torch.cuda.is_available():
         accelerator = "gpu"
