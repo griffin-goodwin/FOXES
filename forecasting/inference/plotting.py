@@ -1,3 +1,17 @@
+"""
+
+---------------------------------
+This script generates a time-lapse movie combining SDO/AIA EUV images, attention heatmaps from a trained Vision Transformer (ViT),
+and corresponding GOES soft X-ray (SXR) flux predictions over time.
+
+It performs the following:
+- Loads AIA images, attention maps, and predicted SXR data.
+- Generates composite visualizations showing attention overlayed on AIA wavelengths with synchronized SXR plots.
+- Uses multiprocessing to parallelize frame generation for efficiency.
+- Compiles generated frames into an MP4 movie.
+
+"""
+
 import os
 import glob
 import numpy as np
@@ -10,7 +24,7 @@ from scipy.ndimage import zoom
 from multiprocessing import Pool, cpu_count
 import time
 
-# Config
+# Configuration paths
 aia_dir = "/mnt/data/ML-Ready/mixed_data/AIA/test/"
 weight_path = "/mnt/data/ML-Ready/mixed_data/weights2/"
 sxr_data_path = "/mnt/data/ML-Ready/mixed_data/outputs/deep-vit-weighted-clean.csv"
@@ -18,12 +32,19 @@ output_dir = "/mnt/data/ML-Ready/mixed_data/movie/"
 output_video = "aia_attention_sxr_movie4.mp4"
 os.makedirs(output_dir, exist_ok=True)
 
-# Global variables for worker processes
+# Global variable accessible by worker processes
 sxr_df = None
 
 
 def init_worker(sxr_data_path):
-    """Initialize each worker process with SXR data"""
+    """
+    Initialize worker process with shared SXR data.
+
+    Parameters
+    ----------
+    sxr_data_path : str
+        Path to the CSV file containing timestamps, predictions, and ground truth SXR flux values.
+    """
     global sxr_df
     print(f"Worker {os.getpid()}: Loading SXR data...")
     try:
@@ -36,6 +57,19 @@ def init_worker(sxr_data_path):
 
 
 def load_aia_image(timestamp):
+    """
+    Load an AIA image corresponding to a given timestamp.
+
+    Parameters
+    ----------
+    timestamp : str
+        Timestamp string (ISO format) used to locate the correct AIA image.
+
+    Returns
+    -------
+    np.ndarray or None
+        Loaded AIA image array or None if not found.
+    """
     pattern = f"{aia_dir}/*{timestamp}*"
     files = glob.glob(pattern)
     if files:
@@ -44,6 +78,19 @@ def load_aia_image(timestamp):
 
 
 def load_attention_map(timestamp):
+    """
+    Load and resize the attention map for a given timestamp.
+
+    Parameters
+    ----------
+    timestamp : str
+        Timestamp corresponding to the model output weight file.
+
+    Returns
+    -------
+    np.ndarray or None
+        512x512 resized attention map as a numpy array or None if not found.
+    """
     filepath = f"{weight_path}{timestamp}"
     try:
         attention = np.loadtxt(filepath, delimiter=",")
@@ -56,7 +103,23 @@ def load_attention_map(timestamp):
 
 
 def get_sxr_data_for_timestamp(timestamp, window_hours=12):
-    """Get SXR data around the given timestamp for plotting context"""
+    """
+    Retrieve SXR prediction data within a time window around the target timestamp.
+
+    Parameters
+    ----------
+    timestamp : str
+        Center timestamp around which to extract SXR data.
+    window_hours : int, default=12
+        Time window (± hours) around the target timestamp to extract context data.
+
+    Returns
+    -------
+    tuple (pd.DataFrame, pd.Series, pd.Timestamp)
+        - Data window containing SXR flux data.
+        - Current data row corresponding to the timestamp.
+        - Converted datetime object of target timestamp.
+    """
     global sxr_df
     if sxr_df is None:
         return None, None, None
@@ -78,11 +141,22 @@ def get_sxr_data_for_timestamp(timestamp, window_hours=12):
 
 
 def generate_frame_worker(timestamp):
-    """Worker function to generate a single frame"""
+    """
+    Generate a single composite visualization frame for the movie.
+
+    Parameters
+    ----------
+    timestamp : str
+        Timestamp identifier used to fetch AIA images, attention maps, and SXR data.
+
+    Returns
+    -------
+    str or None
+        Path to the saved frame image if successful, otherwise None.
+    """
     try:
         print(f"Worker {os.getpid()}: Processing {timestamp}")
 
-        # Load data
         aia_data = load_aia_image(timestamp)
         attention_data = load_attention_map(timestamp)
 
@@ -90,13 +164,10 @@ def generate_frame_worker(timestamp):
             print(f"Worker {os.getpid()}: Skipping {timestamp} (missing data)")
             return None
 
-        # Get SXR data
         sxr_window, sxr_current, target_time = get_sxr_data_for_timestamp(timestamp)
-
-        # Generate frame
         save_path = os.path.join(output_dir, f"{timestamp}.png")
 
-        # Create figure
+        # Create visualization layout
         fig = plt.figure(figsize=(19, 8))
         fig.patch.set_facecolor('#1a1a2e')
         gs = fig.add_gridspec(2, 4, width_ratios=[1, 1, 1, 2.5], hspace=0.2, wspace=0.2)
@@ -106,37 +177,29 @@ def generate_frame_worker(timestamp):
         att_min = np.percentile(attention_data, 0)
         att_norm = AsinhNorm(vmin=att_min, vmax=att_max, clip=False)
 
-        # Plot AIA images with attention maps
+        # Overlay attention heatmaps on AIA wavelengths
         for i in range(6):
             row = i // 3
             col = i % 3
             ax = fig.add_subplot(gs[row, col])
-
             aia_img = aia_data[i]
             ax.imshow(aia_img, cmap="gray", origin='lower')
             ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.35, norm=att_norm)
-            #cont = ax.contour(attention_data, levels=15, colors='darkviolet', linewidths=0.5, norm=att_norm)
-            #ax.clabel(cont, inline=True, fontsize=6, fmt='%.2f')
             ax.set_title(f'AIA {wavs[i]} Å', fontsize=10, color='white')
             ax.axis('off')
 
-        # Plot SXR data
+        # Plot SXR data over time
         sxr_ax = fig.add_subplot(gs[:, 3])
         sxr_ax.set_facecolor('#2a2a3e')
 
         if sxr_window is not None and not sxr_window.empty:
-            sxr_ax.plot(sxr_window['Timestamp'], sxr_window['ground_truth'],
-                        'b-', label='Ground Truth', linewidth=2, alpha=0.8)
-            sxr_ax.plot(sxr_window['Timestamp'], sxr_window['Predictions'],
-                        'r-', label='Prediction', linewidth=2, alpha=0.8)
+            sxr_ax.plot(sxr_window['Timestamp'], sxr_window['ground_truth'], 'b-', label='Ground Truth', linewidth=2, alpha=0.8)
+            sxr_ax.plot(sxr_window['Timestamp'], sxr_window['Predictions'], 'r-', label='Prediction', linewidth=2, alpha=0.8)
 
             if sxr_current is not None:
-                sxr_ax.axvline(target_time, color='white', linestyle='--',
-                               linewidth=2, alpha=0.8, label='Current Time')
-                sxr_ax.plot(target_time, sxr_current['ground_truth'],
-                            'bo', markersize=8, markerfacecolor='lightblue')
-                sxr_ax.plot(target_time, sxr_current['Predictions'],
-                            'ro', markersize=8, markerfacecolor='lightcoral')
+                sxr_ax.axvline(target_time, color='white', linestyle='--', linewidth=2, alpha=0.8, label='Current Time')
+                sxr_ax.plot(target_time, sxr_current['ground_truth'], 'bo', markersize=8, markerfacecolor='lightblue')
+                sxr_ax.plot(target_time, sxr_current['Predictions'], 'ro', markersize=8, markerfacecolor='lightcoral')
 
             sxr_ax.set_ylabel('SXR Flux', fontsize=10, color='white')
             sxr_ax.set_xlabel('Time', fontsize=10, color='white')
@@ -171,12 +234,21 @@ def generate_frame_worker(timestamp):
 
     except Exception as e:
         print(f"Worker {os.getpid()}: Error processing {timestamp}: {e}")
-        plt.close('all')  # Clean up any open figures
+        plt.close('all')
         return None
 
 
 def main():
-    # Generate timestamps
+    """
+    Main function to generate attention visualizations and compile them into a movie.
+
+    Steps
+    -----
+    1. Generate timestamps between a start and end date.
+    2. Spawn worker processes to create visualization frames in parallel.
+    3. Combine generated frames into a time-ordered MP4 video.
+    4. Optionally delete frame images after movie creation.
+    """
     start_time = datetime(2023, 8, 1)
     end_time = datetime(2023, 8, 14)
     interval = timedelta(minutes=15)
@@ -187,30 +259,23 @@ def main():
 
     print(f"Generated {len(timestamps)} timestamps to process")
 
-    # Determine number of processes
-    num_processes = min(cpu_count(), len(timestamps))  # Don't use more processes than timestamps
-    num_processes = max(1, num_processes - 1)  # Leave one CPU free
+    num_processes = min(cpu_count(), len(timestamps))
+    num_processes = max(1, num_processes - 1)
     print(f"Using {num_processes} processes")
 
-    # Process frames in parallel
     start_time = time.time()
-
     with Pool(processes=num_processes, initializer=init_worker, initargs=(sxr_data_path,)) as pool:
-        # Use map to process all timestamps
         results = pool.map(generate_frame_worker, timestamps)
 
-    # Filter out failed frames
     frame_paths = [path for path in results if path is not None]
 
     processing_time = time.time() - start_time
     print(f"Generated {len(frame_paths)} frames in {processing_time:.2f} seconds")
     print(f"Average: {processing_time / len(frame_paths):.2f} seconds per frame")
 
-    # Compile into video
     print("Creating movie...")
     video_start = time.time()
 
-    # Sort frame paths by timestamp to ensure correct order
     frame_paths.sort(key=lambda x: os.path.basename(x))
 
     with imageio.get_writer(output_video, fps=30) as writer:
@@ -226,7 +291,6 @@ def main():
     print(f"Total time: {total_time:.2f} seconds")
     print(f"✅ Movie saved to: {output_video}")
 
-    # Optional: Clean up frame files
     cleanup = input("Delete individual frame files? (y/n): ").lower().strip()
     if cleanup == 'y':
         for frame_path in frame_paths:
