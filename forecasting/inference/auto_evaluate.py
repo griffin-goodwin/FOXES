@@ -2,10 +2,15 @@
 """
 Automated Evaluation Script for Solar Flare Models
 
-This script automatically generates inference and evaluation configs
-and runs the complete evaluation pipeline based on a directory input.
+This script automates the generation of inference and evaluation configurations,
+and runs the complete end-to-end evaluation pipeline for trained solar flare models.
 
-Usage:
+It supports both directory-based checkpoint discovery and direct checkpoint paths,
+automatically detecting the model type and setting up inference/evaluation YAMLs.
+
+Usage
+-----
+Example commands:
     python auto_evaluate.py -checkpoint_dir /path/to/checkpoint/dir -model_name my_model
     python auto_evaluate.py -checkpoint_path /path/to/checkpoint.pth -model_name my_model
 """
@@ -23,8 +28,21 @@ import glob
 PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
+
 def find_checkpoint_files(checkpoint_dir):
-    """Find checkpoint files in directory"""
+    """
+    Find all checkpoint files (.pth, .ckpt, .pt) within a directory.
+
+    Parameters
+    ----------
+    checkpoint_dir : str or Path
+        Path to the directory containing model checkpoint files.
+
+    Returns
+    -------
+    list of str
+        Sorted list of checkpoint file paths discovered within the directory.
+    """
     patterns = ['*.pth', '*.ckpt', '*.pt']
     checkpoints = []
     
@@ -34,8 +52,21 @@ def find_checkpoint_files(checkpoint_dir):
     
     return sorted(checkpoints)
 
+
 def detect_model_type(checkpoint_path):
-    """Detect model type from checkpoint filename or content"""
+    """
+    Infer the model type from a checkpoint filename.
+
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to the checkpoint file.
+
+    Returns
+    -------
+    str
+        Model type inferred from filename (e.g., 'vitlocal', 'vitpatch', 'fusion', etc.).
+    """
     filename = Path(checkpoint_path).name.lower()
     
     if 'local' in filename or 'localized' in filename:
@@ -52,9 +83,26 @@ def detect_model_type(checkpoint_path):
         # Default to vit for backward compatibility
         return 'vit'
 
+
 def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/NO-OVERLAP"):
-    """Create inference config for checkpoint"""
-    
+    """
+    Dynamically create an inference configuration dictionary for a given checkpoint.
+
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to the checkpoint file.
+    model_name : str
+        Name for the model (used for output folder and file naming).
+    base_data_dir : str, optional
+        Root directory of dataset and normalization files.
+
+    Returns
+    -------
+    tuple(dict, str)
+        - Inference configuration dictionary.
+        - Path to the output directory where results will be saved.
+    """
     # Detect model type
     model_type = detect_model_type(checkpoint_path)
     
@@ -136,9 +184,25 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     
     return config, output_dir
 
+
 def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP"):
-    """Create evaluation config"""
-    
+    """
+    Create evaluation configuration for computing metrics and visualizations.
+
+    Parameters
+    ----------
+    model_name : str
+        Name of the model under evaluation.
+    output_dir : str
+        Path to output directory containing prediction results.
+    base_data_dir : str, optional
+        Base dataset directory containing AIA and SXR test data.
+
+    Returns
+    -------
+    dict
+        Evaluation configuration dictionary with metrics, time range, and plotting settings.
+    """
     config = {
         'base_data_dir': base_data_dir,
         'output_base_dir': f"{base_data_dir}/solar_flare_comparison_results",
@@ -171,11 +235,23 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
             'include_correlation': True
         }
     }
-    
     return config
 
+
 def run_inference(inference_config_path):
-    """Run inference with the generated config"""
+    """
+    Execute model inference using the generated YAML configuration.
+
+    Parameters
+    ----------
+    inference_config_path : str
+        Path to the inference configuration YAML file.
+
+    Returns
+    -------
+    bool
+        True if inference completes successfully, False if an error occurs.
+    """
     print(f"Running inference with config: {inference_config_path}")
     
     cmd = [
@@ -193,8 +269,21 @@ def run_inference(inference_config_path):
     print("Inference completed successfully!")
     return True
 
+
 def run_evaluation(evaluation_config_path):
-    """Run evaluation with the generated config"""
+    """
+    Execute evaluation of inference outputs using the generated YAML configuration.
+
+    Parameters
+    ----------
+    evaluation_config_path : str
+        Path to the evaluation configuration YAML file.
+
+    Returns
+    -------
+    bool
+        True if evaluation completes successfully, False otherwise.
+    """
     print(f"Running evaluation with config: {evaluation_config_path}")
     
     cmd = [
@@ -212,7 +301,18 @@ def run_evaluation(evaluation_config_path):
     print("Evaluation completed successfully!")
     return True
 
+
 def main():
+    """
+    Main function for automating inference and evaluation.
+
+    Steps:
+      1. Parse command-line arguments.
+      2. Locate checkpoint file or directory.
+      3. Generate inference and evaluation YAML configs.
+      4. Optionally run inference and/or evaluation scripts.
+      5. Output results and metrics to specified directory.
+    """
     parser = argparse.ArgumentParser(description='Automated evaluation for solar flare models')
     parser.add_argument('-checkpoint_dir', type=str, help='Directory containing checkpoint files')
     parser.add_argument('-checkpoint_path', type=str, help='Specific checkpoint file path')
@@ -282,6 +382,7 @@ def main():
     
     print(f"\n✅ Complete! Results saved to: {output_dir}")
     print(f"📊 Check the plots and metrics in: {output_dir}")
+
 
 if __name__ == '__main__':
     main()
