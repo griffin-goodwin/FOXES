@@ -1,3 +1,20 @@
+"""
+Inference Script for Solar Flare Prediction Models
+=================================================
+
+This script performs automated inference on solar flare prediction datasets using trained models such as
+Vision Transformers (ViT, ViT-Patch, ViT-Local), HybridIrradianceModel, or LinearIrradianceModel.
+It computes soft X-ray (SXR) predictions, saves attention weights, flux contributions, and final outputs.
+
+The workflow includes:
+- Loading configuration parameters from a YAML file.
+- Resolving dynamic variables in the config.
+- Loading the model checkpoint and preparing it for inference.
+- Performing batched evaluation over AIA/GOES datasets.
+- Saving predicted fluxes, ground truth, and visualization-ready artifacts.
+
+"""
+
 import argparse
 import re
 import sys
@@ -6,8 +23,12 @@ import torch
 import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
-
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import os
+import yaml
+import torch.nn.functional as F
+from torch.nn import HuberLoss
 
 # Add project root to Python path
 PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
@@ -18,198 +39,239 @@ import forecasting.models as models
 from forecasting.models.vision_transformer_custom import ViT as ViTCustom
 from forecasting.models.vit_patch_model import ViT as ViTPatch
 from forecasting.models.vit_patch_model_local import ViTLocal
-from forecasting.models.linear_and_hybrid import HybridIrradianceModel, LinearIrradianceModel  # Add your hybrid and linear model imports
-from torch.nn import HuberLoss
+from forecasting.models.linear_and_hybrid import HybridIrradianceModel, LinearIrradianceModel
 from forecasting.training.callback import unnormalize_sxr
-import yaml
-import torch.nn.functional as F
-from concurrent.futures import ThreadPoolExecutor
-import os
-from pathlib import Path
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def has_attention_weights(model):
-    """Check if model supports attention weights"""
+    """
+    Check if a model supports attention weight extraction.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model instance to check.
+
+    Returns
+    -------
+    bool
+        True if the model has attention attributes or belongs to supported ViT classes.
+    """
     return hasattr(model, 'attention') or isinstance(model, ViTCustom) or isinstance(model, ViTPatch) or isinstance(model, ViTLocal)
 
+
 def is_localized_attention_model(model):
-    """Check if model uses localized attention (no CLS token)"""
+    """
+    Check if the model uses localized attention (no CLS token).
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model instance.
+
+    Returns
+    -------
+    bool
+        True if the model uses localized attention (ViTLocal).
+    """
     return isinstance(model, ViTLocal)
 
 
-def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_data=None, save_weights=True, input_size = 512, patch_size = 16):
-    """Optimized generator with batch processing and weight saving"""
+def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_data=None,
+                              save_weights=True, input_size=512, patch_size=16):
+    """
+    Run batched inference on the dataset and yield predictions, attention maps, and flux data.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Loaded solar flare prediction model.
+    dataset : torch.utils.data.Dataset
+        Dataset containing AIA images and corresponding SXR values.
+    batch_size : int, default=16
+        Number of samples per batch.
+    times : list, optional
+        List of timestamps corresponding to each sample.
+    config_data : dict, optional
+        YAML configuration dictionary.
+    save_weights : bool, default=True
+        Whether to save attention weights for visualization.
+    input_size : int, default=512
+        Input image resolution.
+    patch_size : int, default=16
+        Patch size for ViT-based models.
+
+    Yields
+    ------
+    tuple
+        (predictions, ground_truth, attention_map, flux_map, global_index)
+    """
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
 
-    # Check if this model supports attention weights
     supports_attention = has_attention_weights(model) and save_weights
     save_flux = config_data and 'flux_path' in config_data
-    sxr_norm = np.load(
-        config_data['data']['sxr_norm_path']) if config_data and 'data' in config_data and 'sxr_norm_path' in \
-                                                 config_data['data'] else None
+    sxr_norm = np.load(config_data['data']['sxr_norm_path']) if config_data and 'data' in config_data and 'sxr_norm_path' in config_data['data'] else None
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
-            # Correct unpacking based on your data structure
-            aia_imgs = batch[0]  # Get aia_img from inputs
+            aia_imgs = batch[0]
             sxr = batch[1]
-            # Move to device (it's already a tensor)
             aia_imgs = aia_imgs.to(device, non_blocking=True)
 
-            # Get model predictions for entire batch
             if supports_attention:
                 pred = model(aia_imgs, return_attention=True)
             else:
                 pred = model(aia_imgs)
 
-            # Handle different model output formats - patch models return 3 values when return_attention=True
             if isinstance(pred, tuple) and len(pred) >= 3:
-                predictions = pred[0]  # sxr predictions: [batch_size, ...]
-                weights = pred[1] if supports_attention else None  # attention_weights: [batch_size, heads, L, S ...]
-                flux_contributions = pred[2] if save_flux else None  # flux_contributions: [batch_size, num_patches]
+                predictions = pred[0]
+                weights = pred[1] if supports_attention else None
+                flux_contributions = pred[2] if save_flux else None
             elif isinstance(pred, tuple) and len(pred) > 1:
-                predictions = pred[0]  # Shape: [batch_size, ...]
-                weights = pred[1] if supports_attention else None  # Shape: [batch_size, heads, L, S ...]
+                predictions = pred[0]
+                weights = pred[1] if supports_attention else None
                 flux_contributions = None
             else:
                 predictions = pred
                 weights = None
                 flux_contributions = None
 
-            # Process entire batch at once for weights if needed
             batch_weights = []
             if supports_attention and weights is not None:
                 current_batch_size = predictions.shape[0]
                 is_localized = is_localized_attention_model(model)
-                
+
                 for i in range(current_batch_size):
                     try:
-                        # Process attention weights for this item
-                        last_layer_attention = weights[-1][i]  # Get i-th item from batch [num_heads, seq_len, seq_len]
-                        
-                        # Check for None or invalid values
+                        last_layer_attention = weights[-1][i]
                         if last_layer_attention is None:
-                            print(f"Warning: last_layer_attention is None for sample {i}")
                             continue
-                            
-                        # Average across attention heads
-                        avg_attention = last_layer_attention.mean(dim=0)  # [seq_len, seq_len]
-                        
-                        # Check for NaN or invalid values
+                        avg_attention = last_layer_attention.mean(dim=0)
                         if torch.isnan(avg_attention).any():
-                            print(f"Warning: NaN values in avg_attention for sample {i}")
                             continue
 
                         if is_localized:
-                            # For ViTLocal (no CLS token), create attention map by averaging attention TO each patch
-                            # This gives us how much each patch is "attended to" by its neighbors
-                            patch_attention = avg_attention.mean(dim=0).cpu()  # [num_patches] - average attention received by each patch
+                            patch_attention = avg_attention.mean(dim=0).cpu()
                         else:
-                            # For regular ViT (with CLS token), get attention from CLS token to patches
-                            cls_attention = avg_attention[0, 1:].cpu()  # [num_patches] - CLS token attention to patches
+                            cls_attention = avg_attention[0, 1:].cpu()
                             patch_attention = cls_attention
 
-                        # Calculate grid size based on patch size
                         grid_h, grid_w = input_size // patch_size, input_size // patch_size
-
-                        # Reshape patch attention to spatial grid
                         attention_map = patch_attention.reshape(grid_h, grid_w)
-
                         batch_weights.append(attention_map.numpy())
-                        
+
                     except Exception as e:
-                        print(f"Error processing attention weights for sample {i}: {e}")
-                        # Add a zero attention map as fallback
                         grid_h, grid_w = input_size // patch_size, input_size // patch_size
                         fallback_map = torch.zeros(grid_h * grid_w).reshape(grid_h, grid_w).numpy()
                         batch_weights.append(fallback_map)
 
-                # Save all weights in this batch at once
                 if config_data and 'weight_path' in config_data:
                     save_batch_weights(batch_weights, batch_idx, batch_size, times, config_data['weight_path'])
 
-            # Process and save flux contributions
             batch_flux_contributions = []
             if save_flux and flux_contributions is not None:
                 current_batch_size = predictions.shape[0]
                 for i in range(current_batch_size):
-                    # Get flux contributions for this sample and reshape to spatial grid
-                    flux_contrib = flux_contributions[i].cpu()  # [num_patches]
-                    # Reshape flux contributions to spatial grid (same as attention maps)
-                    grid_h, grid_w = input_size // patch_size, input_size // patch_size  # Should be 32x32 for 512/16
-                    flux_contrib_map = flux_contrib.reshape(grid_h, grid_w)  # [grid_h, grid_w]
+                    flux_contrib = flux_contributions[i].cpu()
+                    grid_h, grid_w = input_size // patch_size, input_size // patch_size
+                    flux_contrib_map = flux_contrib.reshape(grid_h, grid_w)
                     batch_flux_contributions.append(flux_contrib_map.numpy())
+                save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, config_data['flux_path'], sxr_norm)
 
-                # Save flux contributions
-                save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times,
-                                              config_data['flux_path'], sxr_norm)
-
-            # Yield batch results
             current_batch_size = predictions.shape[0]
             for i in range(current_batch_size):
                 global_idx = batch_idx * batch_size + i
                 weight_data = batch_weights[i] if (supports_attention and batch_weights) else None
                 flux_data = batch_flux_contributions[i] if batch_flux_contributions else None
-                yield (predictions[i].cpu().numpy(), sxr[i].cpu().numpy(),
-                       weight_data, flux_data, global_idx)
+                yield (predictions[i].cpu().numpy(), sxr[i].cpu().numpy(), weight_data, flux_data, global_idx)
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
-    """Save all flux contributions in a batch efficiently - same format as attention weights"""
+    """
+    Save all flux contributions in a batch efficiently using parallel threads.
+
+    Parameters
+    ----------
+    batch_flux_contributions : list of np.ndarray
+        List of flux contribution maps for each sample.
+    batch_idx : int
+        Batch index.
+    batch_size : int
+        Number of samples per batch.
+    times : list of str
+        Corresponding timestamps.
+    flux_path : str
+        Directory path to save flux files.
+    sxr_norm : np.ndarray, optional
+        Normalization constants for unnormalization.
+    """
     flux_dir = Path(flux_path)
     flux_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use ThreadPoolExecutor to save files in parallel
     def save_single_flux(args):
         flux_contrib, filepath = args
-        # Note: flux contributions are already reshaped to 2D spatial maps
-        # Unnormalize flux contributions before saving if needed
         np.savetxt(filepath, flux_contrib, delimiter=",")
 
-    # Prepare arguments for parallel saving
     save_args = []
     for i, flux_contrib in enumerate(batch_flux_contributions):
         global_idx = batch_idx * batch_size + i
-        if global_idx < len(times):  # Make sure we don't go out of bounds
-            # Save with same naming convention as attention weights (without "flux_" prefix)
+        if global_idx < len(times):
             filepath = flux_path + f"{times[global_idx]}"
             save_args.append((flux_contrib, filepath))
 
-    # Save all flux contributions in this batch in parallel
     with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
         executor.map(save_single_flux, save_args)
 
 
 def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path):
-    """Save all weights in a batch efficiently"""
+    """
+    Save all attention weights from a batch efficiently in parallel.
+
+    Parameters
+    ----------
+    batch_weights : list of np.ndarray
+        Attention maps for each sample.
+    batch_idx : int
+        Current batch index.
+    batch_size : int
+        Number of samples in batch.
+    times : list of str
+        List of timestamps.
+    weight_path : str
+        Output directory for weight files.
+    """
     weight_dir = Path(weight_path)
     weight_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use ThreadPoolExecutor to save files in parallel
     def save_single_weight(args):
         weight, filepath = args
         np.savetxt(filepath, weight, delimiter=",")
 
-    # Prepare arguments for parallel saving
     save_args = []
     for i, weight in enumerate(batch_weights):
         global_idx = batch_idx * batch_size + i
-        if global_idx < len(times):# Make sure we don't go out of bounds
-            #Save to weight path using os join
+        if global_idx < len(times):
             filepath = os.path.join(weight_path, f"{times[global_idx]}")
             save_args.append((weight, filepath))
 
-    # Save all weights in this batch in parallel
     with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
         executor.map(save_single_weight, save_args)
 
 
 def save_weights_async(weight_data_queue, weight_path):
-    """Async function to save weights to disk"""
+    """
+    Asynchronously save attention weights to disk using threads.
 
+    Parameters
+    ----------
+    weight_data_queue : list of tuple
+        Each entry contains (weight_data, filepath).
+    weight_path : str
+        Output directory path for saving weights.
+    """
     def save_single_weight(args):
         weight, filepath = args
         np.savetxt(filepath, weight, delimiter=",")
@@ -219,23 +281,33 @@ def save_weights_async(weight_data_queue, weight_path):
 
 
 def load_model_from_config(config_data):
-    """Load model based on config specifications"""
+    """
+    Load the model from checkpoint based on configuration data.
+
+    Parameters
+    ----------
+    config_data : dict
+        Configuration dictionary from YAML file.
+
+    Returns
+    -------
+    torch.nn.Module
+        Loaded model ready for inference.
+    """
     checkpoint_path = config_data['data']['checkpoint_path']
-    model_type = config_data['model']  # Default to ViT for backward compatibility
+    model_type = config_data['model']
     wavelengths = config_data.get('wavelengths', [94, 131, 171, 193, 211, 304])
 
     print(f"Loading {model_type} model...")
 
     if ".ckpt" in checkpoint_path:
-        # Lightning checkpoint format
         if model_type.lower() == 'vit':
             model = ViTCustom.load_from_checkpoint(checkpoint_path)
         elif model_type.lower() == 'vitpatch':
             model = ViTPatch.load_from_checkpoint(checkpoint_path)
         elif model_type.lower() == 'vitlocal':
             model = ViTLocal.load_from_checkpoint(checkpoint_path)
-        elif model_type.lower() == 'hybrid' or model_type.lower() == 'hybridirradiancemodel':
-            # Try to load with saved hyperparameters first, then fall back to config parameters
+        elif model_type.lower() in ['hybrid', 'hybridirradiancemodel']:
             try:
                 model = HybridIrradianceModel.load_from_checkpoint(
                     checkpoint_path,
@@ -248,14 +320,11 @@ def load_model_from_config(config_data):
                 )
             except (TypeError, RuntimeError) as e:
                 print(f"Failed to load with saved hyperparameters: {e}")
-        elif model_type.lower() == 'linear' or model_type.lower() == 'linearirradiancemodel':
-            # Try to load with saved hyperparameters first, then fall back to config parameters
+        elif model_type.lower() in ['linear', 'linearirradiancemodel']:
             try:
                 model = LinearIrradianceModel.load_from_checkpoint(checkpoint_path)
             except (TypeError, RuntimeError) as e:
                 print(f"Failed to load with saved hyperparameters: {e}")
-                print("Loading with config parameters...")
-                # Provide required parameters for LinearIrradianceModel
                 model = LinearIrradianceModel.load_from_checkpoint(
                     checkpoint_path,
                     d_input=len(wavelengths),
@@ -263,14 +332,12 @@ def load_model_from_config(config_data):
                     loss_func=HuberLoss()
                 )
         else:
-            # Try to dynamically load the model class
             try:
                 model_class = getattr(models, model_type)
                 model = model_class.load_from_checkpoint(checkpoint_path)
             except AttributeError:
-                raise ValueError(f"Unknown model type: {model_type}. Available types: ViT, HybridIrradianceModel, LinearIrradianceModel")
+                raise ValueError(f"Unknown model type: {model_type}.")
     else:
-        # Regular PyTorch checkpoint
         state = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model = state['model']
 
@@ -280,8 +347,18 @@ def load_model_from_config(config_data):
 
 
 def main():
+    """
+    Main function to execute solar flare model inference pipeline.
+
+    Steps
+    -----
+    1. Parse YAML configuration and resolve ${variable} placeholders.
+    2. Load pretrained model and dataset.
+    3. Run batched inference and optionally save attention/flux maps.
+    4. Save predictions and ground truth results to CSV.
+    """
     def resolve_config_variables(config_dict):
-        """Recursively resolve ${variable} references within the config"""
+        """Recursively resolve ${variable} references within config."""
         variables = {}
         for key, value in config_dict.items():
             if isinstance(value, str) and not value.startswith('${'):
@@ -307,17 +384,16 @@ def main():
         return recursive_substitute(config_dict, variables)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-config', type=str, default='inference_config.yaml', required=True, help='Path to config YAML.')
+    parser.add_argument('-config', type=str, default='inference_config.yaml', required=True,
+                        help='Path to the inference configuration YAML file.')
     args = parser.parse_args()
 
-    # Load config with variable substitution
     with open(args.config, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
 
     config_data = resolve_config_variables(config_data)
     sys.modules['models'] = models
 
-    # Extract model parameters from config with defaults
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)
     patch_size = model_params.get('patch_size', 16)
@@ -325,109 +401,62 @@ def main():
     no_weights = model_params.get('no_weights', False)
 
     print(f"Using parameters from config:")
-    print(f"  Input size: {input_size}")
-    print(f"  Patch size: {patch_size}")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Skip weights: {no_weights}")
+    print(f"  Input size: {input_size}\n  Patch size: {patch_size}\n  Batch size: {batch_size}\n  Skip weights: {no_weights}")
 
-    # Load model based on config
     model = load_model_from_config(config_data)
 
-    # Check if model supports attention and user wants to save weights
     save_weights = not no_weights and has_attention_weights(model)
-
     if no_weights:
-        print("Skipping attention weight saving (no_weights=true in config)")
+        print("Skipping attention weight saving (no_weights=true).")
     elif not has_attention_weights(model):
-        print(f"Model {type(model).__name__} doesn't support attention weights - skipping weight saving")
+        print(f"Model {type(model).__name__} does not support attention weights.")
     else:
-        print("Will save attention weights during inference")
+        print("Will save attention weights during inference.")
 
-    # Check if flux contributions should be saved
     save_flux = config_data and 'flux_path' in config_data
     if save_flux:
-        print("Will save flux contributions during inference")
+        print("Will save flux contributions during inference.")
     else:
-        print("No flux path specified - skipping flux contribution saving")
+        print("No flux path specified.")
 
-    # Enable optimizations
-    torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+    torch.backends.cudnn.benchmark = True
 
-    # Dataset
     print("Loading dataset...")
     if config_data['SolO'] == "true":
-        print("Using SolO dataset configuration")
-        dataset = AIA_GOESDataset(
-            aia_dir=config_data['SolO_data']['solo_img_dir'] + '/test',
-            sxr_dir=config_data['SolO_data']['sxr_dir'] + '/test', wavelengths=[94,131], only_prediction=True
-        )
-        print(dataset)
+        dataset = AIA_GOESDataset(aia_dir=config_data['SolO_data']['solo_img_dir'] + '/test',
+                                  sxr_dir=config_data['SolO_data']['sxr_dir'] + '/test',
+                                  wavelengths=[94, 131], only_prediction=True)
     elif config_data['Stereo'] == "true":
-        dataset = AIA_GOESDataset(
-            aia_dir=config_data['Stereo_data']['stereo_img_dir'],
-            sxr_dir=config_data['Stereo_data']['sxr_dir'] + '/test', wavelengths= [171,193,211,304], only_prediction=True
-        )
+        dataset = AIA_GOESDataset(aia_dir=config_data['Stereo_data']['stereo_img_dir'],
+                                  sxr_dir=config_data['Stereo_data']['sxr_dir'] + '/test',
+                                  wavelengths=[171, 193, 211, 304], only_prediction=True)
     else:
-        dataset = AIA_GOESDataset(
-            aia_dir=config_data['data']['aia_dir'] + '/test',
-            sxr_dir=config_data['data']['sxr_dir'] + '/test', wavelengths= config_data['wavelengths']
-        )
+        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'] + '/test',
+                                  sxr_dir=config_data['data']['sxr_dir'] + '/test',
+                                  wavelengths=config_data['wavelengths'])
 
     times = dataset.samples
     sxr_norm = np.load(config_data['data']['sxr_norm_path'])
 
-    # Pre-allocate lists for better memory performance
+    timestamp, predictions, ground = [], [], []
     total_samples = len(times)
-    timestamp = []
-    predictions = []
-    ground = []
-
     print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
-    print("Running inference...")
-    for prediction, sxr, weight, flux_data, idx in evaluate_model_on_dataset(
-            model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
-    ):
-        # Unnormalize prediction only if not ViTPatch / ViTLocal
-        if not isinstance(model, ViTPatch) and not isinstance(model, ViTLocal):
+    for prediction, sxr, weight, flux_data, idx in evaluate_model_on_dataset(model, dataset,
+            batch_size, times, config_data, save_weights, input_size, patch_size):
+        if not isinstance(model, (ViTPatch, ViTLocal)):
             pred = unnormalize_sxr(prediction, sxr_norm)
         else:
             pred = prediction
 
-        # Store results
         predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
         ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
         timestamp.append(str(times[idx]))
 
-        # Progress update
         if (idx + 1) % 50 == 0:
             print(f"Processed {idx + 1}/{total_samples}")
 
-    if save_weights:
-        print("All weights saved during batch processing!")
-    else:
-        print("Inference completed (no weights saved)!")
-
-    if save_flux:
-        print("All flux contributions saved during batch processing!")
-
-    # Create and save results DataFrame
-    print("Creating output DataFrame...")
-    output_df = pd.DataFrame({
-        'timestamp': timestamp,
-        'predictions': predictions,
-        'groundtruth': ground
-    })
-
-    print(output_df.head())
-    #Make output directory if it doesn't exist
-    output_dir = Path(config_data['output_path']).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_df.to_csv(config_data['output_path'], index=False)
-    print(f"Predictions saved to {config_data['output_path']}")
-
-    print(output_df.head())
-    # Make output directory if it doesn't exist
+    output_df = pd.DataFrame({'timestamp': timestamp, 'predictions': predictions, 'groundtruth': ground})
     output_dir = Path(config_data['output_path']).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     output_df.to_csv(config_data['output_path'], index=False)
