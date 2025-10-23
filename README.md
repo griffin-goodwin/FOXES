@@ -143,7 +143,7 @@ If you use this code or data in your work, please cite:
 
 ```aiexclude
 @software{FOXES,
-    title           = {{FOXES: Forecasting Solar X-ray Emission using SDO/AIA and GOES/XRS}},
+    title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
     institution     = {Frontier Development Lab (FDL), NASA Goddard Space Flight Center},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
     version         = {v1.0},
