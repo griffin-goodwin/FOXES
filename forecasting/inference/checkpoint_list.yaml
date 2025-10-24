@@ -1,0 +1,22 @@
+# Example checkpoint list for batch evaluation
+# This file contains a list of model checkpoints to evaluate
+
+checkpoints:
+  # - name: "claude-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-claude-suggested-weights-final-20250921_225446.pth"
+  # - name: "rs-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-final-20250921_185953.pth"
+  # - name: "baseweights-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-changed-base-weights-final-20250921_223323.pth"
+  - name: "claude-localized"
+    checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-local-patch-mse-claude-final-20250929_050650.pth"
+  # - name: "baseweights-mse"
+  #   checkpoint_path: /mnt/data/COMBINED/new-checkpoint/vit-mse-base-weights-epoch=62-val_total_loss=0.2893.ckpt"
+  # - name: "stereo-final"
+  #   checkpoint_path: "/mnt/data/COMBINED/new-checkpoint/vit-patch-model-2d-embeddings-reduced-sensitivity-STEREO-final-20250921_183739.pth"
+
+
+# Add more checkpoints as needed
+# Each checkpoint should have:
+# - name: A descriptive name for the model
+# - checkpoint_path: Full path to the .ckpt or .pth file

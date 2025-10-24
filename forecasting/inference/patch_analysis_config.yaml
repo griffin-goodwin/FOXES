@@ -1,0 +1,59 @@
+# Patch Analysis Configuration
+# Configuration for flux contribution analysis and flare detection
+
+# Base directories
+base_data_dir: "/mnt/data/batch_results/vitlocal"
+# Data paths
+flux_path: "${base_data_dir}/flux" # Path to flux contribution files
+aia_path: "/mnt/data/PAPER_DATA_B/AIA/test"       # Path to AIA images
+output_path: "${base_data_dir}/vitlocal_predictions.csv"  # Path to predictions CSV
+
+# Analysis parameters
+analysis:
+  # Time period for analysis
+  time_period:
+    start_time: "2023-08-15T00:00:00"
+    end_time: "2023-08-17T23:59:00"
+  
+  # Flare detection parameters (robust dual-threshold approach)
+  flare_detection:
+    # Dual-threshold parameters for stable region detection
+    core_threshold_percentile: 99  # High confidence cores (strict threshold)
+    growth_threshold_percentile: 98  # Permissive growth from cores
+    
+    # Legacy parameter (kept for backward compatibility)
+    threshold_percentile: 95    # Used if dual-threshold params not available
+    
+    # Size constraints
+    min_core_patches: 1         # Minimum stable core size (prevents flickering)
+    min_patches: 2              # Minimum size after growth
+    max_patches: 50            # Maximum region size
+    
+    # Morphological operations for stability
+    closing_iterations: 1       # Fill small gaps (0 to disable)
+    dilation_iterations: 1     # Growth iterations from core (0 to disable)
+    prevent_overlap: true       # Prevent regions from growing into each other
+    
+    # Temporal smoothing
+    flux_smoothing_window: 1   # Moving average window (1 to disable)
+    
+    # Other parameters
+    simultaneous_flare_threshold: 0.000005  # Threshold for simultaneous flare detection
+  
+  # Output configuration
+  output:
+    output_dir: "${base_data_dir}/patch_analysis_output"
+    create_visualizations: false     # Create individual visualization plots
+    max_visualizations: 10          # Maximum number of visualizations to create
+    visualization_threshold: 0.0    # Minimum prediction threshold for visualizations
+    create_movie: false             # Create simple flux movie (legacy)
+    create_contour_movie: true      # Create contour evolution movie
+    movie_fps: 15                   # Frames per second for movies
+    movie_interval_minutes: 10       # Minutes between frames (lower = more frames, longer movie)
+    show_sxr_timeseries: true       # Show SXR time series for tracked regions
+    max_tracking_distance: 50       # Maximum distance for region tracking (pixels)
+
+# Grid and patch parameters
+grid_size: [32, 32]                 # Size of the flux contribution grid
+patch_size: 16                      # Size of each patch in pixels
+input_size: 512                     # Input image size
