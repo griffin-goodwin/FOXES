@@ -24,7 +24,6 @@ from matplotlib import rcParams
 import colormaps as cmaps
 
 
-
 def setup_barlow_font():
     """Setup Barlow font for matplotlib plots"""
     try:
@@ -52,7 +51,24 @@ def setup_barlow_font():
     except Exception as e:
         print(f"Font setup error: {e}, using default font")
 
+
 class SolarFlareEvaluator:
+    """
+    Comprehensive solar flare evaluation system with baseline model comparison capabilities.
+    
+    This class provides functionality for evaluating solar flare prediction models by comparing
+    their performance against ground truth data and baseline models. It includes quantitative
+    metrics calculation, regression analysis visualization, and attention-based movie generation.
+    
+    Key Features:
+        - Performance metrics calculation (MSE, RMSE, MAE, R², Pearson correlation)
+        - Flare class-specific analysis (A, B, C, M, X classes)
+        - Baseline model comparison
+        - Uncertainty quantification and visualization
+        - Attention map visualization with AIA imagery
+        - Multi-process frame generation for efficient movie creation
+    """
+    
     def __init__(self,
                  csv_path=None,
                  aia_dir=None,
@@ -100,7 +116,16 @@ class SolarFlareEvaluator:
         self.y_baseline = None
 
     def load_data(self):
-        """Load and prepare all required data including baseline"""
+        """
+        Load and prepare all required data including baseline.
+        
+        This method handles data loading for both regular comparison mode and baseline-only mode.
+        It applies outlier filtering and SXR cutoff filtering as specified during initialization.
+        Ground truth uncertainty is automatically calculated as 20% of the ground truth values.
+        
+        Returns:
+            None
+        """
         if self.baseline_only_mode:
             # In baseline-only mode, use baseline data as the main data
             if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
@@ -169,7 +194,16 @@ class SolarFlareEvaluator:
 
 
     def calculate_metrics(self):
-        """Calculate and save performance metrics for both models"""
+        """
+        Calculate and save performance metrics for both models.
+        
+        Computes standard regression metrics (MSE, RMSE, MAE, R², Pearson correlation) 
+        in log-space for both the main model and baseline model. Additionally calculates
+        class-specific metrics for different flare classes (Quiet, C, M, X).
+        
+        Returns:
+            pandas.DataFrame: DataFrame containing all calculated metrics
+        """
         if self.y_true is None or self.y_pred is None:
             raise ValueError("No prediction data available. Load data first.")
 
@@ -266,7 +300,20 @@ class SolarFlareEvaluator:
         return metrics_df
 
     def _calculate_tss(self, y_true, y_pred, threshold=None):
-        """Calculate True Skill Statistic"""
+        """
+        Calculate True Skill Statistic (TSS) for binary classification performance.
+        
+        TSS is calculated as Sensitivity + Specificity - 1, providing a measure of
+        classification skill that accounts for both true positives and true negatives.
+        
+        Args:
+            y_true (array-like): Ground truth values
+            y_pred (array-like): Predicted values
+            threshold (float, optional): Classification threshold. Defaults to median of y_true.
+        
+        Returns:
+            float: True Skill Statistic value
+        """
         if threshold is None:
             threshold = np.median(y_true)
 
@@ -279,7 +326,17 @@ class SolarFlareEvaluator:
         return sensitivity + specificity - 1
 
     def _plot_regression_comparison(self):
-        """Generate regression comparison plot with MAE contours and residuals plot"""
+        """
+        Generate regression comparison plot with MAE contours and residuals plot.
+        
+        Creates a comprehensive visualization showing:
+        - 2D histogram of predicted vs. actual values
+        - Perfect prediction line (1:1 relationship)
+        - MAE contour bands showing prediction uncertainty
+        - Flare class boundaries (A, B, C, M, X)
+        - Logarithmic scaling for both axes
+        - Professional styling with Barlow font and custom color scheme
+        """
         setup_barlow_font()
         flare_classes = {
             'A1.0': (1e-8, 1e-7),
@@ -472,14 +529,32 @@ class SolarFlareEvaluator:
 
     @staticmethod
     def init_worker(csv_data, baseline_csv_data):
-        """Initialize each worker process with CSV data"""
+        """
+        Initialize each worker process with CSV data.
+        
+        This static method is used as the initializer function for multiprocessing.Pool.
+        It loads the CSV data into global variables accessible by worker processes.
+        
+        Args:
+            csv_data (pandas.DataFrame): Main model CSV data
+            baseline_csv_data (pandas.DataFrame): Baseline model CSV data
+        """
         global csv_data_global, baseline_csv_data_global
         csv_data_global = csv_data
         baseline_csv_data_global = baseline_csv_data
         print(f"Worker {os.getpid()}: CSV data loaded")
 
     def load_csv_data(self):
-        """Load and prepare CSV data for workers"""
+        """
+        Load and prepare CSV data for workers.
+        
+        Prepares CSV data for multiprocessing by converting timestamps to datetime 
+        objects and adding ground truth uncertainty. Handles both regular and 
+        baseline-only modes.
+        
+        Returns:
+            tuple: (csv_data, baseline_csv_data) - Main and baseline CSV dataframes
+        """
         if self.baseline_only_mode:
             # In baseline-only mode, use baseline data as main data
             csv_data = pd.read_csv(self.baseline_csv_path)
@@ -506,7 +581,17 @@ class SolarFlareEvaluator:
         return csv_data, baseline_data
 
     def load_aia_image(self, timestamp):
-        """Load AIA image for given timestamp"""
+        """
+        Load AIA image for given timestamp.
+        
+        Searches for AIA image files matching the timestamp pattern in the specified directory.
+        
+        Args:
+            timestamp (str): Timestamp in format YYYY-MM-DDTHH:MM:SS
+            
+        Returns:
+            numpy.ndarray or None: AIA image data if found, None otherwise
+        """
         pattern = f"{self.aia_dir}/*{timestamp}*"
         files = glob.glob(pattern)
         if files:
@@ -514,7 +599,17 @@ class SolarFlareEvaluator:
         return None
 
     def load_attention_map(self, timestamp):
-        """Load attention map for given timestamp"""
+        """
+        Load attention map for given timestamp.
+        
+        Loads attention weights from text files and resizes them to match AIA image dimensions.
+        
+        Args:
+            timestamp (str): Timestamp in format YYYY-MM-DDTHH:MM:SS
+            
+        Returns:
+            numpy.ndarray or None: Resized attention map or None if loading failed
+        """
         if not self.weight_path or not os.path.exists(self.weight_path):
             print(f"Weight path not available: {self.weight_path}")
             return None
@@ -531,7 +626,20 @@ class SolarFlareEvaluator:
             return None
 
     def get_sxr_data_for_timestamp(self, timestamp, window_hours=16):
-        """Get SXR data around the given timestamp from CSV files"""
+        """
+        Get SXR data around the given timestamp from CSV files.
+        
+        Retrieves both current timestamp data and surrounding temporal window data 
+        for comprehensive visualization. Merges main model and baseline predictions.
+        
+        Args:
+            timestamp (str): Target timestamp for data retrieval
+            window_hours (int): Temporal window size in hours (default: 16)
+            
+        Returns:
+            tuple: (window_data, current_data, target_time) - 
+                   Window dataframe, current timestamp data, and datetime object
+        """
         try:
             # Access global CSV data loaded in worker
             global csv_data_global, baseline_csv_data_global
@@ -622,7 +730,23 @@ class SolarFlareEvaluator:
             return None, None, None
 
     def generate_frame_worker(self, timestamp):
-        """Worker function to generate a single frame"""
+        """
+        Worker function to generate a single frame.
+        
+        This method is designed for multiprocessing and creates a comprehensive 
+        visualization frame showing:
+        - AIA 131Å image with attention overlay
+        - SXR time series with ground truth, model predictions, and uncertainties
+        - Current timestamp marker
+        - Quantitative performance metrics
+        - Professional styling with consistent color scheme
+        
+        Args:
+            timestamp (str): Timestamp for frame generation
+            
+        Returns:
+            str or None: Path to generated frame file or None if generation failed
+        """
         try:
             print(f"Worker {os.getpid()}: Processing {timestamp}")
 
@@ -788,7 +912,20 @@ class SolarFlareEvaluator:
             return None
 
     def create_attention_movie(self, timestamps, auto_cleanup=True):
-        """Generate attention visualization movie with baseline comparison and uncertainties"""
+        """
+        Generate attention visualization movie with baseline comparison and uncertainties.
+        
+        Creates a comprehensive movie showing attention maps overlaid on AIA images
+        alongside SXR time series comparisons. Uses multiprocessing for efficient 
+        parallel frame generation and compiles frames into a video file.
+        
+        Args:
+            timestamps (list): List of timestamps for frame generation
+            auto_cleanup (bool): Whether to automatically delete individual frame files after movie creation
+            
+        Returns:
+            None
+        """
         print(f"Generated {len(timestamps)} timestamps to process")
 
         # Load CSV data once
@@ -857,7 +994,21 @@ class SolarFlareEvaluator:
                 print("Frame files deleted")
 
     def run_full_evaluation(self, timestamps=None):
-        """Run complete evaluation pipeline with baseline comparison and uncertainties"""
+        """
+        Run complete evaluation pipeline with baseline comparison and uncertainties.
+        
+        Executes the full evaluation workflow including:
+        1. Data loading and preprocessing
+        2. Quantitative metrics calculation and saving
+        3. Regression comparison plot generation
+        4. Attention movie creation (if timestamps provided)
+        
+        Args:
+            timestamps (list, optional): List of timestamps for movie generation
+            
+        Returns:
+            pandas.DataFrame: Performance metrics dataframe
+        """
         print("=== Solar Flare Evaluation with Baseline Comparison and Uncertainties ===")
         print(f"Output will be saved to: {self.output_dir}")
 
@@ -884,7 +1035,19 @@ class SolarFlareEvaluator:
 
 
 def resolve_config_variables(config_dict):
-    """Recursively resolve ${variable} references within the config"""
+    """
+    Recursively resolve ${variable} references within the config.
+    
+    This function processes configuration dictionaries to substitute variable 
+    references of the form ${variable_name} with their actual values defined 
+    elsewhere in the configuration.
+    
+    Args:
+        config_dict (dict): Configuration dictionary with potential variable references
+        
+    Returns:
+        dict: Configuration dictionary with resolved variable substitutions
+    """
     variables = {}
     for key, value in config_dict.items():
         if isinstance(value, str) and not value.startswith('${'):
@@ -911,7 +1074,18 @@ def resolve_config_variables(config_dict):
 
 
 def load_evaluation_config(config_path):
-    """Load evaluation configuration from YAML file"""
+    """
+    Load evaluation configuration from YAML file.
+    
+    Reads a YAML configuration file and applies variable substitution to 
+    resolve any ${variable} references within the configuration.
+    
+    Args:
+        config_path (str): Path to the YAML configuration file
+        
+    Returns:
+        dict: Loaded and processed configuration dictionary
+    """
     with open(config_path, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
     
@@ -921,7 +1095,20 @@ def load_evaluation_config(config_path):
 
 
 def generate_timestamps(start_time_str, end_time_str, interval_minutes):
-    """Generate list of timestamps for evaluation"""
+    """
+    Generate list of timestamps for evaluation.
+    
+    Creates a sequence of timestamps within the specified time range at 
+    regular intervals for evaluation purposes.
+    
+    Args:
+        start_time_str (str): Start time in ISO format (YYYY-MM-DDTHH:MM:SS)
+        end_time_str (str): End time in ISO format (YYYY-MM-DDTHH:MM:SS)
+        interval_minutes (int): Time interval between timestamps in minutes
+        
+    Returns:
+        list: List of timestamp strings in format YYYY-MM-DDTHH:MM:SS
+    """
     start_time = datetime.fromisoformat(start_time_str)
     end_time = datetime.fromisoformat(end_time_str)
     interval = timedelta(minutes=interval_minutes)
@@ -936,7 +1123,12 @@ def generate_timestamps(start_time_str, end_time_str, interval_minutes):
 
 
 def main():
-    """Main function to run evaluation with config file"""
+    """
+    Main function to run evaluation with config file.
+    
+    Parses command line arguments, loads configuration, generates timestamps, 
+    and executes the complete evaluation pipeline using the SolarFlareEvaluator class.
+    """
     import argparse
     
     parser = argparse.ArgumentParser(description='Run solar flare evaluation')
