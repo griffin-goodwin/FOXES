@@ -38,19 +38,7 @@ def detect_model_type(checkpoint_path):
     """Detect model type from checkpoint filename or content"""
     filename = Path(checkpoint_path).name.lower()
     
-    if 'local' in filename or 'localized' in filename:
-        return 'vitlocal'
-    elif 'patch' in filename:
-        return 'vitpatch'
-    elif 'fusion' in filename:
-        return 'fusion'
-    elif 'hybrid' in filename:
-        return 'hybrid'
-    elif 'linear' in filename:
-        return 'linear'
-    else:
-        # Default to vit for backward compatibility
-        return 'vit'
+    return 'vitlocal'
 
 def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/NO-OVERLAP"):
     """Create inference config for checkpoint"""
@@ -64,7 +52,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     os.makedirs(f"{output_dir}/weights", exist_ok=True)
     
     # Create flux directory for patch-based models
-    if model_type in ['vitpatch', 'vitlocal']:
+    if model_type == 'vitlocal':
         os.makedirs(f"{output_dir}/flux", exist_ok=True)
     
     # Generate config
