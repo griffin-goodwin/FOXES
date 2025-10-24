@@ -191,9 +191,9 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
         aia_path = self.aia_dir / f"{timestamp}.npy"
         sxr_path = self.sxr_dir / f"{timestamp}.npy"
 
-        # Load AIA image as (6, H, W)
+        # Load AIA image as (7, H, W)
         try:
-            all_wavelengths = [94, 131, 171, 193, 211, 304]
+            all_wavelengths = [94, 131, 171, 193, 211, 304, 335]
             aia_img = np.load(aia_path)
             # Extract dimensions from aia data according to selected wavelengths
             indices = [all_wavelengths.index(wav) for wav in self.wavelengths if wav in all_wavelengths]
@@ -203,9 +203,9 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
             return self.__getitem__((idx + 1) % len(self))
 
         # Convert to torch for transforms
-        aia_img = torch.tensor(aia_img, dtype=torch.float32)  # (6, H, W)
+        aia_img = torch.tensor(aia_img, dtype=torch.float32)  # (7, H, W)
         # Always output channel-last for model: (H, W, C)
-        aia_img = aia_img.permute(1, 2, 0)  # (H, W, 6)
+        aia_img = aia_img.permute(1, 2, 0)  # (H, W, 7)
 
         # Load SXR value
         if not self.only_prediction:

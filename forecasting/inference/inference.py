@@ -15,11 +15,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
 import forecasting.models as models
-from forecasting.models.vision_transformer_custom import ViT as ViTCustom
-from forecasting.models.vit_patch_model import ViT as ViTPatch
 from forecasting.models.vit_patch_model_local import ViTLocal
-from forecasting.models.linear_and_hybrid import HybridIrradianceModel, LinearIrradianceModel  # Add your hybrid and linear model imports
-from torch.nn import HuberLoss
+
 from forecasting.training.callback import unnormalize_sxr
 import yaml
 import torch.nn.functional as F
@@ -32,7 +29,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def has_attention_weights(model):
     """Check if model supports attention weights"""
-    return hasattr(model, 'attention') or isinstance(model, ViTCustom) or isinstance(model, ViTPatch) or isinstance(model, ViTLocal)
+    return hasattr(model, 'attention') or isinstance(model, ViTLocal)
 
 def is_localized_attention_model(model):
     """Check if model uses localized attention (no CLS token)"""
@@ -228,40 +225,9 @@ def load_model_from_config(config_data):
 
     if ".ckpt" in checkpoint_path:
         # Lightning checkpoint format
-        if model_type.lower() == 'vit':
-            model = ViTCustom.load_from_checkpoint(checkpoint_path)
-        elif model_type.lower() == 'vitpatch':
-            model = ViTPatch.load_from_checkpoint(checkpoint_path)
-        elif model_type.lower() == 'vitlocal':
+
+        if model_type.lower() == 'vitlocal':
             model = ViTLocal.load_from_checkpoint(checkpoint_path)
-        elif model_type.lower() == 'hybrid' or model_type.lower() == 'hybridirradiancemodel':
-            # Try to load with saved hyperparameters first, then fall back to config parameters
-            try:
-                model = HybridIrradianceModel.load_from_checkpoint(
-                    checkpoint_path,
-                    d_input=len(wavelengths),
-                    d_output=1,
-                    cnn_model=config_data.get('megsai', {}).get('cnn_model', 'original'),
-                    ln_model=True,
-                    cnn_dp=config_data.get('megsai', {}).get('cnn_dp', 0.2),
-                    loss_func=HuberLoss()
-                )
-            except (TypeError, RuntimeError) as e:
-                print(f"Failed to load with saved hyperparameters: {e}")
-        elif model_type.lower() == 'linear' or model_type.lower() == 'linearirradiancemodel':
-            # Try to load with saved hyperparameters first, then fall back to config parameters
-            try:
-                model = LinearIrradianceModel.load_from_checkpoint(checkpoint_path)
-            except (TypeError, RuntimeError) as e:
-                print(f"Failed to load with saved hyperparameters: {e}")
-                print("Loading with config parameters...")
-                # Provide required parameters for LinearIrradianceModel
-                model = LinearIrradianceModel.load_from_checkpoint(
-                    checkpoint_path,
-                    d_input=len(wavelengths),
-                    d_output=1,
-                    loss_func=HuberLoss()
-                )
         else:
             # Try to dynamically load the model class
             try:
@@ -389,7 +355,7 @@ def main():
             model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
     ):
         # Unnormalize prediction only if not ViTPatch / ViTLocal
-        if not isinstance(model, ViTPatch) and not isinstance(model, ViTLocal):
+        if not isinstance(model, ViTLocal):
             pred = unnormalize_sxr(prediction, sxr_norm)
         else:
             pred = prediction
