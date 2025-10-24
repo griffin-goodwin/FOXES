@@ -1,0 +1,398 @@
+import argparse
+import logging
+import os
+import time
+from datetime import datetime, timedelta
+from os import cpu_count
+from urllib.error import HTTPError
+
+import download_sdo as sdo
+import flare_event_downloader as fed
+import sxr_downloader as sxr
+
+class FlareDownloadProcessor:
+    def __init__(self, FlareEventDownloader, SDODownloader, SXRDownloader, flaring_data=True, time_span_mode=False):
+        """
+        Initialize the FlareDownloadProcessor.
+        This class is responsible for processing AIA flare downloads.
+        
+        Args:
+            FlareEventDownloader: Downloader for flare events
+            SDODownloader: Downloader for SDO data
+            SXRDownloader: Downloader for SXR data
+            flaring_data: Whether to download flaring data (legacy mode)
+            time_span_mode: Whether to use time span mode for 1-minute cadence downloads
+        """
+        self.FlareEventDownloader = FlareEventDownloader
+        self.SDODownloader = SDODownloader
+        self.SXRDownloader = SXRDownloader
+        self.flaring_data = flaring_data
+        self.time_span_mode = time_span_mode
+
+    def check_existing_data(self, date):
+        """
+        Check if data already exists for the given date in all required wavelengths.
+        
+        Args:
+            date (datetime): The date to check for existing data
+            
+        Returns:
+            bool: True if data exists for all wavelengths, False otherwise
+        """
+        wavelengths = ['94', '131', '171', '193', '211', '304']
+        date_str = date.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        for wl in wavelengths:
+            file_path = os.path.join(self.SDODownloader.ds_path, wl, f"{date_str}.fits")
+            if not os.path.exists(file_path):
+                return False
+        return True
+
+    def retry_download_with_backoff(self, download_func, *args, max_retries=5, base_delay=60, **kwargs):
+        """
+        Retry a download function with exponential backoff for HTTP 503 errors.
+        
+        Args:
+            download_func: The download function to retry
+            *args: Arguments to pass to the download function
+            max_retries: Maximum number of retry attempts (default: 5)
+            base_delay: Base delay in seconds for exponential backoff (default: 60)
+            **kwargs: Keyword arguments to pass to the download function
+        
+        Returns:
+            The result of the download function if successful
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return download_func(*args, **kwargs)
+            except HTTPError as e:
+                if e.code == 503:  # Service Unavailable
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"  ⚠ HTTP 503 Service Unavailable (attempt {attempt + 1}/{max_retries + 1})")
+                        print(f"  ⏳ Waiting {delay} seconds before retry...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"  ✗ Max retries ({max_retries}) exceeded for HTTP 503 error")
+                        raise
+                else:
+                    # Re-raise non-503 HTTP errors immediately
+                    raise
+            except Exception as e:
+                # Re-raise non-HTTP errors immediately
+                raise
+
+    def process_download(self, time_before_start=timedelta(minutes=15), time_after_end=timedelta(minutes=15), 
+                        start_time=None, end_time=None):
+        """
+        Process downloads either in flare mode or time span mode.
+        
+        Args:
+            time_before_start: Time before flare start to download (legacy mode)
+            time_after_end: Time after flare end to download (legacy mode)
+            start_time: Start time for time span mode (datetime object)
+            end_time: End time for time span mode (datetime object)
+        """
+        # Create directories for SDO data
+        [os.makedirs(os.path.join(self.SDODownloader.ds_path, str(c)), exist_ok=True) for c in
+         [94, 131, 171, 193, 211, 304]]
+        
+        # Create a progress file to track completed downloads
+        progress_file = os.path.join(self.SDODownloader.ds_path, 'download_progress.txt')
+        completed_dates = set()
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r') as f:
+                completed_dates = set(line.strip() for line in f)
+            print(f"Resuming from {len(completed_dates)} previously completed downloads")
+
+        if self.time_span_mode:
+            # Time span mode - download 1-minute cadence data for specified time range
+            if start_time is None or end_time is None:
+                raise ValueError("start_time and end_time must be provided for time span mode")
+            
+            print(f"Processing time span mode: {start_time} to {end_time}")
+            print("Downloading 1-minute cadence data...")
+            
+            # Download SXR data for the entire time span
+            self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
+                                            start_time.strftime('%Y-%m-%d'),
+                                            end_time.strftime('%Y-%m-%d'), max_workers=os.cpu_count()-1)
+            
+            # Generate 1-minute intervals for the time span
+            processed_dates = set()
+            current_time = start_time
+            total_minutes = int((end_time - start_time).total_seconds() / 60)
+            
+            print(f"Total time span: {total_minutes} minutes")
+            
+            # Process in batches to avoid overwhelming the server
+            batch_size = 100  # Process 100 minutes at a time
+            batch_count = 0
+            
+            while current_time < end_time:
+                batch_count += 1
+                batch_end = min(current_time + timedelta(minutes=batch_size), end_time)
+                batch_dates = []
+                
+                # Generate dates for this batch
+                temp_time = current_time
+                while temp_time < batch_end:
+                    if temp_time.isoformat() not in completed_dates:
+                        # Check if data already exists in the download directory
+                        if not self.check_existing_data(temp_time):
+                            batch_dates.append(temp_time)
+                        else:
+                            print(f"  ⏭ Data already exists for {temp_time}, skipping download")
+                            completed_dates.add(temp_time.isoformat())
+                            # Update progress file
+                            with open(progress_file, 'a') as f:
+                                f.write(f"{temp_time.isoformat()}\n")
+                    temp_time += timedelta(minutes=1)
+                
+                if batch_dates:
+                    print(f"Processing batch {batch_count}: {len(batch_dates)} minutes from {current_time} to {batch_end}")
+                    
+                    for i, d in enumerate(batch_dates):
+                        try:
+                            print(f"  Downloading data for {d} ({i+1}/{len(batch_dates)})")
+                            self.retry_download_with_backoff(self.SDODownloader.downloadDate, d)
+                            processed_dates.add(d.isoformat())
+                            completed_dates.add(d.isoformat())
+                            
+                            # Update progress file
+                            with open(progress_file, 'a') as f:
+                                f.write(f"{d.isoformat()}\n")
+                            
+                            print(f"  ✓ Successfully downloaded {d}")
+                            
+                            # Small delay between downloads
+                            if i < len(batch_dates) - 1:
+                                time.sleep(0.01)
+                                
+                        except Exception as e:
+                            print(f"  ✗ Failed to download data for {d}: {e}")
+                            if "Connection refused" in str(e) or "timeout" in str(e).lower():
+                                print(f"  Waiting 5 seconds before continuing...")
+                                time.sleep(1)
+                            continue
+                else:
+                    print(f"  ⏭ Skipping batch {batch_count} (all dates already completed)")
+                
+                # Delay between batches
+                if batch_end < end_time:
+                    print("Waiting 5 seconds before next batch...")
+                    time.sleep(1)
+                
+                current_time = batch_end
+            
+            print(f"Time span processing completed. Downloaded {len(processed_dates)} data points.")
+            return
+
+        # Legacy flare mode
+        fl_events = self.FlareEventDownloader.download_events()
+        print(fl_events)
+
+        if self.flaring_data == True:
+            print("Processing flare events...")
+            if fl_events.empty:
+                print("No flare events found. Skipping flare processing.")
+                return
+            for i, events in enumerate(fl_events.iterrows()):
+                event = events[1]
+                start_time = event['event_starttime'] - time_before_start
+                end_time = event['event_endtime'] + time_after_end
+                self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
+                                                start_time.strftime('%Y-%m-%d'),
+                                                end_time.strftime('%Y-%m-%d'), max_workers=12)
+                processed_dates = set()
+                for d in [start_time + i * timedelta(minutes=1) for i in
+                          range((end_time - start_time) // timedelta(minutes=1))]:
+                    # Only download if we haven't processed this date yet
+                    if d.isoformat() not in processed_dates:
+                        # Check if data already exists in the download directory
+                        if not self.check_existing_data(d):
+                            self.retry_download_with_backoff(self.SDODownloader.downloadDate, d)
+                            processed_dates.add(d.isoformat())
+                        else:
+                            print(f"  ⏭ Data already exists for {d}, skipping download")
+                            processed_dates.add(d.isoformat())
+                logging.info(f"Processed flare event {i + 1}/{len(fl_events)}: {event['event_starttime']} to {event['event_endtime']}")
+        elif self.flaring_data == False:
+            print("Processing non-flare events...")
+            if fl_events.empty or 'event_starttime' not in fl_events.columns:
+                print("No flare events found or invalid data structure. Skipping non-flare processing.")
+                return
+            start_time_fl = fl_events['event_starttime']
+            end_time_fl = fl_events['event_endtime']
+            for i, events in enumerate(fl_events.iterrows()):
+                start_time = end_time_fl.iloc[i]
+                end_time = start_time_fl.iloc[i+1] if i + 1 < len(fl_events) else end_time_fl.iloc[-1] + timedelta(minutes=5)
+                #Pass on end time to start time if end time is before start time
+                if end_time < start_time:
+                    end_time = start_time
+                self.retry_download_with_backoff(self.SXRDownloader.download_and_save_goes_data, 
+                                                start_time.strftime('%Y-%m-%d'),
+                                                end_time.strftime('%Y-%m-%d'), max_workers=os.cpu_count()-1)
+                
+                # Adaptive sampling based on quiet period duration
+                quiet_duration = end_time - start_time
+                if quiet_duration < timedelta(hours=1):
+                    # Short quiet period - sample every 10 minutes
+                    sampling_interval = timedelta(minutes=10)
+                elif quiet_duration < timedelta(days=1):
+                    # Medium quiet period - sample every hour
+                    sampling_interval = timedelta(minutes=60)
+                elif quiet_duration < timedelta(days=30):
+                    # Long quiet period - sample every 6 hours
+                    sampling_interval = timedelta(hours=6)
+                else:
+                    # Very long quiet period - sample every day
+                    sampling_interval = timedelta(days=1)
+                
+                processed_dates = set()
+                dates_to_process = [start_time + i * sampling_interval for i in
+                                   range((end_time - start_time) // sampling_interval)]
+                
+                # Process in smaller batches to avoid overwhelming the server
+                batch_size = 100  # Smaller batches
+                for i in range(0, len(dates_to_process), batch_size):
+                    batch = dates_to_process[i:i + batch_size]
+                    print(f"Processing batch {i//batch_size + 1}/{(len(dates_to_process) + batch_size - 1)//batch_size} ({len(batch)} dates)")
+                    
+                    for j, d in enumerate(batch):
+                        # Only download if we haven't processed this date yet
+                        if d.isoformat() not in processed_dates and d.isoformat() not in completed_dates:
+                            # Check if data already exists in the download directory
+                            if not self.check_existing_data(d):
+                                try:
+                                    print(f"  Downloading data for {d} ({j+1}/{len(batch)})")
+                                    self.retry_download_with_backoff(self.SDODownloader.downloadDate, d)
+                                    processed_dates.add(d.isoformat())
+                                    completed_dates.add(d.isoformat())
+                                    
+                                    # Update progress file
+                                    with open(progress_file, 'a') as f:
+                                        f.write(f"{d.isoformat()}\n")
+                                    
+                                    print(f"  ✓ Successfully downloaded {d}")
+                                    
+                                    # Add small delay between individual downloads
+                                    if j < len(batch) - 1:
+                                        time.sleep(.2)
+                                        
+                                except Exception as e:
+                                    print(f"  ✗ Failed to download data for {d}: {e}")
+                                    # If it's a connection error, wait longer before retrying
+                                    if "Connection refused" in str(e) or "timeout" in str(e).lower():
+                                        print(f"  Waiting 10 seconds before continuing...")
+                                        time.sleep(10)
+                                    continue
+                            else:
+                                print(f"  ⏭ Data already exists for {d}, skipping download")
+                                processed_dates.add(d.isoformat())
+                                completed_dates.add(d.isoformat())
+                                
+                                # Update progress file
+                                with open(progress_file, 'a') as f:
+                                    f.write(f"{d.isoformat()}\n")
+                        elif d.isoformat() in completed_dates:
+                            print(f"  ⏭ Skipping {d} (already completed)")
+                            processed_dates.add(d.isoformat())
+                    
+                    # Add longer delay between batches to avoid rate limiting
+                    if i + batch_size < len(dates_to_process):
+                        print("Waiting 10 seconds before next batch...")
+                        time.sleep(10)
+                logging.info(f"Processed non-flare event {i + 1}/{len(fl_events)}: {start_time} to {end_time} (duration: {quiet_duration}, samples: {len(processed_dates)})")
+        else:
+            raise ValueError("Invalid value for flaring_data. It should be either True or False.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Download flare events and associated SDO data.')
+    parser.add_argument('--start_date', type=str, default='2024-05-01',
+                        help='Start date for downloading data (YYYY-MM-DD)')
+    parser.add_argument('--end_date', type=str, default='2024-06-01',
+                        help='End date for downloading data (YYYY-MM-DD)')
+    parser.add_argument('--start_time', type=str, default=None,
+                        help='Start time for time span mode (YYYY-MM-DD HH:MM:SS)')
+    parser.add_argument('--end_time', type=str, default=None,
+                        help='End time for time span mode (YYYY-MM-DD HH:MM:SS)')
+    parser.add_argument('--chunk_size', type=int, default=2000,
+                        help='Number of days per chunk for processing (default: 180)')
+    parser.add_argument('--download_dir', type=str, default='/mnt/data/ADDED-FLARE',
+                        help='Directory to save downloaded data (default: /mnt/data)')
+    parser.add_argument('--time_span_mode', action='store_true',
+                        help='Use time span mode for 1-minute cadence downloads')
+    parser.add_argument('--flaring_data', dest='flaring_data', action='store_true',
+                        help='Download flaring data (default)')
+    parser.add_argument('--non_flaring_data', dest='flaring_data', action='store_false',
+                        help='Download non-flaring data')
+    parser.add_argument('--email', type=str, default='ggoodwin5@gsu.edu',
+                        help='Email for SDO data download')
+    parser.set_defaults(flaring_data=True)
+    args = parser.parse_args()
+
+    download_dir = args.download_dir
+    start_date = args.start_date
+    end_date = args.end_date
+    chunk_size = args.chunk_size
+    flaring_data = args.flaring_data
+    time_span_mode = args.time_span_mode
+    email = args.email
+    if time_span_mode:
+        # Time span mode - use precise start and end times
+        if args.start_time is None or args.end_time is None:
+            print("Error: --start_time and --end_time must be provided for time span mode")
+            print("Example: --start_time '2023-06-15 00:00:00' --end_time '2023-06-15 23:59:59'")
+            exit(1)
+        
+        try:
+            start_time = datetime.strptime(args.start_time, "%Y-%m-%d %H:%M:%S")
+            end_time = datetime.strptime(args.end_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            print("Error: Invalid time format. Use YYYY-MM-DD HH:MM:SS")
+            exit(1)
+        
+        print(f"Time span mode: {start_time} to {end_time}")
+        
+        # Initialize downloaders
+        sxr_downloader = sxr.SXRDownloader(f"{download_dir}/GOES-timespan",
+                                           f"{download_dir}/GOES-timespan/combined")
+        sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDO-AIA-timespan", email)
+        
+        # Create a dummy flare event downloader (not used in time span mode)
+        flare_event = None
+        
+        processor = FlareDownloadProcessor(flare_event, sdo_downloader, sxr_downloader,
+                                           flaring_data=flaring_data, time_span_mode=True)
+        processor.process_download(start_time=start_time, end_time=end_time)
+        
+    else:
+        # Legacy flare mode
+        # Parse start and end dates
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+
+        # Process in chunks
+        current_start = start
+        while current_start < end:
+            current_end = min(current_start + timedelta(days=chunk_size), end)
+            print(f"Processing chunk: {current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}")
+
+            sxr_downloader = sxr.SXRDownloader(f"{download_dir}/GOES-flaring",
+                                               f"{download_dir}/GOES-flaring/combined")
+            flare_event = fed.FlareEventDownloader(
+                current_start.strftime("%Y-%m-%d"),
+                current_end.strftime("%Y-%m-%d"),
+                event_type="FL",
+                GOESCls="M1.0",
+                directory=f"{download_dir}/SDO-AIA-flaring/FlareEvents"
+            )
+            sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDO-AIA-flaring", email)
+
+            processor = FlareDownloadProcessor(flare_event, sdo_downloader, sxr_downloader,
+                                               flaring_data=flaring_data, time_span_mode=False)
+            processor.process_download()
+
+            current_start = current_end
