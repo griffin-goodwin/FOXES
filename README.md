@@ -89,7 +89,12 @@ Project FOXES
 ```
 ## Model Architecture
 
-[Example Image](model_architecture.pdf)
+<p align="center">
+  <a href="architecture.pdf">
+    <img src="https://img.shields.io/badge/View%20Architecture%20PDF-blue?style=for-the-badge" alt="Architecture PDF">
+  </a>
+</p>
+
 
 ## Datasets
 
