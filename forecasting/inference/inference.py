@@ -99,7 +99,16 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
 
     supports_attention = has_attention_weights(model) and save_weights
     save_flux = config_data and 'flux_path' in config_data
-    sxr_norm = np.load(config_data['data']['sxr_norm_path']) if config_data and 'data' in config_data and 'sxr_norm_path' in config_data['data'] else None
+    
+    # Load SXR normalization only if path is provided and not empty
+    sxr_norm = None
+    if (config_data and 'data' in config_data and 'sxr_norm_path' in config_data['data'] 
+        and config_data['data']['sxr_norm_path'] and config_data['data']['sxr_norm_path'].strip()):
+        try:
+            sxr_norm = np.load(config_data['data']['sxr_norm_path'])
+        except FileNotFoundError:
+            print(f"Warning: SXR normalization file not found: {config_data['data']['sxr_norm_path']}")
+            sxr_norm = None
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
@@ -382,21 +391,37 @@ def main():
     torch.backends.cudnn.benchmark = True
 
     print("Loading dataset...")
+    # Check if running in prediction-only mode
+    prediction_only = config_data.get('prediction_only', 'false').lower() == 'true'
+    
     if config_data['SolO'] == "true":
-        dataset = AIA_GOESDataset(aia_dir=config_data['SolO_data']['solo_img_dir'] + '/test',
-                                  sxr_dir=config_data['SolO_data']['sxr_dir'] + '/test',
+        dataset = AIA_GOESDataset(aia_dir=config_data['SolO_data']['solo_img_dir'],
+                                  sxr_dir=config_data['SolO_data']['sxr_dir'],
                                   wavelengths=[94, 131], only_prediction=True)
     elif config_data['Stereo'] == "true":
         dataset = AIA_GOESDataset(aia_dir=config_data['Stereo_data']['stereo_img_dir'],
-                                  sxr_dir=config_data['Stereo_data']['sxr_dir'] + '/test',
+                                  sxr_dir=config_data['Stereo_data']['sxr_dir'],
                                   wavelengths=[171, 193, 211, 304], only_prediction=True)
     else:
-        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'] + '/test',
-                                  sxr_dir=config_data['data']['sxr_dir'] + '/test',
-                                  wavelengths=config_data['wavelengths'])
+        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'],
+                                  sxr_dir=config_data['data']['sxr_dir'],
+                                  wavelengths=config_data['wavelengths'],
+                                  only_prediction=prediction_only)
 
     times = dataset.samples
-    sxr_norm = np.load(config_data['data']['sxr_norm_path'])
+    
+    # Load SXR normalization only if not in prediction-only mode
+    if prediction_only:
+        print("Running in prediction-only mode - skipping SXR normalization loading")
+        sxr_norm = None
+    else:
+        try:
+            sxr_norm = np.load(config_data['data']['sxr_norm_path'])
+            print("SXR normalization loaded successfully")
+        except FileNotFoundError:
+            print(f"Warning: SXR normalization file not found: {config_data['data']['sxr_norm_path']}")
+            print("Continuing without normalization...")
+            sxr_norm = None
 
     timestamp, predictions, ground = [], [], []
     total_samples = len(times)
@@ -406,14 +431,20 @@ def main():
     for prediction, sxr, weight, flux_data, idx in evaluate_model_on_dataset(
             model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
     ):
-        # Unnormalize prediction only if not ViTPatch / ViTLocal
-        if not isinstance(model, ViTLocal):
+        # Unnormalize prediction only if not ViTPatch / ViTLocal and not in prediction-only mode and sxr_norm is available
+        if not isinstance(model, ViTLocal) and not prediction_only and sxr_norm is not None:
             pred = unnormalize_sxr(prediction, sxr_norm)
         else:
             pred = prediction
 
         predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
-        ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
+        
+        # Only collect ground truth if not in prediction-only mode
+        if not prediction_only:
+            ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
+        else:
+            ground.append(0.0)  # Dummy value for prediction-only mode
+        
         timestamp.append(str(times[idx]))
 
         if (idx + 1) % 50 == 0:
@@ -423,7 +454,11 @@ def main():
     output_dir = Path(config_data['output_path']).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     output_df.to_csv(config_data['output_path'], index=False)
-    print(f"Predictions saved to {config_data['output_path']}")
+    
+    if prediction_only:
+        print(f"Predictions saved to {config_data['output_path']} (prediction-only mode)")
+    else:
+        print(f"Predictions saved to {config_data['output_path']}")
 
 
 if __name__ == '__main__':
