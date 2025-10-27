@@ -1,7 +1,7 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/PAPER_DATA_B"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/PAPER_DATA_B"    # Change this line for different datasets
+base_data_dir: "/mnt/data/PAPER_DATA_WITH_335"  # Change this line for different datasets
+base_checkpoint_dir: "/mnt/data/PAPER_DATA_WITH_335"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304, 335]  # AIA wavelengths in Angstroms
 
 # GPU configuration
@@ -13,8 +13,8 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]  # AIA wavelengths in Angstroms
 gpu_ids: "all"  # Use both GPUs
 # Model configuration
 selected_model: "ViTLocal"  # Options: "hybrid", "vit", "fusion", "vitpatch"
-batch_size:    4
-epochs:        250
+batch_size:    6
+epochs:        150
 oversample: false
 balance_strategy: "upsample_minority"
 calculate_base_weights: false  # Whether to calculate class-based weights for loss function
@@ -51,5 +51,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: paper-testing-8-patch-335-512-hidden-6-layers-256-embed-dim
+  wb_name: paper-testing-8-patch-335-512-hidden-6-layers-256-embed-dim-updated
   notes: Regression from AIA images (6 channels) to GOES SXR flux
