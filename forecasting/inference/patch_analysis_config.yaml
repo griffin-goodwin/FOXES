@@ -5,29 +5,31 @@
 base_data_dir: "/mnt/data/batch_results/vitlocal"
 # Data paths
 flux_path: "${base_data_dir}/flux" # Path to flux contribution files
-aia_path: "/mnt/data/PAPER_DATA_B/AIA/test"       # Path to AIA images
+aia_path: "/mnt/data/AIA_processed/AIA"       # Path to AIA images
 output_path: "${base_data_dir}/vitlocal_predictions.csv"  # Path to predictions CSV
 
 # Analysis parameters
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2023-08-15T00:00:00"
-    end_time: "2023-08-17T23:59:00"
+    start_time: "2024-11-06T00:00:00"
+    end_time: "2024-11-07T23:59:00"
   
-  # Flare detection parameters (robust dual-threshold approach)
+  # Flare detection parameters (median + standard deviation approach)
+  # Thresholds are calculated as: median + (std_multiplier * standard_deviation)
+  # This approach is more robust to outliers than percentile-based thresholds
   flare_detection:
-    # Dual-threshold parameters for stable region detection
-    core_threshold_percentile: 99  # High confidence cores (strict threshold)
-    growth_threshold_percentile: 98  # Permissive growth from cores
+    # Main threshold parameters (median + std multiplier)
+    threshold_std_multiplier: .25    # Number of standard deviations above median for main threshold
     
-    # Legacy parameter (kept for backward compatibility)
-    threshold_percentile: 95    # Used if dual-threshold params not available
+    # Dual-threshold parameters for stable region detection
+    core_threshold_std_multiplier: 0.5    # High confidence cores (strict threshold)
+    growth_threshold_std_multiplier: 0.25  # Permissive growth from cores
     
     # Size constraints
     min_core_patches: 1         # Minimum stable core size (prevents flickering)
-    min_patches: 2              # Minimum size after growth
-    max_patches: 50            # Maximum region size
+    min_patches: 4              # Minimum size after growth
+    max_patches: 40            # Maximum region size
     
     # Morphological operations for stability
     closing_iterations: 1       # Fill small gaps (0 to disable)
@@ -35,7 +37,7 @@ analysis:
     prevent_overlap: true       # Prevent regions from growing into each other
     
     # Temporal smoothing
-    flux_smoothing_window: 1   # Moving average window (1 to disable)
+    flux_smoothing_window: 2   # Moving average window (1 to disable)
     
     # Other parameters
     simultaneous_flare_threshold: 0.000005  # Threshold for simultaneous flare detection
@@ -49,7 +51,7 @@ analysis:
     create_movie: false             # Create simple flux movie (legacy)
     create_contour_movie: true      # Create contour evolution movie
     movie_fps: 15                   # Frames per second for movies
-    movie_interval_minutes: 10       # Minutes between frames (lower = more frames, longer movie)
+    movie_interval_seconds: 12       # Seconds between frames (lower = more frames, longer movie)
     show_sxr_timeseries: true       # Show SXR time series for tracked regions
     max_tracking_distance: 50       # Maximum distance for region tracking (pixels)
 
