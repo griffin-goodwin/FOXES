@@ -305,7 +305,7 @@ def main():
     parser.add_argument('-checkpoint_dir', type=str, help='Directory containing checkpoint files')
     parser.add_argument('-checkpoint_path', type=str, help='Specific checkpoint file path')
     parser.add_argument('-model_name', type=str, required=True, help='Name for the model (used for output naming)')
-    parser.add_argument('-base_data_dir', type=str, default='/mnt/data/NO-OVERLAP', help='Base data directory')
+    parser.add_argument('-base_data_dir', type=str, default='/mnt/data/', help='Base data directory')
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
     
