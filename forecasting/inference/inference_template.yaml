@@ -2,7 +2,7 @@
 # This will be used as a template for each checkpoint evaluation
 
 # Base directories
-base_data_dir: "/mnt/data/COMBINED"
+base_data_dir: "/mnt/data/"
 output_path: "PLACEHOLDER_OUTPUT_PATH"  # Will be replaced by batch script
 weight_path: "PLACEHOLDER_WEIGHT_PATH"  # Will be replaced by batch script
 
@@ -11,7 +11,7 @@ SolO: "false"
 Stereo: "false"
 
 # Model configuration
-model: "vit"  # Options: "vit", "hybrid", "vitpatch", "fusion"
+model: "vitlocal"  # Options: "vit", "hybrid", "vitpatch", "fusion"
 wavelengths: [94, 131, 171, 193, 211, 304]  # AIA wavelengths in Angstroms
 
 # MC Dropout configuration
