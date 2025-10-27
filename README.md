@@ -87,6 +87,14 @@ Project FOXES
         │                 The script automatically detects CPU/GPU hardware, runs training, and saves the best and final models with full experiment tracking.
         └──callback.py  # Logs model predictions and visualize attention maps during validation, comparing true vs. predicted soft X-ray flux and displaying detailed Transformer attention patterns in Weights & Biases.
 ```
+## Model Architecture
+
+<p align="center">
+  <a href="architecture.pdf">
+    <img src="https://img.shields.io/badge/View%20Architecture%20PDF-blue?style=for-the-badge" alt="Architecture PDF">
+  </a>
+</p>
+
 
 ## Datasets
 
