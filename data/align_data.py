@@ -132,26 +132,34 @@ def create_combined_lookup_table(goes_data_dict, target_timestamps):
     target_times = pd.to_datetime(target_timestamps)
     lookup_data = []
     
-    # For each target timestamp, find the best available data
+    # For each target timestamp, average over all available instruments at that time
     for target_time in tqdm(target_times, desc="Building lookup table"):
-        # Try instruments in priority order (most recent first)
+        sxr_a_values = []
+        sxr_b_values = []
+        available_instruments = []
+
         for g_number in sorted(goes_data_dict.keys(), reverse=True):
             goes_data = goes_data_dict[g_number]
-            
             if target_time in goes_data.index:
                 row = goes_data.loc[target_time]
                 sxr_a = row['xrsa_flux']
                 sxr_b = row['xrsb_flux']
-                
-                # Check if data is valid
-                if not (pd.isna(sxr_b)):
-                    lookup_data.append({
-                        'timestamp': target_time.strftime('%Y-%m-%dT%H:%M:%S'),
-                        'sxr_a': float(sxr_a),
-                        'sxr_b': float(sxr_b),
-                        'instrument': f"GOES-{g_number}"
-                    })
-                    break
+                # Only care about xrsb_flux for validity
+                if not pd.isna(sxr_b):
+                    sxr_b_values.append(float(sxr_b))
+                    if not pd.isna(sxr_a):
+                        sxr_a_values.append(float(sxr_a))
+                    available_instruments.append(f"GOES-{g_number}")
+
+        if sxr_b_values:
+            avg_sxr_b = float(np.mean(sxr_b_values))
+            avg_sxr_a = float(np.mean(sxr_a_values)) if sxr_a_values else float('nan')
+            lookup_data.append({
+                'timestamp': target_time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'sxr_a': avg_sxr_a,
+                'sxr_b': avg_sxr_b,
+                'instrument': ",".join(available_instruments)
+            })
     
     print(f"Found valid data for {len(lookup_data)}/{len(target_timestamps)} timestamps")
     return lookup_data

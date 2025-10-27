@@ -106,6 +106,10 @@ class SXRDataProcessor:
                 if 'quad_diode' in df.columns:
                     print(f"🔍 Filtering quad diode data...")
                     df = df[df['quad_diode'] == 0]  # Filter out quad diode data
+
+                #Filter out data where xrsb_flux has a quality flag of >0
+                print(f"🔍 Filtering out data where xrsb_flux has a quality flag of >0...")
+                df = df[df['xrsb_quality'] == 0]
                 
                 df['time'] = pd.to_datetime(df['time'])
                 df.set_index('time', inplace=True)
