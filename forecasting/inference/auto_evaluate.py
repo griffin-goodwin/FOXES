@@ -72,7 +72,44 @@ def detect_model_type(checkpoint_path):
     return 'vitlocal'
 
 
-def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/NO-OVERLAP"):
+def check_sxr_data_availability(base_data_dir):
+    """
+    Check if SXR data is available in the specified directory.
+
+    Parameters
+    ----------
+    base_data_dir : str
+        Base directory containing the SXR data.
+
+    Returns
+    -------
+    bool
+        True if SXR data is available, False otherwise.
+    """
+    sxr_dir = Path(base_data_dir) / "SXR"
+    sxr_norm_path = Path(base_data_dir) / "SXR" / "normalized_sxr.npy"
+    
+    # Check if SXR directory exists and has files
+    if not sxr_dir.exists():
+        print(f"SXR directory not found: {sxr_dir}")
+        return False
+    
+    # Check if normalized SXR file exists
+    if not sxr_norm_path.exists():
+        print(f"Normalized SXR file not found: {sxr_norm_path}")
+        return False
+    
+    # Check if there are any .npy files in the SXR directory
+    sxr_files = list(sxr_dir.glob("*.npy"))
+    if not sxr_files:
+        print(f"No SXR data files found in: {sxr_dir}")
+        return False
+    
+    print(f"Found {len(sxr_files)} SXR data files in {sxr_dir}")
+    return True
+
+
+def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/data/NO-OVERLAP", prediction_only=False):
     """
     Dynamically create an inference configuration dictionary for a given checkpoint.
 
@@ -84,6 +121,8 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
         Name for the model (used for output folder and file naming).
     base_data_dir : str, optional
         Root directory of dataset and normalization files.
+    prediction_only : bool, optional
+        If True, run in prediction-only mode (no SXR ground truth required).
 
     Returns
     -------
@@ -107,12 +146,13 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     config = {
         'SolO': 'false',
         'Stereo': 'false',
+        'prediction_only': 'true' if prediction_only else 'false',
         'base_data_dir': base_data_dir,
         'data': {
             'aia_dir': f"{base_data_dir}/AIA/",
             'checkpoint_path': checkpoint_path,
-            'sxr_dir': f"{base_data_dir}/SXR/",
-            'sxr_norm_path': f"{base_data_dir}/SXR/normalized_sxr.npy"
+            'sxr_dir': f"{base_data_dir}/SXR/" if not prediction_only else "",
+            'sxr_norm_path': f"{base_data_dir}/SXR/normalized_sxr.npy" if not prediction_only else ""
         },
         'model': model_type,
         'wavelengths': [94, 131, 171, 193, 211, 304],
@@ -173,7 +213,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     return config, output_dir
 
 
-def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP"):
+def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP", prediction_only=False):
     """
     Create evaluation configuration for computing metrics and visualizations.
 
@@ -185,6 +225,8 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
         Path to output directory containing prediction results.
     base_data_dir : str, optional
         Base dataset directory containing AIA and SXR test data.
+    prediction_only : bool, optional
+        If True, create config for prediction-only mode (no ground truth evaluation).
 
     Returns
     -------
@@ -194,6 +236,7 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
     config = {
         'base_data_dir': base_data_dir,
         'output_base_dir': f"{base_data_dir}/solar_flare_comparison_results",
+        'prediction_only': prediction_only,
         'data': {
             'aia_dir': f"{base_data_dir}/AIA/test/",
             'weight_path': f"{output_dir}/weights"
@@ -204,7 +247,7 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
         },
         'evaluation': {
             'output_dir': output_dir,
-            'sxr_cutoff': 1e-9
+            'sxr_cutoff': 1e-9 if not prediction_only else None
         },
         'time_range': {
             'start_time': '2023-08-08T20:00:00',
@@ -308,6 +351,7 @@ def main():
     parser.add_argument('-base_data_dir', type=str, default='/mnt/data/NO-OVERLAP', help='Base data directory')
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
+    parser.add_argument('-prediction_only', action='store_true', help='Force prediction-only mode (no SXR ground truth)')
     
     args = parser.parse_args()
     
@@ -333,9 +377,23 @@ def main():
     print(f"Using checkpoint: {checkpoint_path}")
     print(f"Model name: {args.model_name}")
     
+    # Check SXR data availability and determine if we should use prediction-only mode
+    prediction_only_mode = args.prediction_only
+    
+    if not prediction_only_mode:
+        print("Checking SXR data availability...")
+        sxr_available = check_sxr_data_availability(args.base_data_dir)
+        if not sxr_available:
+            print("⚠️  SXR data not available. Switching to prediction-only mode.")
+            prediction_only_mode = True
+        else:
+            print("✅ SXR data found. Running with ground truth evaluation.")
+    else:
+        print("🔮 Running in prediction-only mode (as requested).")
+    
     # Create configs
-    inference_config, output_dir = create_inference_config(checkpoint_path, args.model_name, args.base_data_dir)
-    evaluation_config = create_evaluation_config(args.model_name, output_dir, args.base_data_dir)
+    inference_config, output_dir = create_inference_config(checkpoint_path, args.model_name, args.base_data_dir, prediction_only_mode)
+    evaluation_config = create_evaluation_config(args.model_name, output_dir, args.base_data_dir, prediction_only_mode)
     
     # Save configs
     inference_config_path = f"/tmp/inference_config_{args.model_name}.yaml"
@@ -362,14 +420,21 @@ def main():
     
     # Run evaluation
     if not args.skip_evaluation:
-        if not run_evaluation(evaluation_config_path):
-            print("Evaluation failed. Stopping.")
-            sys.exit(1)
+        if prediction_only_mode:
+            print("Skipping evaluation (prediction-only mode - no ground truth available)")
+        else:
+            if not run_evaluation(evaluation_config_path):
+                print("Evaluation failed. Stopping.")
+                sys.exit(1)
     else:
         print("Skipping evaluation...")
     
     print(f"\n✅ Complete! Results saved to: {output_dir}")
-    print(f"📊 Check the plots and metrics in: {output_dir}")
+    if prediction_only_mode:
+        print(f"🔮 Prediction-only mode: No ground truth evaluation performed")
+        print(f"📊 Check the prediction results in: {output_dir}")
+    else:
+        print(f"📊 Check the plots and metrics in: {output_dir}")
 
 
 if __name__ == '__main__':
