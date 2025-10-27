@@ -274,9 +274,57 @@ class AttentionMapCallback(Callback):
             img_display = (img_np[:, :, 0] + 1) / 2
             img_display = np.stack([img_display] * 3, axis=2)
 
-        # Visualization layout logic (unchanged)
-        # [The plotting logic remains as-is from the original script]
-        # Produces multiple subplots showing attention patterns and overlayed maps.
+        # Create the figure and subplots
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f'Attention Visualization - Epoch {epoch}, Sample {sample_idx}', fontsize=16)
+        
+        # Plot 1: Original image
+        axes[0, 0].imshow(img_display)
+        axes[0, 0].set_title('Original Image')
+        axes[0, 0].axis('off')
+        
+        # Plot 2: Attention map
+        im1 = axes[0, 1].imshow(attention_map, cmap='hot', interpolation='nearest')
+        axes[0, 1].set_title('Attention Map')
+        axes[0, 1].axis('off')
+        plt.colorbar(im1, ax=axes[0, 1])
+        
+        # Plot 3: Overlay
+        axes[0, 2].imshow(img_display)
+        axes[0, 2].imshow(attention_map, cmap='hot', alpha=0.6, interpolation='nearest')
+        axes[0, 2].set_title('Attention Overlay')
+        axes[0, 2].axis('off')
+        
+        # Plot 4: Center attention (if available)
+        if center_map is not None:
+            im2 = axes[1, 0].imshow(center_map, cmap='hot', interpolation='nearest')
+            axes[1, 0].set_title('Center Patch Attention')
+            axes[1, 0].axis('off')
+            plt.colorbar(im2, ax=axes[1, 0])
+        else:
+            axes[1, 0].text(0.5, 0.5, 'Center attention\nnot available', 
+                           ha='center', va='center', transform=axes[1, 0].transAxes)
+            axes[1, 0].set_title('Center Patch Attention')
+            axes[1, 0].axis('off')
+        
+        # Plot 5: Patch flux (if available)
+        if patch_flux is not None:
+            patch_flux_np = patch_flux.cpu().numpy().reshape(grid_h, grid_w)
+            im3 = axes[1, 1].imshow(patch_flux_np, cmap='viridis', interpolation='nearest')
+            axes[1, 1].set_title('Patch Flux')
+            axes[1, 1].axis('off')
+            plt.colorbar(im3, ax=axes[1, 1])
+        else:
+            axes[1, 1].text(0.5, 0.5, 'Patch flux\nnot available', 
+                           ha='center', va='center', transform=axes[1, 1].transAxes)
+            axes[1, 1].set_title('Patch Flux')
+            axes[1, 1].axis('off')
+        
+        # Plot 6: Attention statistics
+        axes[1, 2].hist(attention_map.flatten(), bins=50, alpha=0.7)
+        axes[1, 2].set_title('Attention Distribution')
+        axes[1, 2].set_xlabel('Attention Weight')
+        axes[1, 2].set_ylabel('Frequency')
 
         plt.tight_layout()
         return fig
