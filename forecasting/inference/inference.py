@@ -291,7 +291,6 @@ def load_model_from_config(config_data):
     """
     checkpoint_path = config_data['data']['checkpoint_path']
     model_type = config_data['model']
-    wavelengths = config_data.get('wavelengths', [94, 131, 171, 193, 211, 304])
 
     print(f"Loading {model_type} model...")
 
@@ -403,8 +402,8 @@ def main():
                                   sxr_dir=config_data['Stereo_data']['sxr_dir'],
                                   wavelengths=[171, 193, 211, 304], only_prediction=True)
     else:
-        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'],
-                                  sxr_dir=config_data['data']['sxr_dir'],
+        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir']+'/test/',
+                                  sxr_dir=config_data['data']['sxr_dir']+'/test/',
                                   wavelengths=config_data['wavelengths'],
                                   only_prediction=prediction_only)
 
