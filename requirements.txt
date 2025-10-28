@@ -16,3 +16,12 @@ opencv-python
 spicepy
 xitorch
 sympy
+numpy
+scipy
+PyYAML
+imageio
+tqdm
+seaborn
+xarray
+astropy
+Pillow

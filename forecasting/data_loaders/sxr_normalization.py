@@ -87,7 +87,7 @@ if __name__ == "__main__":
     - The resulting file `normalized_sxr.npy` will be saved in the same SXR directory.
     """
     # Update this path to your real data SXR directory
-    sxr_dir = "/mnt/data/PAPER_DATA_B/SXR/train"  # Replace with actual path
+    sxr_dir = "/mnt/data/PAPER_DATA_WITH_335/SXR/train"  # Replace with actual path
     sxr_norm = compute_sxr_norm(sxr_dir)
-    np.save("/mnt/data/PAPER_DATA_B/SXR/normalized_sxr.npy", sxr_norm)
+    np.save("/mnt/data/PAPER_DATA_WITH_335/SXR/normalized_sxr.npy", sxr_norm)
     # print(f"Saved SXR normalization to /mnt/data/ML-Ready-Data-No-Intensity-Cut/normalized_sxr")

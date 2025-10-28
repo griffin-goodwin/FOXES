@@ -36,11 +36,11 @@ def load_config():
     # Default configuration
     return {
         'alignment': {
-            'goes_data_dir': "/mnt/data/AUGUST/combined",
-            'aia_processed_dir': "/mnt/data/AUGUST/AIA_ITI",
-            'output_sxr_a_dir': "/mnt/data/AUGUST/GOES-SXR-A",
-            'output_sxr_b_dir': "/mnt/data/AUGUST/GOES-SXR-B",
-            'aia_missing_dir': "/mnt/data/AUGUST/AIA_ITI_MISSING"
+            'goes_data_dir': "/mnt/data/Checking_GOES/Combined",
+            'aia_processed_dir': "/mnt/data/SDO335ITI",
+            'output_sxr_a_dir': "/mnt/data/test/GOES-SXR-A",
+            'output_sxr_b_dir': "/mnt/data/test/GOES-SXR-B",
+            'aia_missing_dir': "/mnt/data/test/AIA_ITI_MISSING"
         },
         'processing': {
             'batch_size_multiplier': 4,
@@ -100,7 +100,9 @@ def load_and_prepare_goes_data(goes_data_dir):
             
             goes_df.set_index('time', inplace=True)
             goes_df.sort_index(inplace=True)  # Ensure sorted for faster lookups
-            
+            #Make sure quality flag requirement is in place:
+            goes_df = goes_df[goes_df['xrsb_flag']==0]
+
             goes_data_dict[g_number] = goes_df
             print(f"    Loaded {len(goes_df)} records from {goes_df.index.min()} to {goes_df.index.max()}")
         except Exception as e:
