@@ -142,11 +142,19 @@ class FluxContributionAnalyzer:
         if self.aia_path is None:
             return None
 
-        # Try different possible filename formats
-        possible_files = [
-            self.aia_path / f"{timestamp}.npy",
-            self.aia_path / f"{timestamp}.npz",
-        ]
+        # Try different possible filename formats and subdirectories
+        # Search in subdirectories (test, train, val) and root
+        possible_dirs = [self.aia_path]
+        for subdir in ['test', 'train', 'val']:
+            subdir_path = self.aia_path / subdir
+            if subdir_path.exists():
+                possible_dirs.append(subdir_path)
+        
+        possible_files = []
+        for aia_dir in possible_dirs:
+            possible_files.extend([
+                aia_dir / f"{timestamp}.npy"
+            ])
 
         for aia_file in possible_files:
             if aia_file.exists():
@@ -768,7 +776,7 @@ class FluxContributionAnalyzer:
             print(f"    Verified: No overlaps between {len(regions)} regions")
 
     def create_contour_movie(self, timestamps, auto_cleanup=True, fps=2, show_sxr_timeseries=True, 
-                           all_timestamps_for_tracking=None):
+                           all_timestamps_for_tracking=None, movie_filename=None):
         """
         Create a movie showing the evolution of contour plots over time with SXR time series
         
@@ -779,6 +787,7 @@ class FluxContributionAnalyzer:
             show_sxr_timeseries: Whether to show SXR time series plot
             all_timestamps_for_tracking: Full resolution timestamps for accurate region tracking
                                         (if None, uses timestamps parameter)
+            movie_filename: Custom filename for the movie (if None, uses default naming)
         """
         print(f"Creating contour movie with {len(timestamps)} frame timestamps...")
 
@@ -847,7 +856,11 @@ class FluxContributionAnalyzer:
         # Sort frame paths by timestamp to ensure correct order
         frame_paths.sort(key=lambda x: os.path.basename(x))
 
-        movie_path = os.path.join(self.output_dir, f"contour_evolution_{timestamps[0].split('T')[0]}.mp4")
+        # Use custom filename if provided, otherwise use default
+        if movie_filename:
+            movie_path = os.path.join(self.output_dir, movie_filename)
+        else:
+            movie_path = os.path.join(self.output_dir, f"contour_evolution_{timestamps[0].split('T')[0]}.mp4")
         # Use faster encoding settings: preset=faster, crf=23 for good quality at faster speed
         with imageio.get_writer(movie_path, fps=fps, codec='libx264', format='ffmpeg',
                                 pixelformat='yuv420p', 
@@ -1374,9 +1387,135 @@ def main():
             fps=movie_fps
         )
 
+    # Check if we should create simultaneous flare movies instead of full time period
+    create_simultaneous_movies = analyzer.output_config.get('create_simultaneous_flare_movies', False)
+    simultaneous_window_days = analyzer.output_config.get('simultaneous_flare_window_days', 1)
+    
     # Create contour evolution movie if requested (command line or config)
     create_contour_movie = args.create_contour_movie or analyzer.output_config.get('create_contour_movie', False)
-    if create_contour_movie and analyzer.time_period:
+    
+    # Handle simultaneous flare movies
+    if create_contour_movie and create_simultaneous_movies and len(simultaneous_flares) > 0:
+        print("\nCreating contour evolution movies for simultaneous flare events...")
+        
+        # Get movie parameters
+        movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
+        movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
+        
+        # Group simultaneous flares by temporal proximity to avoid creating multiple videos for the same event
+        # Events within window_days of each other are considered part of the same flare event
+        simultaneous_flares['datetime'] = pd.to_datetime(simultaneous_flares['timestamp'])
+        simultaneous_flares = simultaneous_flares.sort_values('datetime')
+        
+        # Cluster timestamps that are within window_days of each other
+        # This groups simultaneous flare detections that occur within the same temporal window
+        flare_clusters = []
+        used_indices = set()
+        
+        for idx, row in simultaneous_flares.iterrows():
+            if idx in used_indices:
+                continue
+            
+            # Start a new cluster with this timestamp
+            cluster_timestamps = [row['timestamp']]
+            cluster_datetimes = [row['datetime']]
+            used_indices.add(idx)
+            
+            # Find all timestamps within window_days of this one
+            cluster_start = row['datetime']
+            cluster_end = cluster_start + pd.Timedelta(days=simultaneous_window_days)
+            
+            # Keep expanding the cluster to include events within window_days of any cluster member
+            changed = True
+            while changed:
+                changed = False
+                for idx2, row2 in simultaneous_flares.iterrows():
+                    if idx2 in used_indices:
+                        continue
+                    # Add if within window_days of any member of the current cluster
+                    for dt in cluster_datetimes:
+                        if abs((row2['datetime'] - dt).total_seconds()) <= simultaneous_window_days * 24 * 3600:
+                            cluster_timestamps.append(row2['timestamp'])
+                            cluster_datetimes.append(row2['datetime'])
+                            used_indices.add(idx2)
+                            changed = True
+                            break
+            
+            # Use the median timestamp as the center of the cluster
+            cluster_center = pd.Series(cluster_datetimes).median()
+            flare_clusters.append({
+                'timestamps': cluster_timestamps,
+                'center_timestamp': cluster_center,
+                'num_events': len(cluster_timestamps)
+            })
+        
+        print(f"Grouped {len(simultaneous_flares)} events into {len(flare_clusters)} distinct flare periods")
+        
+        # Create a movie for each flare cluster
+        for event_idx, cluster in enumerate(flare_clusters):
+            # Use the center timestamp as the reference point for the movie
+            center_timestamp = cluster['center_timestamp']
+            center_str = center_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
+            
+            # Define time window around the center
+            window_start = (center_timestamp - pd.Timedelta(days=simultaneous_window_days)).strftime('%Y-%m-%dT%H:%M:%S')
+            window_end = (center_timestamp + pd.Timedelta(days=simultaneous_window_days)).strftime('%Y-%m-%dT%H:%M:%S')
+            
+            print(f"\n  Movie {event_idx + 1}/{len(flare_clusters)}: Flare period centered at {center_str}")
+            print(f"    Cluster contains {cluster['num_events']} simultaneous flare events")
+            print(f"    Time window: {window_start} to {window_end}")
+            
+            # Get timestamps within the window
+            start_time = pd.to_datetime(window_start)
+            end_time = pd.to_datetime(window_end)
+            
+            available_timestamps = analyzer.predictions_df[
+                (analyzer.predictions_df['datetime'] >= start_time) & 
+                (analyzer.predictions_df['datetime'] <= end_time)
+            ]['timestamp'].tolist()
+            
+            if len(available_timestamps) == 0:
+                print(f"    No data found in time window, skipping...")
+                continue
+            
+            # Keep ALL timestamps for accurate region tracking
+            all_timestamps_for_tracking = available_timestamps
+            
+            # Subsample timestamps for frame generation
+            available_datetimes = pd.to_datetime(available_timestamps)
+            filtered_timestamps = []
+            last_time = None
+            for i, dt in enumerate(available_datetimes):
+                if last_time is None or (dt - last_time).total_seconds() >= movie_interval_seconds:
+                    filtered_timestamps.append(available_timestamps[i])
+                    last_time = dt
+            
+            print(f"    Found {len(available_timestamps)} timestamps, generating {len(filtered_timestamps)} frames")
+            print(f"    Movie will be {len(filtered_timestamps)/movie_fps:.1f} seconds long at {movie_fps} FPS")
+            
+            # Set output directory for movie
+            analyzer.output_dir = str(output_dir)
+            
+            # Create the movie with a specific filename
+            show_sxr = args.show_sxr_timeseries or analyzer.output_config.get('show_sxr_timeseries', False)
+            
+            # Use center timestamp in filename, replacing colons and spaces for filesystem safety
+            safe_timestamp = center_str.replace(':', '-').replace(' ', '_')
+            movie_path = analyzer.create_contour_movie(
+                timestamps=filtered_timestamps,
+                auto_cleanup=True,
+                fps=movie_fps,
+                show_sxr_timeseries=show_sxr,
+                all_timestamps_for_tracking=all_timestamps_for_tracking,
+                movie_filename=f'simultaneous_flare_{event_idx + 1}_{safe_timestamp}.mp4'
+            )
+            
+            if movie_path:
+                print(f"    ✅ Contour movie created: {movie_path}")
+        
+        print(f"\n✅ Created {len(flare_clusters)} simultaneous flare movies")
+    
+    elif create_contour_movie and analyzer.time_period:
         print("\nCreating contour evolution movie...")
         # Generate timestamps for the time period
         start_time = pd.to_datetime(analyzer.time_period['start_time'])

@@ -155,35 +155,27 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'sxr_norm_path': f"{base_data_dir}/SXR/normalized_sxr.npy" if not prediction_only else ""
         },
         'model': model_type,
-        'wavelengths': [94, 131, 171, 193, 211, 304],
+        'wavelengths': [94, 131, 171, 193, 211, 304, 335],
         'mc': {
             'active': 'false',
             'runs': 5
         },
         'model_params': {
-            'batch_size': 16,
+            'batch_size': 4,
             'input_size': 512,
             'no_weights': False,
-            'patch_size': 16
+            'patch_size': 8
         },
         'vit_custom': {
-            'embed_dim': 512,
+            'embed_dim': 256,
             'hidden_dim': 512,
             'num_channels': 6,
             'num_classes': 1,
-            'patch_size': 16,
-            'num_patches': 1024,
+            'patch_size': 8,
+            'num_patches': 4096,
             'num_heads': 8,
             'num_layers': 6,
             'dropout': 0.1
-        },
-        'megsai': {
-            'cnn_model': 'updated',
-            'cnn_dp': 0.2,
-            'weight_decay': 1e-5,
-            'cosine_restart_T0': 50,
-            'cosine_restart_Tmult': 2,
-            'cosine_eta_min': 1e-7
         },
         'output_path': f"{output_dir}/{model_name}_predictions.csv",
         'weight_path': f"{output_dir}/weights"
@@ -193,22 +185,6 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     if model_type in ['vitpatch', 'vitlocal']:
         config['flux_path'] = f"{output_dir}/flux/"
     
-    # Add model-specific configs
-    if model_type == 'fusion':
-        config['fusion'] = {
-            'scalar_branch': 'hybrid',
-            'lr': 0.0001,
-            'lambda_vit_to_target': 0.3,
-            'lambda_scalar_to_target': 0.1,
-            'learnable_gate': True,
-            'gate_init_bias': 5.0,
-            'scalar_kwargs': {
-                'd_input': 6,
-                'd_output': 1,
-                'cnn_model': 'updated',
-                'cnn_dp': 0.75
-            }
-        }
     
     return config, output_dir
 
