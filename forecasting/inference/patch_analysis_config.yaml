@@ -2,45 +2,45 @@
 # Configuration for flux contribution analysis and flare detection
 
 # Base directories
-base_data_dir: "/mnt/data/batch_results/vitlocal"
+base_data_dir: "/mnt/data/batch_results/local"
 # Data paths
 flux_path: "${base_data_dir}/flux" # Path to flux contribution files
-aia_path: "/mnt/data/AIA_processed/AIA"       # Path to AIA images
-output_path: "${base_data_dir}/vitlocal_predictions.csv"  # Path to predictions CSV
+aia_path: "/mnt/data/PAPER_DATA_WITH_335/AIA"       # Path to AIA images
+output_path: "${base_data_dir}/local_predictions.csv"  # Path to predictions CSV
 
 # Analysis parameters
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2024-11-06T00:00:00"
-    end_time: "2024-11-07T23:59:00"
+    start_time: "2023-08-01T00:00:00"
+    end_time: "2025-09-26T23:59:00"
   
   # Flare detection parameters (median + standard deviation approach)
   # Thresholds are calculated as: median + (std_multiplier * standard_deviation)
   # This approach is more robust to outliers than percentile-based thresholds
   flare_detection:
     # Main threshold parameters (median + std multiplier)
-    threshold_std_multiplier: .25    # Number of standard deviations above median for main threshold
+    threshold_std_multiplier: 1    # Number of standard deviations above median for main threshold
     
     # Dual-threshold parameters for stable region detection
-    core_threshold_std_multiplier: 0.5    # High confidence cores (strict threshold)
-    growth_threshold_std_multiplier: 0.25  # Permissive growth from cores
+    core_threshold_std_multiplier: 2    # High confidence cores (strict threshold)
+    growth_threshold_std_multiplier: .75  # Permissive growth from cores
     
     # Size constraints
-    min_core_patches: 1         # Minimum stable core size (prevents flickering)
-    min_patches: 4              # Minimum size after growth
-    max_patches: 40            # Maximum region size
+    min_core_patches: 4         # Minimum stable core size (prevents flickering)
+    min_patches: 8              # Minimum size after growth
+    max_patches: 300            # Maximum region size
     
     # Morphological operations for stability
-    closing_iterations: 1       # Fill small gaps (0 to disable)
-    dilation_iterations: 1     # Growth iterations from core (0 to disable)
+    closing_iterations: 3       # Fill small gaps (0 to disable)
+    dilation_iterations: 3     # Growth iterations from core (0 to disable)
     prevent_overlap: true       # Prevent regions from growing into each other
     
     # Temporal smoothing
     flux_smoothing_window: 2   # Moving average window (1 to disable)
     
     # Other parameters
-    simultaneous_flare_threshold: 0.000005  # Threshold for simultaneous flare detection
+    simultaneous_flare_threshold: 0.000001  # Threshold for simultaneous flare detection
   
   # Output configuration
   output:
@@ -50,12 +50,15 @@ analysis:
     visualization_threshold: 0.0    # Minimum prediction threshold for visualizations
     create_movie: false             # Create simple flux movie (legacy)
     create_contour_movie: true      # Create contour evolution movie
+    # Create movies centered around simultaneous flares instead of full time period
+    create_simultaneous_flare_movies: true  # If true, creates movies ±window_days around simultaneous flares
+    simultaneous_flare_window_days: 1       # Days before/after simultaneous flare events to include
     movie_fps: 15                   # Frames per second for movies
     movie_interval_seconds: 12       # Seconds between frames (lower = more frames, longer movie)
     show_sxr_timeseries: true       # Show SXR time series for tracked regions
     max_tracking_distance: 50       # Maximum distance for region tracking (pixels)
 
 # Grid and patch parameters
-grid_size: [32, 32]                 # Size of the flux contribution grid
-patch_size: 16                      # Size of each patch in pixels
+grid_size: [64, 64]                 # Size of the flux contribution grid
+patch_size: 8                      # Size of each patch in pixels
 input_size: 512                     # Input image size
