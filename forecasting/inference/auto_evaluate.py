@@ -161,18 +161,18 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'runs': 5
         },
         'model_params': {
-            'batch_size': 4,
+            'batch_size': 16,
             'input_size': 512,
             'no_weights': False,
-            'patch_size': 8
+            'patch_size': 16
         },
         'vit_custom': {
-            'embed_dim': 256,
+            'embed_dim': 512,
             'hidden_dim': 512,
             'num_channels': 6,
             'num_classes': 1,
-            'patch_size': 8,
-            'num_patches': 4096,
+            'patch_size': 16,
+            'num_patches': 1024,
             'num_heads': 8,
             'num_layers': 6,
             'dropout': 0.1
