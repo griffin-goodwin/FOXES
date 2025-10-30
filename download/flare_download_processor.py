@@ -320,7 +320,7 @@ if __name__ == '__main__':
                         help='End time for time span mode (YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--chunk_size', type=int, default=2000,
                         help='Number of days per chunk for processing (default: 180)')
-    parser.add_argument('--download_dir', type=str, default='/mnt/data/ADDED-FLARE',
+    parser.add_argument('--download_dir', type=str, default='/mnt/data/PAPER',
                         help='Directory to save downloaded data (default: /mnt/data)')
     parser.add_argument('--time_span_mode', action='store_true',
                         help='Use time span mode for 1-minute cadence downloads')
@@ -359,7 +359,7 @@ if __name__ == '__main__':
         # Initialize downloaders
         sxr_downloader = sxr.SXRDownloader(f"{download_dir}/GOES-timespan",
                                            f"{download_dir}/GOES-timespan/combined")
-        sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDO-AIA-timespan", email)
+        sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDOData", email)
         
         # Create a dummy flare event downloader (not used in time span mode)
         flare_event = None
@@ -387,9 +387,9 @@ if __name__ == '__main__':
                 current_end.strftime("%Y-%m-%d"),
                 event_type="FL",
                 GOESCls="M1.0",
-                directory=f"{download_dir}/SDO-AIA-flaring/FlareEvents"
+                directory=f"{download_dir}/SDOData/FlareEvents"
             )
-            sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDO-AIA-flaring", email)
+            sdo_downloader = sdo.SDODownloader(f"{download_dir}/SDOData", email)
 
             processor = FlareDownloadProcessor(flare_event, sdo_downloader, sxr_downloader,
                                                flaring_data=flaring_data, time_span_mode=False)

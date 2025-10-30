@@ -27,7 +27,7 @@ class SDODownloader:
         wavelengths (list): List of wavelengths to download.
         n_workers (int): Number of worker threads for parallel download.
     """
-    def __init__(self, base_path, email, wavelengths=['94', '131', '171', '193', '211', '304'], n_workers=4, cadence=60):
+    def __init__(self, base_path='/mnt/data/PAPER/SDOData', email=None, wavelengths=['94', '131', '171', '193', '211', '304'], n_workers=4, cadence=60):
         self.ds_path = base_path
         self.wavelengths = [str(wl) for wl in wavelengths]
         self.n_workers = n_workers
