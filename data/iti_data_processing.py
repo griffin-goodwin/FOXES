@@ -31,8 +31,8 @@ def load_config():
     return {
         'iti': {
             'wavelengths': [94, 131, 171, 193, 211, 304],
-            'input_folder': '/mnt/data/AUGUST/SDO-AIA-timespan',
-            'output_folder': '/mnt/data/AUGUST/AIA_ITI'
+            'input_folder': '/mnt/data/PAPER/SDOData',
+            'output_folder': '/mnt/data/PAPER/SDOITI'
         }
     }
 

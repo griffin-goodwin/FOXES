@@ -32,8 +32,8 @@ def load_config():
     return {
         'euv': {
             'wavelengths': [94, 131, 171, 193, 211, 304],
-            'input_folder': '/mnt/data/AUGUST/SDO-AIA-timespan',
-            'bad_files_dir': '/mnt/data/AUGUST/SDO-AIA_bad'
+            'input_folder': '/mnt/data/PAPER/SDOData',
+            'bad_files_dir': '/mnt/data/PAPER/SDO-AIA_bad'
         }
     }
 

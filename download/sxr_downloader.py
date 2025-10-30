@@ -10,7 +10,7 @@ import pandas as pd
 class SXRDownloader:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def __init__(self, save_dir: str = '/downloads/goes_data', concat_dir: str = '/downloads/goes_combined'):
+    def __init__(self, save_dir: str = '/mnt/data/PAPER/GOES-timespan', concat_dir: str = '/mnt/data/PAPER/GOES-timespan/combined'):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
         self.concat_dir = Path(concat_dir)
