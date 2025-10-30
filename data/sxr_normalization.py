@@ -2,6 +2,7 @@ import numpy as np
 from pathlib import Path
 import glob
 import os
+import argparse
 
 def compute_sxr_norm(sxr_dir):
     """
@@ -75,19 +76,36 @@ def compute_sxr_norm(sxr_dir):
 
 if __name__ == "__main__":
     """
-    Command-line entry point for computing and saving SXR normalization statistics.
+    Command-line interface for calculating and saving SXR normalization parameters.
 
-    This block allows the script to be executed directly. It:
-      1. Computes log10(SXR) normalization parameters (mean, std) for the dataset.
-      2. Saves the computed normalization values as a NumPy `.npy` file for later use.
+    When run as a script, this entry point:
+      1. Computes the normalization statistics (mean and standard deviation of log10(SXR flux))
+         for all valid `.npy` SXR files in the specified directory.
+      2. Saves the resulting (mean, std) tuple as a NumPy `.npy` file at the user-specified output path.
+
+    Usage
+    -----
+    python sxr_normalization.py --sxr_dir /path/to/SXR/dir --output_path /where/to/save/normalized_sxr.npy
+
+    Arguments
+    ---------
+    --sxr_dir : str
+        Path to the directory containing SXR `.npy` data files.
+    --output_path : str
+        Path where the computed normalization statistics (mean, std) will be saved.
 
     Notes
     -----
-    - Update the `sxr_dir` variable below to point to your actual SXR data directory.
-    - The resulting file `normalized_sxr.npy` will be saved in the same SXR directory.
+    - By default, --sxr_dir and --output_path are set for the paper dataset example.
+    - The output file `normalized_sxr.npy` contains a two-element array: [mean, std]
+    - These statistics are expected to be used for normalizing GOES SXR flux data in the ML pipeline.
     """
-    # Update this path to your real data SXR directory
-    sxr_dir = "/mnt/data/PAPER_DATA_WITH_335/SXR/train"  # Replace with actual path
-    sxr_norm = compute_sxr_norm(sxr_dir)
-    np.save("/mnt/data/PAPER_DATA_WITH_335/SXR/normalized_sxr.npy", sxr_norm)
-    # print(f"Saved SXR normalization to /mnt/data/ML-Ready-Data-No-Intensity-Cut/normalized_sxr")
+
+    parser = argparse.ArgumentParser(description='Compute and save SXR normalization statistics.')
+    parser.add_argument('--sxr_dir', type=str, default='/mnt/data/PAPER/SXR/train', help='Path to the SXR data directory.')
+    parser.add_argument('--output_path', type=str, default='/mnt/data/PAPER/SXR/normalized_sxr.npy', help='Path to save the normalized SXR data.')
+    args = parser.parse_args()
+
+    sxr_norm = compute_sxr_norm(args.sxr_dir)
+    np.save(args.output_path, sxr_norm)
+    print(f"Saved SXR normalization to {args.output_path}")
