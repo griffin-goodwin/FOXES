@@ -106,6 +106,10 @@ Project FOXES
 | **Solar TErrestrial RElations Observatory (STEREO/SECCHI)** <br> *[Howard, R. A., et al. (2008)](https://link.springer.com/article/10.1007/s11214-008-9341-4). Sun–Earth Connection Coronal and Heliospheric Investigation (SECCHI).* | The twin STEREO spacecraft (Ahead and Behind) carry the SECCHI instrument suite, which observes the solar corona and heliosphere in multiple wavelengths, providing stereoscopic views of CMEs and large-scale coronal structures. | STEREO/SECCHI EUV and coronagraph data were retrieved via [SunPy’s Fido](https://docs.sunpy.org/en/stable/guide/acquiring_data/fido.html) client through the [VSO](https://sdac.virtualsolar.org/cgi/search) backend. Datasets from the EUVI (EUV Imager) were accessed per spacecraft and wavelength, then temporally aligned and processed for use in heliospheric modeling. |
 | **Solar Orbiter (EUI – Extreme Ultraviolet Imager)** <br> *[Rochus, P., et al. (2020)](https://doi.org/10.1051/0004-6361/201936663e). The Solar Orbiter EUI instrument: The Extreme Ultraviolet Imager.*                            | The ESA–NASA Solar Orbiter mission carries the EUI instrument suite to image the solar atmosphere in the extreme ultraviolet at unprecedented spatial resolution and variable solar latitudes, enabling studies of small-scale heating and dynamic processes in the corona. | Solar Orbiter/EUI level-2 data products were accessed via the [ESA Solar Orbiter Archive (SOAR)](https://soar.esac.esa.int/soar/). Datasets were queried by observation date and wavelength, downloaded as FITS files, and preprocessed into standardized time series for integration with other solar observatories. |
 
+
+## Vision Transformer ML Workflow
+[![Screenshot-2025-10-29-at-10-58-17-PM.png](https://i.postimg.cc/RFPtv16h/Screenshot-2025-10-29-at-10-58-17-PM.png)](https://postimg.cc/2bZywZxN)
+
 ## Setup
 
 ### 1) Clone
