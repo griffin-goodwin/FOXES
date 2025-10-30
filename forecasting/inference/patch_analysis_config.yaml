@@ -2,11 +2,11 @@
 # Configuration for flux contribution analysis and flare detection
 
 # Base directories
-base_data_dir: "/mnt/data/batch_results/local"
+base_data_dir: "/mnt/data/batch_results/vitlocal"
 # Data paths
 flux_path: "${base_data_dir}/flux" # Path to flux contribution files
 aia_path: "/mnt/data/PAPER_DATA_WITH_335/AIA"       # Path to AIA images
-output_path: "${base_data_dir}/local_predictions.csv"  # Path to predictions CSV
+output_path: "${base_data_dir}/vitlocal_predictions.csv"  # Path to predictions CSV
 
 # Analysis parameters
 analysis:
@@ -59,6 +59,6 @@ analysis:
     max_tracking_distance: 50       # Maximum distance for region tracking (pixels)
 
 # Grid and patch parameters
-grid_size: [64, 64]                 # Size of the flux contribution grid
-patch_size: 8                      # Size of each patch in pixels
+grid_size: [32, 32]                 # Size of the flux contribution grid
+patch_size: 16                      # Size of each patch in pixels
 input_size: 512                     # Input image size
