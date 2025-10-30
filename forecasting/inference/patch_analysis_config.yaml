@@ -12,8 +12,8 @@ output_path: "${base_data_dir}/local_predictions.csv"  # Path to predictions CSV
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2023-08-01T00:00:00"
-    end_time: "2025-09-26T23:59:00"
+    start_time: "2024-03-23T00:00:00"
+    end_time: "2024-03-23T04:00:00"
   
   # Flare detection parameters (median + standard deviation approach)
   # Thresholds are calculated as: median + (std_multiplier * standard_deviation)
@@ -23,8 +23,8 @@ analysis:
     threshold_std_multiplier: 1    # Number of standard deviations above median for main threshold
     
     # Dual-threshold parameters for stable region detection
-    core_threshold_std_multiplier: 2    # High confidence cores (strict threshold)
-    growth_threshold_std_multiplier: .75  # Permissive growth from cores
+    core_threshold_std_multiplier: .25   # High confidence cores (strict threshold)
+    growth_threshold_std_multiplier: .15 # Permissive growth from cores
     
     # Size constraints
     min_core_patches: 4         # Minimum stable core size (prevents flickering)
@@ -51,7 +51,7 @@ analysis:
     create_movie: false             # Create simple flux movie (legacy)
     create_contour_movie: true      # Create contour evolution movie
     # Create movies centered around simultaneous flares instead of full time period
-    create_simultaneous_flare_movies: true  # If true, creates movies ±window_days around simultaneous flares
+    create_simultaneous_flare_movies: false  # If true, creates movies ±window_days around simultaneous flares
     simultaneous_flare_window_days: 1       # Days before/after simultaneous flare events to include
     movie_fps: 15                   # Frames per second for movies
     movie_interval_seconds: 12       # Seconds between frames (lower = more frames, longer movie)
