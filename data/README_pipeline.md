@@ -69,16 +69,16 @@ python align_data.py
 The pipeline uses the following default directories (configurable):
 
 **Input Directories:**
-- `/mnt/data/AUGUST/SDO-AIA-timespan/` - Raw AIA data
+- `/mnt/data/PAPER/SDOData/` - Raw AIA data
 - `/mnt/data/NEW-FLARE/combined/` - GOES CSV files
 - `/mnt/data/NEW-FLARE/AIA_processed/` - Processed AIA files
 
 **Output Directories:**
 - `/mnt/data/AUGUST/SDO-AIA_bad/` - Bad AIA files (from EUV cleaning)
-- `/mnt/data/AUGUST/AIA_ITI/` - Processed AIA data (from ITI processing)
+- `/mnt/data/PAPER/SDOITI/` - Processed AIA data (from ITI processing)
 - `/mnt/data/NEW-FLARE/GOES-SXR-A/` - GOES SXR-A data (from alignment)
 - `/mnt/data/NEW-FLARE/GOES-SXR-B/` - GOES SXR-B data (from alignment)
-- `/mnt/data/NEW-FLARE/AIA_ITI_MISSING/` - AIA files with missing GOES data
+- `/mnt/data/PAPER/AIA_ITI_MISSING/` - AIA files with missing GOES data
 
 ### Custom Configuration
 
