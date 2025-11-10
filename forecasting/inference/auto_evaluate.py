@@ -123,7 +123,6 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
         Root directory of dataset and normalization files.
     prediction_only : bool, optional
         If True, run in prediction-only mode (no SXR ground truth required).
-
     Returns
     -------
     tuple(dict, str)
@@ -161,20 +160,22 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'runs': 5
         },
         'model_params': {
-            'batch_size': 4,
+            'batch_size': 16,  # Match training batch size. If you get OOM errors, reduce this.
+                              # Note: Inference with attention weights uses more memory than training
             'input_size': 512,
-            'no_weights': False,
+            'no_weights': True,  # Set to False to save attention weights (uses more memory)
+            'no_flux': True,  # Set to False to save flux contributions (uses more memory)
             'patch_size': 8
         },
         'vit_custom': {
             'embed_dim': 256,
-            'hidden_dim': 512,
-            'num_channels': 6,
+            'hidden_dim': 1024,
+            'num_channels': 7,
             'num_classes': 1,
             'patch_size': 8,
             'num_patches': 4096,
             'num_heads': 8,
-            'num_layers': 6,
+            'num_layers': 8,
             'dropout': 0.1
         },
         'output_path': f"{output_dir}/{model_name}_predictions.csv",
@@ -267,10 +268,21 @@ def run_inference(inference_config_path):
         "-config", inference_config_path
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Use Popen with real-time output streaming to show progress bar
+    # Both stdout and stderr go to terminal so tqdm progress bar (which writes to stderr) is visible
+    process = subprocess.Popen(
+        cmd,
+        stdout=None,  # Let stdout go directly to terminal
+        stderr=subprocess.STDOUT,  # Merge stderr into stdout so progress bar is visible
+        text=True,
+        bufsize=1  # Line buffered for real-time output
+    )
     
-    if result.returncode != 0:
-        print(f"Error running inference: {result.stderr}")
+    # Wait for process to complete
+    process.wait()
+    
+    if process.returncode != 0:
+        print(f"Error: Inference process exited with code {process.returncode}")
         return False
     
     print("Inference completed successfully!")
@@ -299,10 +311,21 @@ def run_evaluation(evaluation_config_path):
         "-config", evaluation_config_path
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Use Popen with real-time output streaming
+    # Both stdout and stderr go to terminal for real-time output
+    process = subprocess.Popen(
+        cmd,
+        stdout=None,  # Let stdout go directly to terminal
+        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+        text=True,
+        bufsize=1  # Line buffered for real-time output
+    )
     
-    if result.returncode != 0:
-        print(f"Error running evaluation: {result.stderr}")
+    # Wait for process to complete
+    process.wait()
+    
+    if process.returncode != 0:
+        print(f"Error: Evaluation process exited with code {process.returncode}")
         return False
     
     print("Evaluation completed successfully!")

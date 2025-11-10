@@ -18,10 +18,10 @@ The workflow includes:
 import argparse
 import re
 import sys
+import gc
 import pandas as pd
 import torch
 import numpy as np
-from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +29,7 @@ import os
 import yaml
 import torch.nn.functional as F
 from torch.nn import HuberLoss
+from tqdm import tqdm
 
 # Add project root to Python path
 PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
@@ -38,37 +39,18 @@ from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
 import forecasting.models as models
 from forecasting.models.vit_patch_model_local import ViTLocal
 
-from forecasting.training.callback import unnormalize_sxr
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def has_attention_weights(model):
-    """Check if model supports attention weights"""
-    return hasattr(model, 'attention') or isinstance(model, ViTLocal)
-
-
-def is_localized_attention_model(model):
-    """
-    Check if the model uses localized attention (no CLS token).
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Model instance.
-
-    Returns
-    -------
-    bool
-        True if the model uses localized attention (ViTLocal).
-    """
-    return isinstance(model, ViTLocal)
 
 
 def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_data=None,
-                              save_weights=True, input_size=512, patch_size=16):
+                              save_weights=True, input_size=512, patch_size=16, save_flux=False):
     """
     Run batched inference on the dataset and yield predictions, attention maps, and flux data.
+    
+    Memory optimization: Processes attention weights immediately and moves to CPU to reduce GPU memory usage.
 
     Parameters
     ----------
@@ -88,6 +70,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
         Input image resolution.
     patch_size : int, default=16
         Patch size for ViT-based models.
+    save_flux : bool, default=False
+        Whether to save flux contributions.
 
     Yields
     ------
@@ -95,10 +79,14 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
         (predictions, ground_truth, attention_map, flux_map, global_index)
     """
     model.eval()
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=4, pin_memory=True)
-
-    supports_attention = has_attention_weights(model) and save_weights
-    save_flux = config_data and 'flux_path' in config_data
+    data_device = next(model.parameters()).device
+    
+    # Optimize DataLoader settings
+    num_workers = config_data.get('num_workers', 4) if config_data else 4
+    pin_memory = config_data.get('pin_memory', True) if config_data else True
+    
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, 
+                       pin_memory=pin_memory, shuffle=False)
     
     # Load SXR normalization only if path is provided and not empty
     sxr_norm = None
@@ -107,81 +95,125 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
         try:
             sxr_norm = np.load(config_data['data']['sxr_norm_path'])
         except FileNotFoundError:
-            print(f"Warning: SXR normalization file not found: {config_data['data']['sxr_norm_path']}")
             sxr_norm = None
 
+    # All models are ViTLocal with localized attention (no CLS token)
+    grid_h, grid_w = input_size // patch_size, input_size // patch_size
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             aia_imgs = batch[0]
             sxr = batch[1]
-            aia_imgs = aia_imgs.to(device, non_blocking=True)
+            aia_imgs = aia_imgs.to(data_device, non_blocking=True)
 
-            if supports_attention:
+            # Call model
+            # CRITICAL: ViTLocal defaults to return_attention=True, which uses massive memory
+            # Only compute attention weights if we're saving them (save_weights=True)
+            if save_weights:
                 pred = model(aia_imgs, return_attention=True)
             else:
-                pred = model(aia_imgs)
+                # Explicitly disable attention computation - this saves ~3GB per batch!
+                pred = model(aia_imgs, return_attention=False)
 
+            # Extract outputs (ViTLocal returns tuple of (predictions, attention_weights, flux_contributions) when return_attention=True)
             if isinstance(pred, tuple) and len(pred) >= 3:
                 predictions = pred[0]
-                weights = pred[1] if supports_attention else None
+                weights = pred[1] if save_weights else None
                 flux_contributions = pred[2] if save_flux else None
-            elif isinstance(pred, tuple) and len(pred) > 1:
+            elif isinstance(pred, tuple) and len(pred) == 2:
+                # When return_attention=False, returns (predictions, flux_contributions)
                 predictions = pred[0]
-                weights = pred[1] if supports_attention else None
-                flux_contributions = None
+                weights = None
+                flux_contributions = pred[1] if save_flux else None
             else:
                 predictions = pred
                 weights = None
                 flux_contributions = None
 
-            batch_weights = []
-            if supports_attention and weights is not None:
-                current_batch_size = predictions.shape[0]
-                is_localized = is_localized_attention_model(model)
-
-                for i in range(current_batch_size):
-                    try:
-                        last_layer_attention = weights[-1][i]
-                        if last_layer_attention is None:
-                            continue
-                        avg_attention = last_layer_attention.mean(dim=0)
-                        if torch.isnan(avg_attention).any():
-                            continue
-
-                        if is_localized:
-                            patch_attention = avg_attention.mean(dim=0).cpu()
-                        else:
-                            cls_attention = avg_attention[0, 1:].cpu()
-                            patch_attention = cls_attention
-
-                        grid_h, grid_w = input_size // patch_size, input_size // patch_size
-                        attention_map = patch_attention.reshape(grid_h, grid_w)
-                        batch_weights.append(attention_map.numpy())
-
-                    except Exception as e:
-                        grid_h, grid_w = input_size // patch_size, input_size // patch_size
-                        fallback_map = torch.zeros(grid_h * grid_w).reshape(grid_h, grid_w).numpy()
-                        batch_weights.append(fallback_map)
-
-                if config_data and 'weight_path' in config_data:
-                    save_batch_weights(batch_weights, batch_idx, batch_size, times, config_data['weight_path'])
-
-            batch_flux_contributions = []
-            if save_flux and flux_contributions is not None:
-                current_batch_size = predictions.shape[0]
-                for i in range(current_batch_size):
-                    flux_contrib = flux_contributions[i].cpu()
-                    grid_h, grid_w = input_size // patch_size, input_size // patch_size
-                    flux_contrib_map = flux_contrib.reshape(grid_h, grid_w)
-                    batch_flux_contributions.append(flux_contrib_map.numpy())
-                save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, config_data['flux_path'], sxr_norm)
-
             current_batch_size = predictions.shape[0]
+            batch_weights = []
+            batch_flux_contributions = []
+            
+            # Process each sample in the batch to reduce memory footprint
             for i in range(current_batch_size):
                 global_idx = batch_idx * batch_size + i
-                weight_data = batch_weights[i] if (supports_attention and batch_weights) else None
-                flux_data = batch_flux_contributions[i] if batch_flux_contributions else None
+                
+                # Process attention weights immediately and move to CPU to free GPU memory
+                weight_data = None
+                if save_weights and weights is not None:
+                    try:
+                        # Extract attention for this sample only (localized model - no CLS token)
+                        last_layer_attention = weights[-1][i].detach()  # Detach to allow garbage collection
+                        
+                        if last_layer_attention is not None:
+                            avg_attention = last_layer_attention.mean(dim=0)
+                            
+                            if not torch.isnan(avg_attention).any():
+                                # Move to CPU immediately to free GPU memory
+                                # Localized attention: average over heads, then over patches
+                                patch_attention = avg_attention.mean(dim=0).cpu()
+                                
+                                attention_map = patch_attention.reshape(grid_h, grid_w)
+                                weight_data = attention_map.numpy()
+                                
+                                # Clear GPU tensors
+                                del last_layer_attention, avg_attention, patch_attention
+                                
+                                # Save weight if needed
+                                if config_data and 'weight_path' in config_data and global_idx < len(times):
+                                    weight_dir = Path(config_data['weight_path'])
+                                    weight_dir.mkdir(parents=True, exist_ok=True)
+                                    weight_file = os.path.join(config_data['weight_path'], f"{times[global_idx]}")
+                                    np.savetxt(weight_file, weight_data, delimiter=",")
+                    except Exception as e:
+                        weight_data = np.zeros((grid_h, grid_w))
+                
+                # Process flux contributions
+                flux_data = None
+                if save_flux and flux_contributions is not None:
+                    try:
+                        flux_contrib = flux_contributions[i].detach().cpu()
+                        flux_contrib_map = flux_contrib.reshape(grid_h, grid_w)
+                        flux_data = flux_contrib_map.numpy()
+                        
+                        # Save flux if needed
+                        if config_data and 'flux_path' in config_data and global_idx < len(times):
+                            flux_dir = Path(config_data['flux_path'])
+                            flux_dir.mkdir(parents=True, exist_ok=True)
+                            flux_file = config_data['flux_path'] + f"{times[global_idx]}"
+                            np.savetxt(flux_file, flux_data, delimiter=",")
+                        
+                        del flux_contrib, flux_contrib_map
+                    except Exception:
+                        flux_data = None
+                
+                # Yield result immediately - don't accumulate in memory
                 yield (predictions[i].cpu().numpy(), sxr[i].cpu().numpy(), weight_data, flux_data, global_idx)
+            
+            # Clear all batch-level tensors from GPU memory immediately
+            # CRITICAL: Delete weights first as they're the biggest memory consumer
+            if weights is not None:
+                # Delete each layer's attention weights explicitly to free memory
+                for layer_idx, layer_weights in enumerate(weights):
+                    if isinstance(layer_weights, torch.Tensor):
+                        del layer_weights
+                    elif isinstance(layer_weights, (list, tuple)):
+                        for w in layer_weights:
+                            if isinstance(w, torch.Tensor):
+                                del w
+                del weights  # Delete the list itself
+                weights = None  # Ensure reference is cleared
+            
+            del predictions, aia_imgs
+            if flux_contributions is not None:
+                del flux_contributions
+                flux_contributions = None
+            
+            # Force garbage collection and clear GPU cache after EVERY batch
+            # This is critical - memory accumulates between batches otherwise
+            gc.collect()  # Force Python garbage collection
+            torch.cuda.empty_cache()  # Clear PyTorch's GPU cache
+            torch.cuda.synchronize()  # Wait for all operations to complete before clearing
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
@@ -212,9 +244,8 @@ def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_siz
 
     save_args = []
     for i, flux_contrib in enumerate(batch_flux_contributions):
-        global_idx = batch_idx * batch_size + i
-        if global_idx < len(times):
-            filepath = flux_path + f"{times[global_idx]}"
+        if i < len(times):
+            filepath = flux_path + f"{times[i]}"
             save_args.append((flux_contrib, filepath))
 
     with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
@@ -247,9 +278,8 @@ def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path)
 
     save_args = []
     for i, weight in enumerate(batch_weights):
-        global_idx = batch_idx * batch_size + i
-        if global_idx < len(times):
-            filepath = os.path.join(weight_path, f"{times[global_idx]}")
+        if i < len(times):
+            filepath = os.path.join(weight_path, f"{times[i]}")
             save_args.append((weight, filepath))
 
     with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
@@ -294,23 +324,31 @@ def load_model_from_config(config_data):
 
     print(f"Loading {model_type} model...")
 
+    # Use GPU 0 by default, or CPU if no GPU available
+    if torch.cuda.is_available():
+        load_device = torch.device('cuda:0')
+        print("Using GPU 0 for inference")
+    else:
+        load_device = torch.device('cpu')
+        print("Using CPU for inference")
+
     if ".ckpt" in checkpoint_path:
         # Lightning checkpoint format
-
         if model_type.lower() == 'vitlocal':
-            model = ViTLocal.load_from_checkpoint(checkpoint_path)
+            model = ViTLocal.load_from_checkpoint(checkpoint_path, map_location=load_device)
         else:
             try:
                 model_class = getattr(models, model_type)
-                model = model_class.load_from_checkpoint(checkpoint_path)
+                model = model_class.load_from_checkpoint(checkpoint_path, map_location=load_device)
             except AttributeError:
                 raise ValueError(f"Unknown model type: {model_type}.")
     else:
-        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
         model = state['model']
+        model = model.to(load_device)
 
     model.eval()
-    model.to(device)
+    
     return model
 
 
@@ -367,22 +405,28 @@ def main():
     patch_size = model_params.get('patch_size', 16)
     batch_size = model_params.get('batch_size', 10)
     no_weights = model_params.get('no_weights', False)
-
+    no_flux = model_params.get('no_flux', False)
+    
     print(f"Using parameters from config:")
-    print(f"  Input size: {input_size}\n  Patch size: {patch_size}\n  Batch size: {batch_size}\n  Skip weights: {no_weights}")
+    print(f"  Input size: {input_size}\n  Patch size: {patch_size}\n  Batch size: {batch_size}\n  Skip weights: {no_weights}\n  Skip flux: {no_flux}")
 
     model = load_model_from_config(config_data)
 
-    save_weights = not no_weights and has_attention_weights(model)
+    save_weights = not no_weights
     if no_weights:
         print("Skipping attention weight saving (no_weights=true).")
-    elif not has_attention_weights(model):
-        print(f"Model {type(model).__name__} does not support attention weights.")
+        print("  Note: This saves ~3GB per batch by not computing attention weights.")
     else:
         print("Will save attention weights during inference.")
+        print("\n💡 Memory note:")
+        print("   - Attention weights from all layers use significant GPU memory")
+        print("   - For ViT with 8 layers, 8 heads, 4096 patches: ~3GB+ per batch with attention!")
+        print("   - If you get OOM errors, set no_weights=true to skip attention saving\n")
 
-    save_flux = config_data and 'flux_path' in config_data
-    if save_flux:
+    save_flux = config_data and 'flux_path' in config_data and not no_flux
+    if no_flux:
+        print("Skipping flux contribution saving (no_flux=true).")
+    elif config_data and 'flux_path' in config_data:
         print("Will save flux contributions during inference.")
     else:
         print("No flux path specified.")
@@ -427,14 +471,22 @@ def main():
     print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
     print("Running inference...")
-    for prediction, sxr, weight, flux_data, idx in evaluate_model_on_dataset(
-            model, dataset, batch_size, times, config_data, save_weights, input_size, patch_size
-    ):
-        # Unnormalize prediction only if not ViTPatch / ViTLocal and not in prediction-only mode and sxr_norm is available
-        if not isinstance(model, ViTLocal) and not prediction_only and sxr_norm is not None:
-            pred = unnormalize_sxr(prediction, sxr_norm)
-        else:
-            pred = prediction
+    
+    # Create progress bar
+    pbar = tqdm(
+        evaluate_model_on_dataset(
+            model, dataset, batch_size, times, config_data,
+            save_weights, input_size, patch_size, save_flux
+        ),
+        total=total_samples,
+        desc="Inference",
+        unit="sample",
+        ncols=100
+    )
+    
+    for prediction, sxr, weight, flux_data, idx in pbar:
+        # ViTLocal models already return unnormalized predictions, so no need to unnormalize
+        pred = prediction
 
         predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
         
@@ -445,9 +497,9 @@ def main():
             ground.append(0.0)  # Dummy value for prediction-only mode
         
         timestamp.append(str(times[idx]))
-
-        if (idx + 1) % 50 == 0:
-            print(f"Processed {idx + 1}/{total_samples}")
+        
+        # Update progress bar
+        pbar.set_postfix({'sample': idx + 1, 'total': total_samples})
 
     output_df = pd.DataFrame({'timestamp': timestamp, 'predictions': predictions, 'groundtruth': ground})
     output_dir = Path(config_data['output_path']).parent
