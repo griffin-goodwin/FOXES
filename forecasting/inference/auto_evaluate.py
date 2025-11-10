@@ -172,8 +172,8 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'hidden_dim': 1024,
             'num_channels': 7,
             'num_classes': 1,
-            'patch_size': 8,
-            'num_patches': 4096,
+            'patch_size': 16,
+            'num_patches': 1024,
             'num_heads': 8,
             'num_layers': 8,
             'dropout': 0.1

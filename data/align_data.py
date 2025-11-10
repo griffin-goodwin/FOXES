@@ -36,11 +36,11 @@ def load_config():
     # Default configuration
     return {
         'alignment': {
-            'goes_data_dir': "/mnt/data/Checking_GOES/Combined",
-            'aia_processed_dir': "/mnt/data/SDO335ITI",
-            'output_sxr_a_dir': "/mnt/data/test/GOES-SXR-A",
-            'output_sxr_b_dir': "/mnt/data/test/GOES-SXR-B",
-            'aia_missing_dir': "/mnt/data/test/AIA_ITI_MISSING"
+            'goes_data_dir': "/mnt/data/PAPER/GOES-timespan/combined",
+            'aia_processed_dir': "/mnt/data/PAPER/SDOITI",
+            'output_sxr_a_dir': "/mnt/data/PAPER/GOES-SXR-A",
+            'output_sxr_b_dir': "/mnt/data/PAPER/GOES-SXR-B",
+            'aia_missing_dir': "/mnt/data/PAPER/AIA_ITI_MISSING"
         },
         'processing': {
             'batch_size_multiplier': 4,
