@@ -186,3 +186,6 @@ wandb/
 *.csv
 
 notebooks_tests/
+
+/.idea/
+/.vscode/
