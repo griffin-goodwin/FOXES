@@ -37,13 +37,8 @@ analysis:
     dilation_iterations: 3                 # Dilation for region growth
     prevent_overlap: true                  # Prevent overlapping regions
     
-    # Temporal filtering (applied to flux contributions before detection)
-    use_temporal_filter: false              # Enable temporal filtering to reduce flickering (disabled - try hysteresis first)
-    temporal_filter_window: 5               # Number of frames in temporal window
-    temporal_filter_method: median         # 'median' or 'mean' for filtering
-    
     # Temporal smoothing (applied to detected region flux values)
-    flux_smoothing_window: 5               # Window size for flux value smoothing
+    flux_smoothing_window: 1               # Window size for flux value smoothing
     
     # Hysteresis (appear/disappear thresholds to reduce flickering)
     use_hysteresis: true                   # Enable hysteresis for stable region tracking

@@ -193,61 +193,6 @@ class FluxContributionAnalyzer:
             return np.loadtxt(flux_file, delimiter=',')
         return None
 
-    def load_temporally_filtered_flux(self, timestamp, timestamps, window_size=3, method='median'):
-        """
-        Load flux contributions with temporal filtering to reduce noise and flickering.
-        
-        Args:
-            timestamp: Current timestamp
-            timestamps: List of all timestamps (sorted)
-            window_size: Number of frames to include in temporal window
-            method: 'median' or 'mean' for filtering
-        
-        Returns:
-            Filtered flux contribution array, or None if not available
-        """
-        if timestamp not in timestamps:
-            return None
-        
-        current_idx = timestamps.index(timestamp)
-        
-        # Get window of timestamps around current
-        half_window = window_size // 2
-        start_idx = max(0, current_idx - half_window)
-        end_idx = min(len(timestamps), current_idx + half_window + 1)
-        
-        window_timestamps = timestamps[start_idx:end_idx]
-        
-        # Load flux contributions for all timestamps in window
-        flux_stack = []
-        for ts in window_timestamps:
-            flux = self.load_flux_contributions(ts)
-            if flux is not None:
-                flux_stack.append(flux)
-        
-        if len(flux_stack) == 0:
-            return None
-        
-        # Ensure all have same shape
-        if len(flux_stack) > 1:
-            shapes = [f.shape for f in flux_stack]
-            if not all(s == shapes[0] for s in shapes):
-                # If shapes don't match, return current frame only
-                return self.load_flux_contributions(timestamp)
-        
-        # Apply temporal filtering
-        flux_array = np.stack(flux_stack, axis=0)
-        
-        if method == 'median':
-            filtered_flux = np.median(flux_array, axis=0)
-        elif method == 'mean':
-            filtered_flux = np.mean(flux_array, axis=0)
-        else:
-            # Default to median
-            filtered_flux = np.median(flux_array, axis=0)
-        
-        return filtered_flux
-
 
     def detect_flare_events(self, threshold_std_multiplier=None, min_patches=None, max_patches=None):
         """
@@ -508,36 +453,10 @@ class FluxContributionAnalyzer:
 
         return flare_events
 
-    def _detect_regions_worker(self, args):
-        """
-        Worker function for parallel region detection.
-        
-        Args can be either:
-        - (timestamp, timestamps) tuple for temporal filtering
-        - Just timestamp string for backward compatibility
-        """
+    def _detect_regions_worker(self, timestamp):
+        """Worker function for parallel region detection"""
         try:
-            # Handle both tuple and string inputs
-            if isinstance(args, tuple):
-                timestamp, timestamps = args
-            else:
-                timestamp = args
-                timestamps = None
-            
-            # Check if temporal filtering is enabled
-            use_temporal_filter = self.flare_config.get('use_temporal_filter', True)
-            temporal_window = self.flare_config.get('temporal_filter_window', 3)
-            temporal_method = self.flare_config.get('temporal_filter_method', 'median')
-            
-            if use_temporal_filter and timestamps is not None:
-                flux_contrib = self.load_temporally_filtered_flux(
-                    timestamp, timestamps, 
-                    window_size=temporal_window, 
-                    method=temporal_method
-                )
-            else:
-                flux_contrib = self.load_flux_contributions(timestamp)
-            
+            flux_contrib = self.load_flux_contributions(timestamp)
             if flux_contrib is None:
                 return (timestamp, None)
                 
@@ -582,16 +501,9 @@ class FluxContributionAnalyzer:
         num_processes = max(1, num_processes - 1)  # Leave one CPU free
         print(f"Using {num_processes} processes for region detection")
         
-        # Prepare arguments for worker (include timestamps for temporal filtering)
-        use_temporal_filter = self.flare_config.get('use_temporal_filter', True)
-        if use_temporal_filter:
-            worker_args = [(ts, timestamps) for ts in timestamps]
-        else:
-            worker_args = timestamps
-        
         with Pool(processes=num_processes) as pool:
             # Use imap for progress tracking
-            results = list(tqdm(pool.imap(self._detect_regions_worker, worker_args),
+            results = list(tqdm(pool.imap(self._detect_regions_worker, timestamps),
                                desc="Detecting regions", unit="timestamp", total=len(timestamps)))
         
         # Collect results
