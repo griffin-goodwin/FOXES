@@ -193,6 +193,61 @@ class FluxContributionAnalyzer:
             return np.loadtxt(flux_file, delimiter=',')
         return None
 
+    def load_temporally_filtered_flux(self, timestamp, timestamps, window_size=3, method='median'):
+        """
+        Load flux contributions with temporal filtering to reduce noise and flickering.
+        
+        Args:
+            timestamp: Current timestamp
+            timestamps: List of all timestamps (sorted)
+            window_size: Number of frames to include in temporal window
+            method: 'median' or 'mean' for filtering
+        
+        Returns:
+            Filtered flux contribution array, or None if not available
+        """
+        if timestamp not in timestamps:
+            return None
+        
+        current_idx = timestamps.index(timestamp)
+        
+        # Get window of timestamps around current
+        half_window = window_size // 2
+        start_idx = max(0, current_idx - half_window)
+        end_idx = min(len(timestamps), current_idx + half_window + 1)
+        
+        window_timestamps = timestamps[start_idx:end_idx]
+        
+        # Load flux contributions for all timestamps in window
+        flux_stack = []
+        for ts in window_timestamps:
+            flux = self.load_flux_contributions(ts)
+            if flux is not None:
+                flux_stack.append(flux)
+        
+        if len(flux_stack) == 0:
+            return None
+        
+        # Ensure all have same shape
+        if len(flux_stack) > 1:
+            shapes = [f.shape for f in flux_stack]
+            if not all(s == shapes[0] for s in shapes):
+                # If shapes don't match, return current frame only
+                return self.load_flux_contributions(timestamp)
+        
+        # Apply temporal filtering
+        flux_array = np.stack(flux_stack, axis=0)
+        
+        if method == 'median':
+            filtered_flux = np.median(flux_array, axis=0)
+        elif method == 'mean':
+            filtered_flux = np.mean(flux_array, axis=0)
+        else:
+            # Default to median
+            filtered_flux = np.median(flux_array, axis=0)
+        
+        return filtered_flux
+
 
     def detect_flare_events(self, threshold_std_multiplier=None, min_patches=None, max_patches=None):
         """
@@ -221,11 +276,13 @@ class FluxContributionAnalyzer:
             if flux_contrib is None:
                 continue
 
-            # Calculate threshold based on median and standard deviation
+            # Calculate threshold based on median and standard deviation (in log space)
             flux_values = flux_contrib.flatten()
-            median_flux = np.median(flux_values)
-            std_flux = np.std(flux_values)
-            threshold = median_flux + threshold_std_multiplier * std_flux
+            log_flux = np.log(flux_values)
+            median_log_flux = np.median(log_flux)
+            std_log_flux = np.std(log_flux)
+            # Convert back to linear space for threshold
+            threshold = np.exp(median_log_flux + threshold_std_multiplier * std_log_flux)
             # Find high contribution regions
             high_contrib_mask = flux_contrib > threshold
 
@@ -451,10 +508,36 @@ class FluxContributionAnalyzer:
 
         return flare_events
 
-    def _detect_regions_worker(self, timestamp):
-        """Worker function for parallel region detection"""
+    def _detect_regions_worker(self, args):
+        """
+        Worker function for parallel region detection.
+        
+        Args can be either:
+        - (timestamp, timestamps) tuple for temporal filtering
+        - Just timestamp string for backward compatibility
+        """
         try:
-            flux_contrib = self.load_flux_contributions(timestamp)
+            # Handle both tuple and string inputs
+            if isinstance(args, tuple):
+                timestamp, timestamps = args
+            else:
+                timestamp = args
+                timestamps = None
+            
+            # Check if temporal filtering is enabled
+            use_temporal_filter = self.flare_config.get('use_temporal_filter', True)
+            temporal_window = self.flare_config.get('temporal_filter_window', 3)
+            temporal_method = self.flare_config.get('temporal_filter_method', 'median')
+            
+            if use_temporal_filter and timestamps is not None:
+                flux_contrib = self.load_temporally_filtered_flux(
+                    timestamp, timestamps, 
+                    window_size=temporal_window, 
+                    method=temporal_method
+                )
+            else:
+                flux_contrib = self.load_flux_contributions(timestamp)
+            
             if flux_contrib is None:
                 return (timestamp, None)
                 
@@ -471,17 +554,21 @@ class FluxContributionAnalyzer:
             print(f"Error detecting regions for {timestamp}: {e}")
             return (timestamp, None)
 
-    def track_regions_over_time(self, timestamps, max_distance=50):
+    def track_regions_over_time(self, timestamps, max_distance=None):
         """
         Track regions across time using spatial proximity and temporal continuity.
         
         Args:
             timestamps: List of timestamps to analyze
             max_distance: Maximum distance (in pixels) to consider regions as the same
+                         (if None, uses config value)
             
         Returns:
             Dictionary mapping region_id to list of (timestamp, region_data) tuples
         """
+        if max_distance is None:
+            max_distance = self.output_config.get('max_tracking_distance', 75)
+        
         print("Tracking regions across time...")
         
         # Store all regions from all timestamps
@@ -495,9 +582,16 @@ class FluxContributionAnalyzer:
         num_processes = max(1, num_processes - 1)  # Leave one CPU free
         print(f"Using {num_processes} processes for region detection")
         
+        # Prepare arguments for worker (include timestamps for temporal filtering)
+        use_temporal_filter = self.flare_config.get('use_temporal_filter', True)
+        if use_temporal_filter:
+            worker_args = [(ts, timestamps) for ts in timestamps]
+        else:
+            worker_args = timestamps
+        
         with Pool(processes=num_processes) as pool:
             # Use imap for progress tracking
-            results = list(tqdm(pool.imap(self._detect_regions_worker, timestamps),
+            results = list(tqdm(pool.imap(self._detect_regions_worker, worker_args),
                                desc="Detecting regions", unit="timestamp", total=len(timestamps)))
         
         # Collect results
@@ -512,11 +606,11 @@ class FluxContributionAnalyzer:
         active_tracks = set()  # Track IDs that were updated in recent timestamps
         max_time_gap = 30 * 60  # 30 minutes in seconds
         
+        # Hysteresis: track previously detected regions even if they drop below appear threshold
+        use_hysteresis = self.flare_config.get('use_hysteresis', True)
+        hysteresis_max_gap_frames = self.flare_config.get('hysteresis_max_gap_frames', 2)
+        
         for i, timestamp in tqdm(enumerate(timestamps), desc="Tracking regions", unit="timestamp", total=len(timestamps)):
-            if timestamp not in all_regions:
-                continue
-                
-            current_regions = all_regions[timestamp]
             current_time = pd.to_datetime(timestamp)
             
             # Filter active tracks based on temporal proximity
@@ -528,44 +622,114 @@ class FluxContributionAnalyzer:
                     if time_diff <= max_time_gap:
                         recently_active_tracks.add(track_id)
             
-            for region in current_regions:
-                # Create a copy to avoid mutating the original
-                region_copy = region.copy()
+            # Track which regions were matched to existing tracks (to avoid duplicate hysteresis)
+            matched_track_ids = set()
+            
+            if timestamp in all_regions:
+                current_regions = all_regions[timestamp]
                 
-                # Try to match with existing tracks (only check recently active ones first)
-                best_track_id = None
-                best_distance = float('inf')
-                
-                # First, check recently active tracks (much faster)
-                for track_id in recently_active_tracks:
-                    if not region_tracks[track_id]:
-                        continue
+                for region in current_regions:
+                    # Create a copy to avoid mutating the original
+                    region_copy = region.copy()
+                    
+                    # Try to match with existing tracks (only check recently active ones first)
+                    best_track_id = None
+                    best_distance = float('inf')
+                    
+                    # First, check recently active tracks (much faster)
+                    for track_id in recently_active_tracks:
+                        if not region_tracks[track_id]:
+                            continue
+                            
+                        # Get the most recent region in this track
+                        last_timestamp, last_region = region_tracks[track_id][-1]
                         
-                    # Get the most recent region in this track
-                    last_timestamp, last_region = region_tracks[track_id][-1]
+                        # Calculate distance between centroids
+                        distance = np.sqrt(
+                            (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
+                            (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
+                        )
+                        
+                        if distance < max_distance and distance < best_distance:
+                            best_distance = distance
+                            best_track_id = track_id
                     
-                    # Calculate distance between centroids
-                    distance = np.sqrt(
-                        (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
-                        (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
-                    )
+                    # Assign to existing track or create new one
+                    if best_track_id is not None:
+                        # Update the region ID to match the track ID for consistency
+                        region_copy['id'] = best_track_id
+                        region_tracks[best_track_id].append((timestamp, region_copy))
+                        active_tracks.add(best_track_id)
+                        matched_track_ids.add(best_track_id)  # Mark as matched
+                    else:
+                        # Create new track with consistent ID
+                        region_copy['id'] = next_track_id
+                        region_tracks[next_track_id] = [(timestamp, region_copy)]
+                        active_tracks.add(next_track_id)
+                        next_track_id += 1
+            
+            # Hysteresis: Try to keep previously tracked regions alive even if not detected at appear threshold
+            # This allows regions to persist even if they briefly drop below appear threshold
+            if use_hysteresis:
+                # Check if any recently active tracks should be kept alive (hysteresis)
+                # Only check tracks that weren't already matched to a detected region
+                for track_id in list(recently_active_tracks):
+                    if track_id in matched_track_ids:
+                        continue  # Already matched to a detected region, skip hysteresis
                     
-                    if distance < max_distance and distance < best_distance:
-                        best_distance = distance
-                        best_track_id = track_id
-                
-                # Assign to existing track or create new one
-                if best_track_id is not None:
-                    # Update the region ID to match the track ID for consistency
-                    region_copy['id'] = best_track_id
-                    region_tracks[best_track_id].append((timestamp, region_copy))
-                    active_tracks.add(best_track_id)
-                else:
-                    # Create new track with consistent ID
-                    region_copy['id'] = next_track_id
-                    region_tracks[next_track_id] = [(timestamp, region_copy)]
-                    active_tracks.add(next_track_id)
-                    next_track_id += 1
+                    if track_id in region_tracks and region_tracks[track_id]:
+                        last_timestamp, last_region = region_tracks[track_id][-1]
+                        # Check if gap is small enough for hysteresis
+                        time_diff = abs((current_time - pd.to_datetime(last_timestamp)).total_seconds())
+                        frame_gap = (current_time - pd.to_datetime(last_timestamp)).total_seconds() / 12.0  # Assuming ~12s per frame
+                        
+                        if frame_gap <= hysteresis_max_gap_frames:
+                            # Try to re-detect region at disappear threshold for hysteresis
+                            flux_contrib = self.load_flux_contributions(timestamp)
+                            if flux_contrib is not None:
+                                # Use disappear threshold to check if region still exists
+                                flux_values = flux_contrib.flatten()
+                                log_flux = np.log(flux_values)
+                                median_log_flux = np.median(log_flux)
+                                std_log_flux = np.std(log_flux)
+                                
+                                disappear_std_multiplier = self.flare_config.get('disappear_threshold_std_multiplier', None)
+                                if disappear_std_multiplier is not None:
+                                    disappear_threshold = np.exp(median_log_flux + disappear_std_multiplier * std_log_flux)
+                                else:
+                                    # Use growth threshold as disappear threshold
+                                    growth_std_multiplier = self.flare_config.get('growth_threshold_std_multiplier', 1.5)
+                                    disappear_threshold = np.exp(median_log_flux + growth_std_multiplier * std_log_flux)
+                                
+                                # Check if region centroid area still has flux above disappear threshold
+                                centroid_x = int(last_region['centroid_img_x'] / self.patch_size)
+                                centroid_y = int(last_region['centroid_img_y'] / self.patch_size)
+                                
+                                # Check a small area around the centroid
+                                check_radius = 3
+                                y_min = max(0, centroid_y - check_radius)
+                                y_max = min(flux_contrib.shape[0], centroid_y + check_radius + 1)
+                                x_min = max(0, centroid_x - check_radius)
+                                x_max = min(flux_contrib.shape[1], centroid_x + check_radius + 1)
+                                
+                                if y_min < y_max and x_min < x_max:
+                                    local_flux = flux_contrib[y_min:y_max, x_min:x_max]
+                                    if np.any(local_flux > disappear_threshold):
+                                        # Region still exists at disappear threshold - keep it alive
+                                        region_copy = last_region.copy()
+                                        region_copy['id'] = track_id
+                                        # Update position slightly based on flux centroid in local area
+                                        coords = np.where(local_flux > disappear_threshold)
+                                        if len(coords[0]) > 0:
+                                            local_centroid_y = np.mean(coords[0]) + y_min
+                                            local_centroid_x = np.mean(coords[1]) + x_min
+                                            region_copy['centroid_patch_y'] = local_centroid_y
+                                            region_copy['centroid_patch_x'] = local_centroid_x
+                                            region_copy['centroid_img_y'] = local_centroid_y * self.patch_size + self.patch_size // 2
+                                            region_copy['centroid_img_x'] = local_centroid_x * self.patch_size + self.patch_size // 2
+                                        
+                                        region_tracks[track_id].append((timestamp, region_copy))
+                                        active_tracks.add(track_id)
         
         # Filter out tracks with only one region (no temporal continuity)
         region_tracks = {k: v for k, v in region_tracks.items() if len(v) > 1}
@@ -622,25 +786,56 @@ class FluxContributionAnalyzer:
         3. Morphological closing - fills small gaps for stability
         """
         # Get config values with new dual-threshold parameters
-        core_std_multiplier = self.flare_config.get('core_threshold_std_multiplier', 3.0)
-        growth_std_multiplier = self.flare_config.get('growth_threshold_std_multiplier', 2.0)
-        min_core_patches = self.flare_config.get('min_core_patches', 2)
-        min_patches = self.flare_config.get('min_patches', 3)
-        max_patches = self.flare_config.get('max_patches', 50)
-        closing_iterations = self.flare_config.get('closing_iterations', 1)
+        core_std_multiplier = self.flare_config.get('core_threshold_std_multiplier', 2.0)
+        growth_std_multiplier = self.flare_config.get('growth_threshold_std_multiplier', 1.5)
+        min_core_patches = self.flare_config.get('min_core_patches', 6)
+        min_patches = self.flare_config.get('min_patches', 20)
+        max_patches = self.flare_config.get('max_patches', 300)
+        closing_iterations = self.flare_config.get('closing_iterations', 5)
         dilation_iterations = self.flare_config.get('dilation_iterations', 3)
         prevent_overlap = self.flare_config.get('prevent_overlap', True)
+        
+        # Hysteresis thresholds (for appear/disappear behavior)
+        use_hysteresis = self.flare_config.get('use_hysteresis', True)
+        appear_std_multiplier = self.flare_config.get('appear_threshold_std_multiplier', None)
+        disappear_std_multiplier = self.flare_config.get('disappear_threshold_std_multiplier', None)
 
         # Stage 1: Find high-confidence cores (strict threshold)
+        # Calculate median and std in log space (more appropriate for flux data)
         flux_values = flux_contrib.flatten()
-        median_flux = np.median(flux_values)
-        std_flux = np.std(flux_values)
-        core_threshold = median_flux + core_std_multiplier * std_flux
-        core_mask = flux_contrib > core_threshold
+        log_flux = np.log(flux_values)
+        median_log_flux = np.median(log_flux)
+        std_log_flux = np.std(log_flux)
+        # Convert back to linear space for thresholds
+        # Core threshold (higher) - regions must exceed this to appear
+        core_threshold = np.exp(median_log_flux + core_std_multiplier * std_log_flux)
+        # Growth threshold (lower) - regions can grow to this extent
+        growth_threshold = np.exp(median_log_flux + growth_std_multiplier * std_log_flux)
+        
+        # Hysteresis thresholds (if enabled)
+        if use_hysteresis:
+            if appear_std_multiplier is not None:
+                appear_threshold = np.exp(median_log_flux + appear_std_multiplier * std_log_flux)
+            else:
+                # Default: use core threshold as appear threshold
+                appear_threshold = core_threshold
+            
+            if disappear_std_multiplier is not None:
+                disappear_threshold = np.exp(median_log_flux + disappear_std_multiplier * std_log_flux)
+            else:
+                # Default: use growth threshold as disappear threshold
+                disappear_threshold = growth_threshold
+        else:
+            appear_threshold = core_threshold
+            disappear_threshold = growth_threshold
+        
+        # Store thresholds for hysteresis logic (will be used in tracking)
+        # For now, use appear threshold for core detection
+        core_mask = flux_contrib > appear_threshold
         
         # Stage 2: Define growth region (more permissive threshold)
-        growth_threshold = median_flux + growth_std_multiplier * std_flux
-        growth_mask = flux_contrib > growth_threshold
+        # Use disappear threshold for growth (allows regions to persist)
+        growth_mask = flux_contrib > disappear_threshold
         
         # Apply morphological closing to growth mask to fill small gaps
         structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
