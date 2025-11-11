@@ -20,25 +20,36 @@ analysis:
     end_time: "2025-09-26T00:00:00"
   
   # Flare detection parameters
-  # Thresholds: median + (std_multiplier * standard_deviation)
+  # Thresholds: median + (std_multiplier * standard_deviation) - calculated in log space
   flare_detection:
-    # Threshold multipliers
+    # Threshold multipliers (in log space - more appropriate for flux data)
     threshold_std_multiplier: 1
-    core_threshold_std_multiplier: 0.25
-    growth_threshold_std_multiplier: 0.15
+    core_threshold_std_multiplier: 2.0      # Higher threshold for stable cores
+    growth_threshold_std_multiplier: 1.5   # Lower threshold for region growth
     
     # Size constraints
-    min_core_patches: 4
-    min_patches: 8
-    max_patches: 300
+    min_core_patches: 6                    # Minimum core size for stability
+    min_patches: 20                        # Minimum total region size
+    max_patches: 300                       # Maximum region size
     
     # Morphological operations
-    closing_iterations: 3
-    dilation_iterations: 3
-    prevent_overlap: true
+    closing_iterations: 5                  # More closing to fill gaps and reduce flickering
+    dilation_iterations: 3                 # Dilation for region growth
+    prevent_overlap: true                  # Prevent overlapping regions
     
-    # Temporal smoothing
-    flux_smoothing_window: 2
+    # Temporal filtering (applied to flux contributions before detection)
+    use_temporal_filter: false              # Enable temporal filtering to reduce flickering (disabled - try hysteresis first)
+    temporal_filter_window: 5               # Number of frames in temporal window
+    temporal_filter_method: median         # 'median' or 'mean' for filtering
+    
+    # Temporal smoothing (applied to detected region flux values)
+    flux_smoothing_window: 5               # Window size for flux value smoothing
+    
+    # Hysteresis (appear/disappear thresholds to reduce flickering)
+    use_hysteresis: true                   # Enable hysteresis for stable region tracking
+    appear_threshold_std_multiplier: 2.0    # Higher threshold - regions must exceed this to appear (defaults to core_threshold if not set)
+    disappear_threshold_std_multiplier: 1.2 # Lower threshold - regions disappear below this (defaults to growth_threshold if not set)
+    hysteresis_max_gap_frames: 10           # Maximum frames a region can be missing before disappearing
     
     # Simultaneous flare detection
     simultaneous_flare_threshold: 0.000005
@@ -55,4 +66,4 @@ analysis:
     movie_fps: 15
     movie_interval_seconds: 12
     show_sxr_timeseries: true
-    max_tracking_distance: 50
+    max_tracking_distance: 75  # Increased for better tracking across frames
