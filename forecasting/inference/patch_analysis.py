@@ -630,7 +630,8 @@ class FluxContributionAnalyzer:
                                         # Region still exists at disappear threshold - keep it alive
                                         region_copy = last_region.copy()
                                         region_copy['id'] = track_id
-                                        # Update position slightly based on flux centroid in local area
+                                        
+                                        # Update position and recalculate flux from current frame
                                         coords = np.where(local_flux > disappear_threshold)
                                         if len(coords[0]) > 0:
                                             local_centroid_y = np.mean(coords[0]) + y_min
@@ -639,6 +640,24 @@ class FluxContributionAnalyzer:
                                             region_copy['centroid_patch_x'] = local_centroid_x
                                             region_copy['centroid_img_y'] = local_centroid_y * self.patch_size + self.patch_size // 2
                                             region_copy['centroid_img_x'] = local_centroid_x * self.patch_size + self.patch_size // 2
+                                            
+                                            # Recalculate flux from current frame (not use old values)
+                                            # Use a slightly larger area around the centroid to get better flux estimate
+                                            check_radius_flux = 5  # Larger radius for flux calculation
+                                            flux_y_min = max(0, int(local_centroid_y) - check_radius_flux)
+                                            flux_y_max = min(flux_contrib.shape[0], int(local_centroid_y) + check_radius_flux + 1)
+                                            flux_x_min = max(0, int(local_centroid_x) - check_radius_flux)
+                                            flux_x_max = min(flux_contrib.shape[1], int(local_centroid_x) + check_radius_flux + 1)
+                                            
+                                            if flux_y_min < flux_y_max and flux_x_min < flux_x_max:
+                                                flux_area = flux_contrib[flux_y_min:flux_y_max, flux_x_min:flux_x_max]
+                                                flux_mask = flux_area > disappear_threshold
+                                                if np.any(flux_mask):
+                                                    region_flux_values = flux_area[flux_mask]
+                                                    region_copy['sum_flux'] = np.sum(region_flux_values)
+                                                    region_copy['max_flux'] = np.max(region_flux_values)
+                                                    region_copy['size'] = np.sum(flux_mask)
+                                                    region_copy['prediction'] = region_copy['sum_flux']
                                         
                                         region_tracks[track_id].append((timestamp, region_copy))
                                         active_tracks.add(track_id)
@@ -658,23 +677,31 @@ class FluxContributionAnalyzer:
     
     def _apply_temporal_smoothing(self, region_tracks, window_size=3):
         """
-        Apply temporal smoothing to region flux values to reduce unrealistic jumps.
+        Apply temporal smoothing to region flux values and size to reduce unrealistic jumps.
         
         Args:
             region_tracks: Dictionary of track_id -> list of (timestamp, region_data)
             window_size: Size of moving average window
             
         Returns:
-            Updated region_tracks with smoothed flux values
+            Updated region_tracks with smoothed flux values and sizes
         """
         print(f"Applying temporal smoothing with window size {window_size}...")
         
         for track_id, track_history in region_tracks.items():
-            # Extract flux values
+            # Extract flux values and sizes
             flux_values = [r['sum_flux'] for t, r in track_history]
+            sizes = [r.get('size', 0) for t, r in track_history]
             
-            # Apply moving average
+            # Apply moving average to flux
             smoothed_flux = pd.Series(flux_values).rolling(
+                window=window_size,
+                center=True,
+                min_periods=1
+            ).mean().tolist()
+            
+            # Apply moving average to size (to reduce fluctuations)
+            smoothed_sizes = pd.Series(sizes).rolling(
                 window=window_size,
                 center=True,
                 min_periods=1
@@ -683,7 +710,9 @@ class FluxContributionAnalyzer:
             # Update regions with smoothed values
             for i, (t, r) in enumerate(track_history):
                 r['sum_flux_original'] = r['sum_flux']  # Keep original
+                r['size_original'] = r.get('size', 0)  # Keep original size
                 r['sum_flux'] = smoothed_flux[i]  # Use smoothed for display
+                r['size'] = int(round(smoothed_sizes[i]))  # Use smoothed size (rounded to integer)
                 r['prediction'] = smoothed_flux[i]  # Update prediction too
         
         return region_tracks
