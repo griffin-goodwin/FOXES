@@ -29,16 +29,16 @@ analysis:
     
     # Size constraints
     min_core_patches: 6                    # Minimum core size for stability
-    min_patches: 20                        # Minimum total region size
+    min_patches: 12                        # Minimum total region size
     max_patches: 300                       # Maximum region size
     
     # Morphological operations
     closing_iterations: 5                  # More closing to fill gaps and reduce flickering
-    dilation_iterations: 3                 # Dilation for region growth
+    dilation_iterations: 1                 # Dilation for region growth
     prevent_overlap: true                  # Prevent overlapping regions
     
-    # Temporal smoothing (applied to detected region flux values)
-    flux_smoothing_window: 1               # Window size for flux value smoothing
+    # Temporal smoothing (applied to detected region flux values and sizes)
+    flux_smoothing_window: 3               # Window size for flux value and size smoothing
     
     # Hysteresis (appear/disappear thresholds to reduce flickering)
     use_hysteresis: true                   # Enable hysteresis for stable region tracking
@@ -47,7 +47,7 @@ analysis:
     hysteresis_max_gap_frames: 10           # Maximum frames a region can be missing before disappearing
     
     # Simultaneous flare detection
-    simultaneous_flare_threshold: 0.000005
+    simultaneous_flare_threshold: 0.000001
     sequence_window_hours: 1.0  # Time window for clustering groups into flare sequences
   
   # Output configuration
