@@ -63,7 +63,7 @@ warnings.filterwarnings('ignore')
 
 
 class FluxContributionAnalyzer:
-    def __init__(self, config_path=None, flux_path=None, predictions_csv=None, aia_path=None, attention_path=None,
+    def __init__(self, config_path=None, flux_path=None, predictions_csv=None, aia_path=None,
                  grid_size=(32, 32), patch_size=16, input_size=512, time_period=None):
         """
         Initialize the flux contribution analyzer
@@ -73,7 +73,6 @@ class FluxContributionAnalyzer:
             flux_path: Path to directory containing flux contribution files
             predictions_csv: Path to CSV file with predictions and timestamps
             aia_path: Path to directory containing AIA numpy files
-            attention_path: Optional path to attention weights directory
             grid_size: Size of the flux contribution grid
             patch_size: Size of each patch in pixels
             input_size: Input image size
@@ -110,7 +109,6 @@ class FluxContributionAnalyzer:
         
         self.flux_path = Path(flux_path)
         self.aia_path = Path(aia_path) if aia_path else None
-        self.attention_path = Path(attention_path) if attention_path else None
         self.predictions_df = pd.read_csv(predictions_csv)
         self.grid_size = grid_size
         self.patch_size = patch_size
@@ -196,12 +194,6 @@ class FluxContributionAnalyzer:
         return None
 
 
-    def resize_flux_to_image_size(self, flux_contrib):
-        """Resize flux contribution map from patch grid to full image resolution"""
-        # Use bicubic interpolation to smoothly upscale flux contributions
-        return cv2.resize(flux_contrib, (self.input_size, self.input_size),
-                          interpolation=cv2.INTER_CUBIC)
-
     def detect_flare_events(self, threshold_std_multiplier=None, min_patches=None, max_patches=None):
         """
         Detect potential flare events based on flux contribution patterns
@@ -217,7 +209,7 @@ class FluxContributionAnalyzer:
         if min_patches is None:
             min_patches = self.flare_config.get('min_patches', 1)
         if max_patches is None:
-            max_patches = self.flare_config.get('max_patches', 25)
+            max_patches = self.flare_config.get('max_patches', 300)
         flare_events = []
 
         print("Analyzing flux contributions for flare detection...")
@@ -237,11 +229,6 @@ class FluxContributionAnalyzer:
             # Find high contribution regions
             high_contrib_mask = flux_contrib > threshold
 
-            # Use connected components to find flare regions
-            # structure_4 = np.array([[0, 1, 0],
-            #                         [1, 1, 1],
-            #                         [0, 1, 0]])
-
             # 8-connectivity: patches connected by edges or corners
             structure_8 = np.array([[1, 1, 1],
                                     [1, 1, 1],
@@ -259,7 +246,6 @@ class FluxContributionAnalyzer:
                     region_flux = flux_contrib[region_mask]
                     max_flux = np.max(region_flux)
                     mean_flux = np.mean(region_flux)
-                    #calculate sum
                     sum_flux = np.sum(region_flux)
 
                     # Get region centroid
@@ -290,16 +276,18 @@ class FluxContributionAnalyzer:
         print(f"Detected {len(flare_events)} potential flare events")
         return self.flare_events_df
 
-    def detect_simultaneous_flares(self, threshold=1e-5):
+    def detect_simultaneous_flares(self, threshold=1e-5, sequence_window_hours=1.0):
         """
         Detect simultaneous flaring events - multiple distinct regions within the same flux prediction
-        where each region has a sum of flux above the threshold
+        where each region has a sum of flux above the threshold. Groups are then clustered into
+        flare sequences if they occur within ±sequence_window_hours of each other.
         
         Args:
             threshold: Sum of flux threshold for considering a region as a flare
+            sequence_window_hours: Time window in hours for clustering groups into sequences (default: 1.0)
         
         Returns:
-            DataFrame with simultaneous flare events
+            DataFrame with simultaneous flare events, including group_id and sequence_id
         """
         if not hasattr(self, 'flare_events_df') or len(self.flare_events_df) == 0:
             print("Please run detect_flare_events() first")
@@ -312,59 +300,102 @@ class FluxContributionAnalyzer:
             print(f"No regions found with sum_flux above threshold {threshold}")
             return pd.DataFrame()
         
-        # Group regions by timestamp to find simultaneous flares within the same flux prediction
+        # Step 1: Group regions by timestamp to find simultaneous flares within the same flux prediction
         simultaneous_groups = []
         for timestamp, group in high_flux_regions.groupby('timestamp'):
             if len(group) >= 2:  # Multiple distinct regions at the same timestamp
                 simultaneous_groups.append(group)
         
-        # Create results DataFrame
+        if len(simultaneous_groups) == 0:
+            print("No simultaneous flare events detected")
+            return pd.DataFrame()
+        
+        # Step 2: Cluster groups into sequences based on temporal proximity
+        # Each group has a timestamp - cluster groups that are within sequence_window_hours
+        sequence_clusters = []
+        used_group_indices = set()
+        
+        for group_idx, group in enumerate(simultaneous_groups):
+            if group_idx in used_group_indices:
+                continue
+            
+            # Start a new sequence with this group
+            sequence_groups = [group_idx]
+            group_datetime = pd.to_datetime(group['datetime'].iloc[0])
+            used_group_indices.add(group_idx)
+            
+            # Find all groups within sequence_window_hours of any group in this sequence
+            changed = True
+            while changed:
+                changed = False
+                for other_idx, other_group in enumerate(simultaneous_groups):
+                    if other_idx in used_group_indices:
+                        continue
+                    
+                    other_datetime = pd.to_datetime(other_group['datetime'].iloc[0])
+                    
+                    # Check if this group is within sequence_window_hours of any group in the sequence
+                    for seq_group_idx in sequence_groups:
+                        seq_group = simultaneous_groups[seq_group_idx]
+                        seq_datetime = pd.to_datetime(seq_group['datetime'].iloc[0])
+                        time_diff_hours = abs((other_datetime - seq_datetime).total_seconds() / 3600)
+                        
+                        if time_diff_hours <= sequence_window_hours:
+                            sequence_groups.append(other_idx)
+                            used_group_indices.add(other_idx)
+                            changed = True
+                            break
+            
+            sequence_clusters.append(sequence_groups)
+        
+        # Step 3: Create results DataFrame with both group_id and sequence_id
         simultaneous_events = []
-        for group_id, group in enumerate(simultaneous_groups):
-            for idx, event in group.iterrows():
-                simultaneous_events.append({
-                    'group_id': group_id,
-                    'timestamp': event['timestamp'],
-                    'datetime': event['datetime'],
-                    'prediction': event['prediction'],
-                    'region_size': event['region_size'],
-                    'max_flux': event['max_flux'],
-                    'sum_flux': event['sum_flux'],
-                    'centroid_img_y': event['centroid_img_y'],
-                    'centroid_img_x': event['centroid_img_x'],
-                    'group_size': len(group)
-                })
+        for sequence_id, sequence_group_indices in enumerate(sequence_clusters):
+            for group_idx in sequence_group_indices:
+                group = simultaneous_groups[group_idx]
+                for idx, event in group.iterrows():
+                    simultaneous_events.append({
+                        'sequence_id': sequence_id,
+                        'group_id': group_idx,  # Original group ID (same timestamp)
+                        'timestamp': event['timestamp'],
+                        'datetime': event['datetime'],
+                        'prediction': event['prediction'],
+                        'region_size': event['region_size'],
+                        'max_flux': event['max_flux'],
+                        'sum_flux': event['sum_flux'],
+                        'centroid_img_y': event['centroid_img_y'],
+                        'centroid_img_x': event['centroid_img_x'],
+                        'group_size': len(group),
+                        'sequence_size': len(sequence_group_indices)  # Number of groups in this sequence
+                    })
         
         simultaneous_df = pd.DataFrame(simultaneous_events)
         
         if len(simultaneous_df) > 0:
             print(f"Detected {len(simultaneous_groups)} timestamps with simultaneous flares")
+            print(f"Clustered into {len(sequence_clusters)} flare sequences (within ±{sequence_window_hours} hours)")
             print(f"Total simultaneous events: {len(simultaneous_df)}")
             
-            # Print summary
-            for group_id in simultaneous_df['group_id'].unique():
-                group_events = simultaneous_df[simultaneous_df['group_id'] == group_id]
-                timestamp = group_events['timestamp'].iloc[0]
-                prediction = group_events['prediction'].iloc[0]
-                print(f"\nSimultaneous Group {group_id} at {timestamp}:")
-                print(f"  Flux prediction: {prediction:.2e}")
-                print(f"  Number of distinct regions: {len(group_events)}")
-                print(f"  Region sizes: {group_events['region_size'].values}")
-                print(f"  Sum fluxes: {group_events['sum_flux'].values}")
-        else:
-            print("No simultaneous flare events detected")
+            # Print summary by sequence
+            for sequence_id in sorted(simultaneous_df['sequence_id'].unique()):
+                sequence_events = simultaneous_df[simultaneous_df['sequence_id'] == sequence_id]
+                timestamps = sorted(sequence_events['datetime'].unique())
+                print(f"\nFlare Sequence {sequence_id}:")
+                print(f"  Number of groups: {sequence_events['sequence_size'].iloc[0]}")
+                print(f"  Time span: {timestamps[0]} to {timestamps[-1]}")
+                print(f"  Total events: {len(sequence_events)}")
+                
+                # Print each group in the sequence
+                for group_id in sorted(sequence_events['group_id'].unique()):
+                    group_events = sequence_events[sequence_events['group_id'] == group_id]
+                    timestamp = group_events['timestamp'].iloc[0]
+                    prediction = group_events['prediction'].iloc[0]
+                    print(f"    Group {group_id} at {timestamp}:")
+                    print(f"      Flux prediction: {prediction:.2e}")
+                    print(f"      Number of regions: {len(group_events)}")
         
         self.simultaneous_flares_df = simultaneous_df
         return simultaneous_df
-
-    def load_attention_weights(self, timestamp):
-        """Load attention weights for a specific timestamp if available"""
-        if self.attention_path is None:
-            return None
-        attention_file = self.attention_path / f"{timestamp}"
-        if attention_file.exists():
-            return np.loadtxt(attention_file, delimiter=',')
-        return None
 
     def create_flare_event_summary(self, output_path=None):
         """Create a comprehensive summary of detected flare events"""
@@ -546,10 +577,6 @@ class FluxContributionAnalyzer:
         if smoothing_window > 1:
             region_tracks = self._apply_temporal_smoothing(region_tracks, smoothing_window)
         
-        # Debug: Print track information
-        for track_id, track_history in region_tracks.items():
-            timestamps_in_track = [t for t, r in track_history]
-            print(f"Track {track_id}: {len(track_history)} timestamps from {timestamps_in_track[0]} to {timestamps_in_track[-1]}")
         
         return region_tracks
     
@@ -623,14 +650,12 @@ class FluxContributionAnalyzer:
         # Find connected core regions
         labeled_cores, num_cores = nd.label(core_mask, structure=structure_8)
         
-        # Debug: Print threshold information
         if num_cores > 0:
             overlap_mode = "non-overlapping" if prevent_overlap else "overlapping"
             print(f"  {timestamp}: Found {num_cores} cores at {core_std_multiplier}σ threshold ({core_threshold:.2e}) - {overlap_mode} growth")
         
         regions = []
         accepted_region_id = 0
-        skipped_due_to_overlap = 0
         
         # Track all claimed pixels to prevent overlap (if enabled)
         claimed_mask = np.zeros_like(growth_mask, dtype=bool) if prevent_overlap else None
@@ -643,10 +668,7 @@ class FluxContributionAnalyzer:
             if core_size < min_core_patches:
                 continue
             
-            # Check if core overlaps with already claimed regions (if overlap prevention enabled)
             if prevent_overlap and np.any(core_region_mask & claimed_mask):
-                print(f"    Region {core_id}: Core overlaps with existing region, skipping")
-                skipped_due_to_overlap += 1
                 continue
             
             # Mark core pixels as claimed immediately (if overlap prevention enabled)
@@ -680,15 +702,6 @@ class FluxContributionAnalyzer:
                         
                         # Immediately mark new pixels as claimed to prevent overlap
                         claimed_mask = claimed_mask | new_pixels
-                    
-                    # Debug: Show if growth was limited by overlap prevention
-                    final_size = np.sum(grown_mask)
-                    if final_size < initial_size + dilation_iterations:
-                        print(f"    Region {core_id}: Growth limited by overlap prevention ({initial_size} → {final_size})")
-                    
-                    # Debug: Show claimed mask state
-                    claimed_pixels = np.sum(claimed_mask)
-                    print(f"    Region {core_id}: {claimed_pixels} pixels claimed total")
                 else:
                     # Original behavior: grow all at once (may overlap)
                     grown_mask = nd.binary_dilation(
@@ -708,14 +721,9 @@ class FluxContributionAnalyzer:
                 if prevent_overlap:
                     claimed_mask = claimed_mask | grown_mask
                 
-                # Calculate flux for ENTIRE grown region
                 region_flux = flux_contrib[grown_mask]
                 sum_flux = np.sum(region_flux)
                 max_flux = np.max(region_flux)
-                
-                # Debug: Print core vs grown region info
-                growth_ratio = region_size / core_size if core_size > 0 else 1
-                print(f"    Region {accepted_region_id}: core={core_size} patches, grown={region_size} patches (×{growth_ratio:.1f}), flux={sum_flux:.2e}")
                 
                 # Get region centroid from grown region
                 coords = np.where(grown_mask)
@@ -752,11 +760,6 @@ class FluxContributionAnalyzer:
                     'groundtruth': pred_data.get('groundtruth', None)
                 })
         
-        # Print summary
-        if prevent_overlap and skipped_due_to_overlap > 0:
-            print(f"    Skipped {skipped_due_to_overlap} regions due to overlap prevention")
-        
-        # Verify no overlaps if overlap prevention is enabled
         if prevent_overlap and len(regions) > 1:
             self._verify_no_overlaps(regions, timestamp)
         
@@ -770,10 +773,6 @@ class FluxContributionAnalyzer:
                 if overlap:
                     overlap_pixels = np.sum(region1['mask'] & region2['mask'])
                     print(f"    WARNING: Regions {region1['id']} and {region2['id']} overlap by {overlap_pixels} pixels!")
-                    print(f"    Region {region1['id']} size: {np.sum(region1['mask'])}")
-                    print(f"    Region {region2['id']} size: {np.sum(region2['mask'])}")
-        else:
-            print(f"    Verified: No overlaps between {len(regions)} regions")
 
     def create_contour_movie(self, timestamps, auto_cleanup=True, fps=2, show_sxr_timeseries=True, 
                            all_timestamps_for_tracking=None, movie_filename=None):
@@ -791,13 +790,10 @@ class FluxContributionAnalyzer:
         """
         print(f"Creating contour movie with {len(timestamps)} frame timestamps...")
 
-        # Track regions across time if SXR time series is requested
-        region_tracks = {}
-        if show_sxr_timeseries:
-            # Use full resolution timestamps for tracking if provided, otherwise use frame timestamps
-            tracking_timestamps = all_timestamps_for_tracking if all_timestamps_for_tracking is not None else timestamps
-            print(f"Tracking regions across {len(tracking_timestamps)} timestamps (full resolution)...")
-            region_tracks = self.track_regions_over_time(tracking_timestamps)
+        # Always track regions across time for consistent region IDs and colors
+        tracking_timestamps = all_timestamps_for_tracking if all_timestamps_for_tracking is not None else timestamps
+        print(f"Tracking regions across {len(tracking_timestamps)} timestamps (full resolution)...")
+        region_tracks = self.track_regions_over_time(tracking_timestamps)
 
         # Create frames directory
         self.frames_dir = Path("temp_contour_frames")
@@ -808,34 +804,23 @@ class FluxContributionAnalyzer:
         num_processes = max(1, num_processes - 1)  # Leave one CPU free
         print(f"Using {num_processes} processes")
         
-        # Calculate optimal chunk size for better load balancing
-        chunksize = max(1, len(timestamps) // (num_processes * 4))
-        print(f"Using chunksize={chunksize} for load balancing")
 
         # Process frames in parallel
         start_time = time.time()
 
-        if show_sxr_timeseries and region_tracks:
-            # Use SXR-enabled frame generation
-            print("Using SXR time series frame generation...")
-            with Pool(processes=num_processes) as pool:
-                # Create a partial function with region_tracks
-                from functools import partial
-                frame_worker = partial(self.generate_contour_frame_with_sxr_worker, region_tracks=region_tracks)
-                # Use imap with chunksize=1 for better progress bar updates
-                results = []
-                for result in tqdm(pool.imap(frame_worker, timestamps, chunksize=1), 
-                                  desc="Generating frames", unit="frame", total=len(timestamps)):
-                    results.append(result)
-        else:
-            # Use standard frame generation
-            print("Using standard frame generation...")
-            with Pool(processes=num_processes) as pool:
-                # Use imap with chunksize=1 for better progress bar updates
-                results = []
-                for result in tqdm(pool.imap(self.generate_contour_frame_worker, timestamps, chunksize=1),
-                                  desc="Generating frames", unit="frame", total=len(timestamps)):
-                    results.append(result)
+        # Always use tracked regions for consistent region IDs and colors
+        from functools import partial
+        frame_worker = partial(
+            self.generate_contour_frame_with_sxr_worker, 
+            region_tracks=region_tracks,
+            show_sxr_timeseries=show_sxr_timeseries
+        )
+        
+        with Pool(processes=num_processes) as pool:
+            results = []
+            for result in tqdm(pool.imap(frame_worker, timestamps, chunksize=1), 
+                              desc="Generating frames", unit="frame", total=len(timestamps)):
+                results.append(result)
 
         # Filter out failed frames
         frame_paths = [path for path in results if path is not None]
@@ -893,11 +878,9 @@ class FluxContributionAnalyzer:
 
         return movie_path
 
-    def generate_contour_frame_with_sxr_worker(self, timestamp, region_tracks=None):
-        """Worker function to generate a single contour frame with SXR time series for tracked regions"""
+    def generate_contour_frame_with_sxr_worker(self, timestamp, region_tracks=None, show_sxr_timeseries=True):
+        """Worker function to generate a single contour frame with optional SXR time series for tracked regions"""
         try:
-            # Removed verbose print for speed - progress bar shows this
-
             # Load flux contributions
             flux_contrib = self.load_flux_contributions(timestamp)
             aia = self.load_aia_image(timestamp)
@@ -918,13 +901,14 @@ class FluxContributionAnalyzer:
             save_path = os.path.join(self.frames_dir, f"{timestamp}.png")
             os.makedirs(self.frames_dir, exist_ok=True)
 
-            # Create figure with AIA+flux overlay on left and SXR plot on right
-            # DPI=100 for faster rendering, fixed spacing for consistent frame size
-            fig = plt.figure(figsize=(16, 8), dpi=100)
-            # Overall grid: 1 row x 2 columns with equal height subplots
-            # left=0.05, right=0.95, bottom=0.1, top=0.9, wspace=0.1 ensures proper spacing
-            gs = fig.add_gridspec(1, 2, left=0.05, right=0.95, bottom=0.1, top=0.9, 
-                                  height_ratios=[1], width_ratios=[1, 1], hspace=0, wspace=0.1)
+            # Create figure - adjust layout based on whether SXR plot is shown
+            if show_sxr_timeseries:
+                fig = plt.figure(figsize=(16, 8), dpi=100)
+                gs = fig.add_gridspec(1, 2, left=0.05, right=0.95, bottom=0.1, top=0.9, 
+                                      height_ratios=[1], width_ratios=[1, 1], hspace=0, wspace=0.1)
+            else:
+                fig = plt.figure(figsize=(8, 8), dpi=100)
+                gs = fig.add_gridspec(1, 1, left=0.05, right=0.95, bottom=0.1, top=0.9)
 
             # Get regions that exist at this timestamp from the tracked regions
             detected_regions = []
@@ -938,97 +922,36 @@ class FluxContributionAnalyzer:
                             
                             # Add label coordinates if not present
                             if 'label_x' not in region_data_copy or 'label_y' not in region_data_copy:
-                                # Calculate label position from centroid (try multiple key names)
                                 centroid_y = region_data_copy.get('centroid_patch_y', 
                                                                   region_data_copy.get('centroid_y', 0))
                                 centroid_x = region_data_copy.get('centroid_patch_x', 
                                                                   region_data_copy.get('centroid_x', 0))
-                                
-                                # Position label above the region
                                 region_data_copy['label_y'] = max(0, centroid_y - 2)
                                 region_data_copy['label_x'] = centroid_x
                             
                             detected_regions.append(region_data_copy)
                             break
-            else:
-                # Fallback: detect regions independently if no tracks available
-                threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
-                min_patches = self.flare_config.get('min_patches', 2)
-                max_patches = self.flare_config.get('max_patches', 50)
 
-                # Calculate threshold based on median and standard deviation
-                flux_values = flux_contrib.flatten()
-                median_flux = np.median(flux_values)
-                std_flux = np.std(flux_values)
-                threshold = median_flux + threshold_std_multiplier * std_flux
-                high_contrib_mask = flux_contrib > threshold
-
-                # Use connected components to find flare regions
-                structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
-                labeled_regions, num_regions = nd.label(high_contrib_mask, structure=structure_8)
-
-                accepted_region_id = 0
-                for region_id in range(1, num_regions + 1):
-                    region_mask = labeled_regions == region_id
-                    region_size = np.sum(region_mask)
-
-                    if min_patches <= region_size <= max_patches:
-                        accepted_region_id += 1
-                        region_flux = flux_contrib[region_mask]
-                        sum_flux = np.sum(region_flux)
-                        max_flux = np.max(region_flux)
-
-                        # Get region centroid for labeling
-                        coords = np.where(region_mask)
-                        min_y, max_y = np.min(coords[0]), np.max(coords[0])
-                        min_x, max_x = np.min(coords[1]), np.max(coords[1])
-                        centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
-
-                        # Position label above the region
-                        label_y = min_y - 2
-                        label_x = centroid_x
-
-                        # Convert to image coordinates
-                        img_y = centroid_y * self.patch_size + self.patch_size // 2
-                        img_x = centroid_x * self.patch_size + self.patch_size // 2
-
-                        detected_regions.append({
-                            'id': accepted_region_id,
-                            'size': region_size,
-                            'sum_flux': sum_flux,
-                            'max_flux': max_flux,
-                            'centroid_patch_y': centroid_y,
-                            'centroid_patch_x': centroid_x,
-                            'centroid_img_y': img_y,
-                            'centroid_img_x': img_x,
-                            'label_y': label_y,
-                            'label_x': label_x,
-                            'mask': region_mask
-                        })
-
-            # Create a copy for display
-            flux_contrib_display = flux_contrib.copy()
-
-            # Set up color mapping for regions (matching SXR plot colors)
-            # Use the SAME color list as in the SXR plot below
-            # Extended color palette to avoid rapid repetition with many regions
+            # Set up color mapping for regions (consistent colors across frames)
             region_colors = [
-                  '#000000', '#004949','#009292', '#FF6DB6', '#FFB6DB', '#490092', '#006DDB', '#B66DFF', '#6DB6FF', '#B6DBFF', '#920000', '#924900', '#DB6D00', '#24FF24','#D82632'      
-                ]
+                '#000000', '#004949', '#009292', '#FF6DB6', '#FFB6DB', '#490092', 
+                '#006DDB', '#B66DFF', '#6DB6FF', '#B6DBFF', '#920000', '#924900', 
+                '#DB6D00', '#24FF24', '#D82632'
+            ]
             region_to_color = {}
             
             if region_tracks and detected_regions:
-                # Get all track IDs and sort them to ensure consistent color assignment
+                # Use track IDs for consistent color assignment across frames
                 track_ids = sorted(region_tracks.keys())
                 for i, track_id in enumerate(track_ids):
                     region_to_color[track_id] = region_colors[i % len(region_colors)]
             else:
-                # Fallback to original colors if no region tracks
+                # Fallback if no tracks (shouldn't happen, but handle gracefully)
                 fallback_colors = plt.cm.Set3(np.linspace(0, 1, max(len(detected_regions), 1)))
                 region_to_color = {region['id']: fallback_colors[i % len(fallback_colors)] 
                                  for i, region in enumerate(detected_regions)}
 
-            # Plot AIA image with flux overlay (left column)
+            # Plot AIA image with flux overlay
             if aia is not None:
                 ax_aia = fig.add_subplot(gs[0, 0])
                 
@@ -1078,8 +1001,8 @@ class FluxContributionAnalyzer:
                 
 
 
-            # Plot single SXR time series with integrated values
-            if region_tracks:
+            # Plot SXR time series if requested
+            if show_sxr_timeseries and region_tracks:
                 # Create single SXR plot in right column
                 ax_sxr = fig.add_subplot(gs[0, 1])
                 
@@ -1196,21 +1119,6 @@ class FluxContributionAnalyzer:
                 # Mark current time
                 ax_sxr.axvline(current_time, color='black', linestyle='--', alpha=0.7, linewidth=2)
                 
-                # Add current values text box
-                # Calculate current sum of region fluxes (actual sum_flux values)
-                current_region_sum = sum(r.get('sum_flux', 0) for r in detected_regions)
-                
-                # info_text = f"Current Time: {current_time.strftime('%H:%M:%S')}\n"
-                # if pred_data.get('groundtruth') is not None:
-                #     info_text += f"Ground Truth: {pred_data['groundtruth']:.2e}\n"
-                # info_text += f"Model Prediction: {pred_data['predictions']:.2e}\n"
-                # info_text += f"Sum of All Regions: {current_region_sum:.2e}\n"
-                # info_text += f"Active Regions: {len(detected_regions)}"
-                
-                # ax_sxr.text(0.02, 0.98, info_text, transform=ax_sxr.transAxes, fontsize=10,
-                #            bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9),
-                #            verticalalignment='top')
-                
                 ax_sxr.set_title('SXR Time Series', fontsize=12)
                 ax_sxr.set_ylabel('SXR Flux (W/m²)', fontsize=12)
                 ax_sxr.set_xlabel('Time', fontsize=12)
@@ -1250,16 +1158,246 @@ class FluxContributionAnalyzer:
             return None
 
 
+def _setup_analyzer(args):
+    """Initialize analyzer and apply command line overrides"""
+    analyzer = FluxContributionAnalyzer(config_path=args.config)
+    
+    if args.flux_path:
+        analyzer.flux_path = Path(args.flux_path)
+    if args.predictions_csv:
+        analyzer.predictions_df = pd.read_csv(args.predictions_csv)
+        analyzer.predictions_df['datetime'] = pd.to_datetime(analyzer.predictions_df['timestamp'])
+        analyzer.predictions_df = analyzer.predictions_df.sort_values('datetime')
+    if args.start_time and args.end_time:
+        analyzer.time_period = {
+            'start_time': args.start_time,
+            'end_time': args.end_time
+        }
+        start_time = pd.to_datetime(analyzer.time_period['start_time'])
+        end_time = pd.to_datetime(analyzer.time_period['end_time'])
+        mask = (analyzer.predictions_df['datetime'] >= start_time) & (analyzer.predictions_df['datetime'] <= end_time)
+        analyzer.predictions_df = analyzer.predictions_df[mask].reset_index(drop=True)
+        print(f"Filtered data to time period: {start_time} to {end_time}")
+    
+    return analyzer
+
+
+def _get_output_dir(analyzer, args):
+    """Get output directory from config or command line args"""
+    if args.output_dir:
+        return Path(args.output_dir)
+    
+    output_dir_str = analyzer.output_config.get('output_dir', 'flux_analysis_output')
+    if '${base_data_dir}' in output_dir_str:
+        base_dir = analyzer.config.get('base_data_dir', '/mnt/data/COMBINED')
+        output_dir_str = output_dir_str.replace('${base_data_dir}', base_dir)
+    return Path(output_dir_str)
+
+
+def _detect_and_save_flares(analyzer, output_dir):
+    """Detect flares and save summaries to CSV files"""
+    print("Detecting flare events...")
+    flare_events = analyzer.detect_flare_events()
+    
+    print("\nDetecting simultaneous flares...")
+    simultaneous_threshold = analyzer.flare_config.get('simultaneous_flare_threshold', 5e-6)
+    sequence_window_hours = analyzer.flare_config.get('sequence_window_hours', 1.0)
+    simultaneous_flares = analyzer.detect_simultaneous_flares(
+        threshold=simultaneous_threshold,
+        sequence_window_hours=sequence_window_hours
+    )
+    
+    flare_summary_path = output_dir / 'flare_events_summary.csv'
+    analyzer.create_flare_event_summary(flare_summary_path)
+    
+    if len(simultaneous_flares) > 0:
+        simultaneous_summary_path = output_dir / 'simultaneous_flares_summary.csv'
+        simultaneous_flares.to_csv(simultaneous_summary_path, index=False)
+        print(f"Simultaneous flares summary saved to: {simultaneous_summary_path}")
+    
+    return flare_events, simultaneous_flares
+
+
+def _filter_timestamps_by_interval(timestamps, interval_seconds):
+    """Filter timestamps to keep only those at specified interval"""
+    if interval_seconds <= 0:
+        return timestamps
+    
+    datetimes = pd.to_datetime(timestamps)
+    filtered = []
+    last_time = None
+    
+    for i, dt in enumerate(datetimes):
+        if last_time is None or (dt - last_time).total_seconds() >= interval_seconds:
+            filtered.append(timestamps[i])
+            last_time = dt
+    
+    return filtered
+
+
+def _get_flare_sequences(simultaneous_flares, window_days):
+    """
+    Get flare sequences from simultaneous_flares DataFrame using sequence_id.
+    
+    For each sequence, calculates the time window as:
+    - sequence_min_time = minimum timestamp in the sequence
+    - sequence_max_time = maximum timestamp in the sequence
+    - video_start_time = sequence_min_time - window_days
+    - video_end_time = sequence_max_time + window_days
+    
+    This ensures the video includes window_days of context before and after
+    the actual flare sequence.
+    """
+    if len(simultaneous_flares) == 0:
+        return []
+    
+    sequences = []
+    for sequence_id in sorted(simultaneous_flares['sequence_id'].unique()):
+        sequence_events = simultaneous_flares[simultaneous_flares['sequence_id'] == sequence_id]
+        
+        # Get all unique timestamps in this sequence (sorted)
+        timestamps = sorted(sequence_events['timestamp'].unique())
+        datetimes = [pd.to_datetime(ts) for ts in timestamps]
+        
+        # Find the actual sequence time range (min to max)
+        sequence_min_time = min(datetimes)
+        sequence_max_time = max(datetimes)
+        
+        # Calculate video window: extend window_days above and below the sequence range
+        video_start_time = sequence_min_time - pd.Timedelta(days=window_days)
+        video_end_time = sequence_max_time + pd.Timedelta(days=window_days)
+        
+        # Center timestamp for filename (not used for window calculation)
+        center_timestamp = pd.Series(datetimes).median()
+        
+        sequences.append({
+            'sequence_id': sequence_id,
+            'timestamps': timestamps,
+            'sequence_min_time': sequence_min_time,
+            'sequence_max_time': sequence_max_time,
+            'center_timestamp': center_timestamp,  # Only for filename
+            'start_time': video_start_time,  # Video window start
+            'end_time': video_end_time,  # Video window end
+            'num_groups': sequence_events['group_id'].nunique(),
+            'num_events': len(sequence_events)
+        })
+    
+    return sequences
+
+
+def _create_simultaneous_flare_movies(analyzer, simultaneous_flares, output_dir, args):
+    """Create movies for simultaneous flare events using sequence_id"""
+    print("\nCreating contour evolution movies for simultaneous flare sequences...")
+    
+    movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
+    movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
+    simultaneous_window_days = analyzer.output_config.get('simultaneous_flare_window_days', 1)
+    
+    # Use sequence_id from detect_simultaneous_flares instead of re-clustering
+    flare_sequences = _get_flare_sequences(simultaneous_flares, simultaneous_window_days)
+    print(f"Creating movies for {len(flare_sequences)} flare sequences")
+    
+    analyzer.output_dir = str(output_dir)
+    show_sxr = args.show_sxr_timeseries or analyzer.output_config.get('show_sxr_timeseries', False)
+    
+    for seq_idx, sequence in enumerate(flare_sequences):
+        sequence_id = sequence['sequence_id']
+        center_timestamp = sequence['center_timestamp']
+        center_str = center_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        # Video window extends window_days above and below the sequence range
+        window_start = sequence['start_time']
+        window_end = sequence['end_time']
+        sequence_min = sequence['sequence_min_time']
+        sequence_max = sequence['sequence_max_time']
+        
+        window_start_str = window_start.strftime('%Y-%m-%dT%H:%M:%S')
+        window_end_str = window_end.strftime('%Y-%m-%dT%H:%M:%S')
+        sequence_min_str = sequence_min.strftime('%Y-%m-%dT%H:%M:%S')
+        sequence_max_str = sequence_max.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        print(f"\n  Movie {seq_idx + 1}/{len(flare_sequences)}: Flare Sequence {sequence_id}")
+        print(f"    Sequence contains {sequence['num_groups']} groups with {sequence['num_events']} events")
+        print(f"    Sequence time range: {sequence_min_str} to {sequence_max_str}")
+        print(f"    Video window (with ±{simultaneous_window_days} days padding): {window_start_str} to {window_end_str}")
+        
+        available_timestamps = analyzer.predictions_df[
+            (analyzer.predictions_df['datetime'] >= window_start) & 
+            (analyzer.predictions_df['datetime'] <= window_end)
+        ]['timestamp'].tolist()
+        
+        if len(available_timestamps) == 0:
+            print(f"    No data found in time window, skipping...")
+            continue
+        
+        all_timestamps_for_tracking = available_timestamps
+        filtered_timestamps = _filter_timestamps_by_interval(available_timestamps, movie_interval_seconds)
+        
+        print(f"    Found {len(available_timestamps)} timestamps, generating {len(filtered_timestamps)} frames")
+        print(f"    Movie will be {len(filtered_timestamps)/movie_fps:.1f} seconds long at {movie_fps} FPS")
+        
+        safe_timestamp = center_str.replace(':', '-').replace(' ', '_')
+        movie_path = analyzer.create_contour_movie(
+            timestamps=filtered_timestamps,
+            auto_cleanup=True,
+            fps=movie_fps,
+            show_sxr_timeseries=show_sxr,
+            all_timestamps_for_tracking=all_timestamps_for_tracking,
+            movie_filename=f'flare_sequence_{sequence_id}_{safe_timestamp}.mp4'
+        )
+        
+        if movie_path:
+            print(f"    ✅ Contour movie created: {movie_path}")
+    
+    print(f"\n✅ Created {len(flare_sequences)} flare sequence movies")
+
+
+def _create_full_period_movie(analyzer, output_dir, args):
+    """Create movie for full time period"""
+    print("\nCreating contour evolution movie...")
+    
+    start_time = pd.to_datetime(analyzer.time_period['start_time'])
+    end_time = pd.to_datetime(analyzer.time_period['end_time'])
+    
+    movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
+    movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
+    
+    available_timestamps = analyzer.predictions_df[
+        (analyzer.predictions_df['datetime'] >= start_time) & 
+        (analyzer.predictions_df['datetime'] <= end_time)
+    ]['timestamp'].tolist()
+    
+    all_timestamps_for_tracking = available_timestamps
+    filtered_timestamps = _filter_timestamps_by_interval(available_timestamps, movie_interval_seconds)
+    
+    print(f"Found {len(available_timestamps)} total timestamps in time period")
+    print(f"Tracking regions at full resolution: {len(all_timestamps_for_tracking)} timestamps")
+    print(f"Generating frames at {movie_interval_seconds}-second intervals: {len(filtered_timestamps)} frames")
+    print(f"Movie will be {len(filtered_timestamps)/movie_fps:.1f} seconds long at {movie_fps} FPS")
+    
+    analyzer.output_dir = str(output_dir)
+    show_sxr = args.show_sxr_timeseries or analyzer.output_config.get('show_sxr_timeseries', False)
+    
+    movie_path = analyzer.create_contour_movie(
+        timestamps=filtered_timestamps,
+        auto_cleanup=True,
+        fps=movie_fps,
+        show_sxr_timeseries=show_sxr,
+        all_timestamps_for_tracking=all_timestamps_for_tracking
+    )
+    
+    if movie_path:
+        print(f"Contour evolution movie created: {movie_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze flux contributions for flare detection')
     parser.add_argument('--config', required=True, help='Path to YAML config file')
     parser.add_argument('--flux_path', help='Path to flux contributions directory (overrides config)')
     parser.add_argument('--predictions_csv', help='Path to predictions CSV file (overrides config)')
-    parser.add_argument('--attention_path', help='Path to attention weights directory (optional)')
     parser.add_argument('--output_dir', help='Output directory for results (overrides config)')
     parser.add_argument('--start_time', help='Start time for analysis (overrides config)')
     parser.add_argument('--end_time', help='End time for analysis (overrides config)')
-    parser.add_argument('--viz_threshold', type=float, help='Visualization threshold (overrides config)')
     parser.add_argument('--create_contour_movie', action='store_true', help='Create contour evolution movie')
     parser.add_argument('--movie_fps', type=int, default=2, help='Frames per second for movie (default: 2)')
     parser.add_argument('--movie_interval_seconds', type=int, help='Seconds between frames for movie (overrides config)')
@@ -1268,317 +1406,28 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize analyzer with config
-    analyzer = FluxContributionAnalyzer(config_path=args.config)
-
-    # Override config with command line arguments if provided
-    if args.flux_path:
-        analyzer.flux_path = Path(args.flux_path)
-    if args.predictions_csv:
-        analyzer.predictions_df = pd.read_csv(args.predictions_csv)
-        analyzer.predictions_df['datetime'] = pd.to_datetime(analyzer.predictions_df['timestamp'])
-        analyzer.predictions_df = analyzer.predictions_df.sort_values('datetime')
-    if args.attention_path:
-        analyzer.attention_path = Path(args.attention_path)
-    if args.start_time and args.end_time:
-        analyzer.time_period = {
-            'start_time': args.start_time,
-            'end_time': args.end_time
-        }
-        # Re-filter data
-        start_time = pd.to_datetime(analyzer.time_period['start_time'])
-        end_time = pd.to_datetime(analyzer.time_period['end_time'])
-        mask = (analyzer.predictions_df['datetime'] >= start_time) & (analyzer.predictions_df['datetime'] <= end_time)
-        analyzer.predictions_df = analyzer.predictions_df[mask].reset_index(drop=True)
-        print(f"Filtered data to time period: {start_time} to {end_time}")
-
-    # Get output directory from config or args
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        output_dir_str = analyzer.output_config.get('output_dir', 'flux_analysis_output')
-        # Replace base_data_dir placeholder if present
-        if '${base_data_dir}' in output_dir_str:
-            base_dir = analyzer.config.get('base_data_dir', '/mnt/data/COMBINED')
-            output_dir_str = output_dir_str.replace('${base_data_dir}', base_dir)
-        output_dir = Path(output_dir_str)
-    
-    # Create output directory
+    analyzer = _setup_analyzer(args)
+    output_dir = _get_output_dir(analyzer, args)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # Detect flare events using config parameters
-    print("Detecting flare events...")
-    flare_events = analyzer.detect_flare_events()
+    flare_events, simultaneous_flares = _detect_and_save_flares(analyzer, output_dir)
 
-    # Detect simultaneous flares
-    print("\nDetecting simultaneous flares...")
-    simultaneous_threshold = analyzer.flare_config.get('simultaneous_flare_threshold', 5e-6)
-    simultaneous_flares = analyzer.detect_simultaneous_flares(threshold=simultaneous_threshold)
-
-    # Create flare event summary
-    flare_summary_path = output_dir / 'flare_events_summary.csv'
-    analyzer.create_flare_event_summary(flare_summary_path)
-
-    # Save simultaneous flares summary
-    if len(simultaneous_flares) > 0:
-        simultaneous_summary_path = output_dir / 'simultaneous_flares_summary.csv'
-        simultaneous_flares.to_csv(simultaneous_summary_path, index=False)
-        print(f"Simultaneous flares summary saved to: {simultaneous_summary_path}")
-
-    # Create visualizations if enabled in config
-    if analyzer.output_config.get('create_visualizations', True) and len(flare_events) > 0:
-        print("\nCreating visualizations for top flare events...")
-        max_viz = analyzer.output_config.get('max_visualizations', 10)
-        viz_threshold = args.viz_threshold if args.viz_threshold is not None else analyzer.output_config.get('visualization_threshold', 0.0)
-        
-        # Filter events by visualization threshold
-        high_prediction_events = flare_events[flare_events['prediction'] >= viz_threshold]
-        print(f"Found {len(high_prediction_events)} events above visualization threshold {viz_threshold:.2e}")
-        
-        if len(high_prediction_events) > 0:
-            top_events = high_prediction_events.head(max_viz).sort_values('prediction', ascending=False)
-            print(f"Creating visualizations for top {len(top_events)} events...")
-
-            for i, (_, event) in enumerate(top_events.iterrows()):
-                output_path = output_dir / f'flare_event_{i + 1}_{event["timestamp"]}.png'
-                analyzer.plot_flux_contribution_heatmap(
-                    event['timestamp'],
-                    save_path=output_path,
-                    show_attention=True,
-                    threshold_std_multiplier=analyzer.flare_config.get('threshold_std_multiplier', 2.0)
-                )
-        else:
-            print(f"No events found above visualization threshold {viz_threshold:.2e}")
-
-    # Create visualizations for simultaneous flares in separate folder
-    if len(simultaneous_flares) > 0 and analyzer.output_config.get('create_visualizations', True):
-        print("\nCreating visualizations for simultaneous flare events...")
-        simultaneous_output_dir = output_dir / 'simultaneous_flares'
-        simultaneous_output_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Get unique timestamps with simultaneous flares
-        simultaneous_timestamps = simultaneous_flares['timestamp'].unique()
-        print(f"Creating visualizations for {len(simultaneous_timestamps)} timestamps with simultaneous flares...")
-        
-        for i, timestamp in enumerate(simultaneous_timestamps):
-            # Get all events for this timestamp
-            timestamp_events = simultaneous_flares[simultaneous_flares['timestamp'] == timestamp]
-            group_id = timestamp_events['group_id'].iloc[0]
-            group_size = timestamp_events['group_size'].iloc[0]
-            
-            output_path = simultaneous_output_dir / f'simultaneous_group_{group_id}_{timestamp}.png'
-            analyzer.plot_flux_contribution_heatmap(
-                timestamp,
-                save_path=output_path,
-                show_attention=True,
-                threshold_std_multiplier=analyzer.flare_config.get('threshold_std_multiplier', 2.0)
-            )
-            print(f"  Saved simultaneous flare visualization: {output_path} ({group_size} events)")
-
-    # Create movie if enabled in config
-    if analyzer.output_config.get('create_movie', False) and analyzer.time_period:
-        print("\nCreating flare movie...")
-        movie_fps = analyzer.output_config.get('movie_fps', 2)
-        movie_path = output_dir / 'flare_event_movie.mp4'
-        analyzer.create_flare_movie(
-            start_time=analyzer.time_period['start_time'],
-            end_time=analyzer.time_period['end_time'],
-            output_path=movie_path,
-            fps=movie_fps
-        )
-
-    # Check if we should create simultaneous flare movies instead of full time period
-    create_simultaneous_movies = analyzer.output_config.get('create_simultaneous_flare_movies', False)
-    simultaneous_window_days = analyzer.output_config.get('simultaneous_flare_window_days', 1)
-    
-    # Create contour evolution movie if requested (command line or config)
     create_contour_movie = args.create_contour_movie or analyzer.output_config.get('create_contour_movie', False)
+    create_simultaneous_movies = analyzer.output_config.get('create_simultaneous_flare_movies', False)
     
-    # Handle simultaneous flare movies
     if create_contour_movie and create_simultaneous_movies and len(simultaneous_flares) > 0:
-        print("\nCreating contour evolution movies for simultaneous flare events...")
-        
-        # Get movie parameters
-        movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
-        movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
-        
-        # Group simultaneous flares by temporal proximity to avoid creating multiple videos for the same event
-        # Events within window_days of each other are considered part of the same flare event
-        simultaneous_flares['datetime'] = pd.to_datetime(simultaneous_flares['timestamp'])
-        simultaneous_flares = simultaneous_flares.sort_values('datetime')
-        
-        # Cluster timestamps that are within window_days of each other
-        # This groups simultaneous flare detections that occur within the same temporal window
-        flare_clusters = []
-        used_indices = set()
-        
-        for idx, row in simultaneous_flares.iterrows():
-            if idx in used_indices:
-                continue
-            
-            # Start a new cluster with this timestamp
-            cluster_timestamps = [row['timestamp']]
-            cluster_datetimes = [row['datetime']]
-            used_indices.add(idx)
-            
-            # Find all timestamps within window_days of this one
-            cluster_start = row['datetime']
-            cluster_end = cluster_start + pd.Timedelta(days=simultaneous_window_days)
-            
-            # Keep expanding the cluster to include events within window_days of any cluster member
-            changed = True
-            while changed:
-                changed = False
-                for idx2, row2 in simultaneous_flares.iterrows():
-                    if idx2 in used_indices:
-                        continue
-                    # Add if within window_days of any member of the current cluster
-                    for dt in cluster_datetimes:
-                        if abs((row2['datetime'] - dt).total_seconds()) <= simultaneous_window_days * 24 * 3600:
-                            cluster_timestamps.append(row2['timestamp'])
-                            cluster_datetimes.append(row2['datetime'])
-                            used_indices.add(idx2)
-                            changed = True
-                            break
-            
-            # Use the median timestamp as the center of the cluster
-            cluster_center = pd.Series(cluster_datetimes).median()
-            flare_clusters.append({
-                'timestamps': cluster_timestamps,
-                'center_timestamp': cluster_center,
-                'num_events': len(cluster_timestamps)
-            })
-        
-        print(f"Grouped {len(simultaneous_flares)} events into {len(flare_clusters)} distinct flare periods")
-        
-        # Create a movie for each flare cluster
-        for event_idx, cluster in enumerate(flare_clusters):
-            # Use the center timestamp as the reference point for the movie
-            center_timestamp = cluster['center_timestamp']
-            center_str = center_timestamp.strftime('%Y-%m-%dT%H:%M:%S')
-            
-            # Define time window around the center
-            window_start = (center_timestamp - pd.Timedelta(days=simultaneous_window_days)).strftime('%Y-%m-%dT%H:%M:%S')
-            window_end = (center_timestamp + pd.Timedelta(days=simultaneous_window_days)).strftime('%Y-%m-%dT%H:%M:%S')
-            
-            print(f"\n  Movie {event_idx + 1}/{len(flare_clusters)}: Flare period centered at {center_str}")
-            print(f"    Cluster contains {cluster['num_events']} simultaneous flare events")
-            print(f"    Time window: {window_start} to {window_end}")
-            
-            # Get timestamps within the window
-            start_time = pd.to_datetime(window_start)
-            end_time = pd.to_datetime(window_end)
-            
-            available_timestamps = analyzer.predictions_df[
-                (analyzer.predictions_df['datetime'] >= start_time) & 
-                (analyzer.predictions_df['datetime'] <= end_time)
-            ]['timestamp'].tolist()
-            
-            if len(available_timestamps) == 0:
-                print(f"    No data found in time window, skipping...")
-                continue
-            
-            # Keep ALL timestamps for accurate region tracking
-            all_timestamps_for_tracking = available_timestamps
-            
-            # Subsample timestamps for frame generation
-            available_datetimes = pd.to_datetime(available_timestamps)
-            filtered_timestamps = []
-            last_time = None
-            for i, dt in enumerate(available_datetimes):
-                if last_time is None or (dt - last_time).total_seconds() >= movie_interval_seconds:
-                    filtered_timestamps.append(available_timestamps[i])
-                    last_time = dt
-            
-            print(f"    Found {len(available_timestamps)} timestamps, generating {len(filtered_timestamps)} frames")
-            print(f"    Movie will be {len(filtered_timestamps)/movie_fps:.1f} seconds long at {movie_fps} FPS")
-            
-            # Set output directory for movie
-            analyzer.output_dir = str(output_dir)
-            
-            # Create the movie with a specific filename
-            show_sxr = args.show_sxr_timeseries or analyzer.output_config.get('show_sxr_timeseries', False)
-            
-            # Use center timestamp in filename, replacing colons and spaces for filesystem safety
-            safe_timestamp = center_str.replace(':', '-').replace(' ', '_')
-            movie_path = analyzer.create_contour_movie(
-                timestamps=filtered_timestamps,
-                auto_cleanup=True,
-                fps=movie_fps,
-                show_sxr_timeseries=show_sxr,
-                all_timestamps_for_tracking=all_timestamps_for_tracking,
-                movie_filename=f'simultaneous_flare_{event_idx + 1}_{safe_timestamp}.mp4'
-            )
-            
-            if movie_path:
-                print(f"    ✅ Contour movie created: {movie_path}")
-        
-        print(f"\n✅ Created {len(flare_clusters)} simultaneous flare movies")
-    
+        _create_simultaneous_flare_movies(analyzer, simultaneous_flares, output_dir, args)
     elif create_contour_movie and analyzer.time_period:
-        print("\nCreating contour evolution movie...")
-        # Generate timestamps for the time period
-        start_time = pd.to_datetime(analyzer.time_period['start_time'])
-        end_time = pd.to_datetime(analyzer.time_period['end_time'])
-        
-        # Get movie parameters
-        movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
-        movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
-        
-        # Get available timestamps from the data within the time period
-        available_timestamps = analyzer.predictions_df[
-            (analyzer.predictions_df['datetime'] >= start_time) & 
-            (analyzer.predictions_df['datetime'] <= end_time)
-        ]['timestamp'].tolist()
-        
-        # Keep ALL timestamps for accurate region tracking
-        all_timestamps_for_tracking = available_timestamps
-        
-        # Subsample timestamps for frame generation (visualization only)
-        if movie_interval_seconds > 0:
-            # Convert to datetime for easier filtering
-            available_datetimes = pd.to_datetime(available_timestamps)
-            
-            # Filter to desired interval for frame generation
-            filtered_timestamps = []
-            last_time = None
-            for i, dt in enumerate(available_datetimes):
-                if last_time is None or (dt - last_time).total_seconds() >= movie_interval_seconds:
-                    filtered_timestamps.append(available_timestamps[i])
-                    last_time = dt
-        else:
-            # Use all available timestamps
-            filtered_timestamps = available_timestamps
-        
-        print(f"Found {len(available_timestamps)} total timestamps in time period")
-        print(f"Tracking regions at full resolution: {len(all_timestamps_for_tracking)} timestamps")
-        print(f"Generating frames at {movie_interval_seconds}-second intervals: {len(filtered_timestamps)} frames")
-        print(f"Movie will be {len(filtered_timestamps)/movie_fps:.1f} seconds long at {movie_fps} FPS")
-        
-        timestamps = filtered_timestamps
-        
-        # Set output directory for movie
-        analyzer.output_dir = str(output_dir)
-        
-        # Create the movie
-        show_sxr = args.show_sxr_timeseries or analyzer.output_config.get('show_sxr_timeseries', False)
-        movie_path = analyzer.create_contour_movie(
-            timestamps=timestamps,
-            auto_cleanup=True,
-            fps=movie_fps,
-            show_sxr_timeseries=show_sxr,
-            all_timestamps_for_tracking=all_timestamps_for_tracking  # Pass full resolution timestamps
-        )
-        
-        if movie_path:
-            print(f"Contour evolution movie created: {movie_path}")
+        _create_full_period_movie(analyzer, output_dir, args)
     elif create_contour_movie and not analyzer.time_period:
         print("Warning: Cannot create contour movie without time period specified in config or command line")
 
     print(f"\nAnalysis complete! Results saved to: {output_dir}")
     print(f"Found {len(flare_events)} potential flare events")
     if len(simultaneous_flares) > 0:
-        print(f"Found {len(simultaneous_flares)} simultaneous flare events in {simultaneous_flares['group_id'].nunique()} groups")
+        num_sequences = simultaneous_flares['sequence_id'].nunique() if 'sequence_id' in simultaneous_flares.columns else 0
+        num_groups = simultaneous_flares['group_id'].nunique() if 'group_id' in simultaneous_flares.columns else 0
+        print(f"Found {len(simultaneous_flares)} simultaneous flare events in {num_groups} groups, clustered into {num_sequences} flare sequences")
 
 
 if __name__ == "__main__":
