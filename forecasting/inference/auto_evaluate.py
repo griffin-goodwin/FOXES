@@ -133,7 +133,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     model_type = detect_model_type(checkpoint_path)
     
     # Create output directory
-    output_dir = f"/mnt/data/batch_results/{model_name}"
+    output_dir = f"/mnt/data/FOXES_Data/batch_results/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{output_dir}/weights", exist_ok=True)
     
