@@ -75,7 +75,8 @@ class SolarFlareEvaluator:
                  weight_path=None,
                  baseline_csv_path=None,
                  output_dir="./solar_flare_evaluation",
-                 sxr_cutoff=None):
+                 sxr_cutoff=None,
+                 plot_background='black'):
         """
         Initialize the solar flare evaluation system with baseline comparison.
 
@@ -86,6 +87,7 @@ class SolarFlareEvaluator:
             baseline_csv_path (str): Path to baseline model prediction results CSV
             output_dir (str): Base output directory for results
             sxr_cutoff (float): Minimum SXR value threshold for ground truth filtering (optional)
+            plot_background (str): Regression plot background theme ('black' or 'white')
         """
         # Set paths
         self.csv_path = csv_path
@@ -94,6 +96,7 @@ class SolarFlareEvaluator:
         self.baseline_csv_path = baseline_csv_path
         self.output_dir = output_dir
         self.sxr_cutoff = sxr_cutoff
+        self.plot_background = (plot_background or 'black').lower()
         
         # Determine if we're in baseline-only mode
         self.baseline_only_mode = (csv_path is None or not os.path.exists(csv_path)) and baseline_csv_path is not None
@@ -346,7 +349,17 @@ class SolarFlareEvaluator:
             'X1.0': (1e-4, 1e-3)
         }
 
-        def add_flare_class_axes(ax, min_val, max_val):
+        theme = 'white' if self.plot_background in ('white', 'light') else 'black'
+        axis_facecolor = '#FFFFFF' if theme == 'white' else '#0F0F20'
+        text_color = '#111111' if theme == 'white' else '#FFFFFF'
+        legend_facecolor = '#F5F5F5' if theme == 'white' else '#1E1E2F'
+        grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
+        minor_grid_color = '#E6E6E6' if theme == 'white' else '#1F1F35'
+        legend_edge_color = '#BABABA' if theme == 'white' else '#3A3A5A'
+        colorbar_facecolor = axis_facecolor
+        figure_facecolor = '#FFFFFF' if theme == 'white' else '#000000'
+
+        def add_flare_class_axes(ax, min_val, max_val, tick_color):
             """Helper function to add flare class secondary axes"""
             # Create secondary axis for flare classes (top)
             ax_top = ax.twiny()
@@ -375,18 +388,18 @@ class SolarFlareEvaluator:
 
             if flare_positions:
                 ax_top.set_xticks(flare_positions)
-                ax_top.set_xticklabels(flare_labels, fontsize=12, color='white', fontfamily='Barlow')
-                ax_top.tick_params(colors='white')
+                ax_top.set_xticklabels(flare_labels, fontsize=12, color=tick_color, fontfamily='Barlow')
+                ax_top.tick_params(colors=tick_color)
 
                 ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_top.tick_params(which='minor', colors='white')
+                ax_top.tick_params(which='minor', colors=tick_color)
 
                 ax_right.set_yticks(flare_positions)
-                ax_right.set_yticklabels(flare_labels, fontsize=12, color='white', fontfamily='Barlow')
-                ax_right.tick_params(colors='white')
+                ax_right.set_yticklabels(flare_labels, fontsize=12, color=tick_color, fontfamily='Barlow')
+                ax_right.tick_params(colors=tick_color)
 
                 ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-                ax_right.tick_params(which='minor', colors='white')
+                ax_right.tick_params(which='minor', colors=tick_color)
 
         def draw_mae_contours(plot_ax, min_val, max_val):
             """Draw MAE contours on the 1-to-1 plot"""
@@ -442,8 +455,9 @@ class SolarFlareEvaluator:
 
         # Create figure with transparent background but solid plot area
         fig, (ax1) = plt.subplots(1, 1, figsize=(10, 6))
-        # Set figure background to transparent
-        fig.patch.set_alpha(0.0)
+        # Set figure background according to theme
+        fig.patch.set_facecolor(figure_facecolor)
+        fig.patch.set_alpha(1.0)
 
         # Main model plot (1-to-1 with MAE contours)
         min_val = min(min(self.y_true), min(self.y_pred))
@@ -455,40 +469,44 @@ class SolarFlareEvaluator:
 
         # 2D histogram
         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-                        cmap=cmaps.fire_dark, norm=shared_norm, alpha=1)
+                        cmap="bone", norm=shared_norm, alpha=1)
 
         # Draw MAE contours on main plot
         draw_mae_contours(ax1, min_val, max_val)
 
         # Set plot area background to dark blue-purple that complements fire colormap
-        ax1.set_facecolor('#FFEEE6')  # Dark blue-purple background for plot area
-        ax1.patch.set_alpha(1.0)      # Make sure axes patch is opaque
+        ax1.set_facecolor(axis_facecolor)
+        ax1.patch.set_alpha(1.0)
 
         # Set labels and styling
-        ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)', fontsize=14, color='white', fontfamily='Barlow')
-        ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)', fontsize=14, color='white', fontfamily='Barlow')
-        ax1.tick_params(labelsize=12, colors='white')
+        ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)', fontsize=14, color=text_color, fontfamily='Barlow')
+        ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)', fontsize=14, color=text_color, fontfamily='Barlow')
+        ax1.tick_params(labelsize=12, colors=text_color)
         
         # Set tick labels to Barlow font
         for label in ax1.get_xticklabels():
             label.set_fontfamily('Barlow')
+            label.set_color(text_color)
         for label in ax1.get_yticklabels():
             label.set_fontfamily('Barlow')
+            label.set_color(text_color)
         
         title = 'Baseline Model Performance with MAE Overlay' if self.baseline_only_mode else 'FOXES Model Performance with MAE Overlay'
         #ax1.set_title(title, fontsize=16, color='white', pad=20, fontfamily='Barlow')
         
         # Style the legend
-        legend = ax1.legend(loc='upper left', frameon=True, fancybox=True, shadow=True, prop={'family': 'Barlow', 'size': 12})
-        legend.get_frame().set_facecolor('#FFEEE6')
+        legend = ax1.legend(loc='upper left', frameon=True, fancybox=True, shadow=True,
+                            prop={'family': 'Barlow', 'size': 12})
+        legend.get_frame().set_facecolor(legend_facecolor)
+        legend.get_frame().set_edgecolor(legend_edge_color)
         legend.get_frame().set_alpha(0.9)
         for text in legend.get_texts():
-            text.set_color('black')
+            text.set_color(text_color)
             text.set_fontsize(12)
             text.set_fontfamily('Barlow')
         
         # Grid styling
-        ax1.grid(True, alpha=0.3, color='black', linestyle='-', linewidth=0.5)
+        ax1.grid(True, alpha=0.6, color=grid_color, linestyle='-', linewidth=0.5)
         ax1.tick_params()
         ax1.set_xscale('log')
         ax1.set_yscale('log')
@@ -496,33 +514,38 @@ class SolarFlareEvaluator:
         # Add minor ticks for main plot
         ax1.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
         ax1.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-        ax1.tick_params(which='minor', colors='white')
-        ax1.grid(True, which='minor', alpha=0.15, linewidth=0.25, linestyle='--', color='black')
+        ax1.tick_params(which='minor', colors=text_color)
+        ax1.grid(True, which='minor', alpha=0.15, linewidth=0.25, linestyle='--', color=minor_grid_color)
 
         # Add flare class axes to main plot
-        add_flare_class_axes(ax1, min_val, max_val)
+        add_flare_class_axes(ax1, min_val, max_val, text_color)
 
         # Colorbar styling
         cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)
-        cbar.ax.yaxis.set_tick_params(labelsize=12, colors='white')
-        cbar.set_label("Count", fontsize=14, color='white', fontfamily='Barlow')
-        cbar.ax.tick_params(colors='white')
+        cbar.ax.yaxis.set_tick_params(labelsize=12, colors=text_color)
+        cbar.set_label("Count", fontsize=14, color=text_color, fontfamily='Barlow')
+        cbar.ax.tick_params(colors=text_color)
         #make cbar small ticks white
-        cbar.ax.yaxis.set_tick_params(colors='white')
+        cbar.ax.yaxis.set_tick_params(colors=text_color)
         cbar.ax.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
-        cbar.ax.tick_params(which='minor', colors='white')
+        cbar.ax.tick_params(which='minor', colors=text_color)
         # Make colorbar background match the plot area
-        cbar.ax.set_facecolor('#1a1a3a')
+        cbar.ax.set_facecolor(colorbar_facecolor)
         cbar.ax.patch.set_alpha(1.0)
         
         # Set colorbar tick labels to Barlow font
         for label in cbar.ax.get_yticklabels():
             label.set_fontfamily('Barlow')
+            label.set_color(text_color)
+
+        # Set spines to match text color
+        for spine in ax1.spines.values():
+            spine.set_color(text_color)
 
         # Save with transparent background - now only the figure background will be transparent
         plot_path = os.path.join(self.comparison_dir, "regression_comparison.png")
-        plt.savefig(plot_path, dpi=500, bbox_inches='tight', 
-                    facecolor='none')  # Explicitly set facecolor to none
+        plt.savefig(plot_path, dpi=500, bbox_inches='tight',
+                    facecolor=figure_facecolor)
         plt.close()
         print(f"Saved regression comparison plot to {plot_path}")
 
@@ -1144,6 +1167,7 @@ def main():
     data = config['data']
     evaluation = config['evaluation']
     time_range = config['time_range']
+    plotting_config = config.get('plotting', {})
     
     # Generate timestamps
     timestamps = generate_timestamps(
@@ -1178,7 +1202,8 @@ def main():
         aia_dir=data['aia_dir'],
         weight_path=data['weight_path'],
         output_dir=evaluation['output_dir'],
-        sxr_cutoff=evaluation.get('sxr_cutoff')
+        sxr_cutoff=evaluation.get('sxr_cutoff'),
+        plot_background=plotting_config.get('regression_background', 'black')
     )
     
     # Run complete evaluation

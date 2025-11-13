@@ -133,7 +133,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     model_type = detect_model_type(checkpoint_path)
     
     # Create output directory
-    output_dir = f"/mnt/data/FOXES_Data/batch_results/{model_name}"
+    output_dir = f"/data/FOXES_Data/batch_results/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{output_dir}/weights", exist_ok=True)
     
@@ -160,7 +160,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'runs': 5
         },
         'model_params': {
-            'batch_size': 16,  # Match training batch size. If you get OOM errors, reduce this.
+            'batch_size': 8,  # Match training batch size. If you get OOM errors, reduce this.
                               # Note: Inference with attention weights uses more memory than training
             'input_size': 512,
             'no_weights': True,  # Set to False to save attention weights (uses more memory)
@@ -190,7 +190,8 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     return config, output_dir
 
 
-def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP", prediction_only=False):
+def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO-OVERLAP",
+                             prediction_only=False, regression_background='black'):
     """
     Create evaluation configuration for computing metrics and visualizations.
 
@@ -234,7 +235,8 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
         'plotting': {
             'figure_size': [12, 8],
             'dpi': 300,
-            'colormap': 'sdoaia171'
+            'colormap': 'sdoaia171',
+            'regression_background': regression_background
         },
         'metrics': {
             'include_rmse': True,
@@ -347,10 +349,12 @@ def main():
     parser.add_argument('-checkpoint_dir', type=str, help='Directory containing checkpoint files')
     parser.add_argument('-checkpoint_path', type=str, help='Specific checkpoint file path')
     parser.add_argument('-model_name', type=str, required=True, help='Name for the model (used for output naming)')
-    parser.add_argument('-base_data_dir', type=str, default='/mnt/data/', help='Base data directory')
+    parser.add_argument('-base_data_dir', type=str, default='/data/FOXES_Data/', help='Base data directory')
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
     parser.add_argument('-prediction_only', action='store_true', help='Force prediction-only mode (no SXR ground truth)')
+    parser.add_argument('-regression_background', type=str, choices=['black', 'white'], default='black',
+                        help='Background color for regression plots (default: black)')
     
     args = parser.parse_args()
     
@@ -392,7 +396,13 @@ def main():
     
     # Create configs
     inference_config, output_dir = create_inference_config(checkpoint_path, args.model_name, args.base_data_dir, prediction_only_mode)
-    evaluation_config = create_evaluation_config(args.model_name, output_dir, args.base_data_dir, prediction_only_mode)
+    evaluation_config = create_evaluation_config(
+        args.model_name,
+        output_dir,
+        args.base_data_dir,
+        prediction_only_mode,
+        regression_background=args.regression_background
+    )
     
     # Save configs
     inference_config_path = f"/tmp/inference_config_{args.model_name}.yaml"
