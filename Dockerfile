@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     bzip2 \
+    unzip \
     ca-certificates \
+    fontconfig \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -21,6 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Barlow fonts manually from Google Fonts repository
+RUN set -eux; \
+    mkdir -p /usr/local/share/fonts/Barlow; \
+    for weight in Thin ThinItalic ExtraLight ExtraLightItalic Light LightItalic Regular Italic Medium MediumItalic SemiBold SemiBoldItalic Bold BoldItalic ExtraBold ExtraBoldItalic Black BlackItalic; do \
+        curl -fSL -o "/usr/local/share/fonts/Barlow/Barlow-${weight}.ttf" "https://raw.githubusercontent.com/google/fonts/main/ofl/barlow/Barlow-${weight}.ttf"; \
+    done; \
+    fc-cache -fv
 
 # Install Miniforge (conda-forge based, no TOS acceptance required)
 RUN wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh && \
