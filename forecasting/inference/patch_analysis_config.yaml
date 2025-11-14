@@ -2,10 +2,10 @@
 # Configuration for flux contribution analysis and flare detection
 
 # Data paths
-base_data_dir: "/mnt/data/batch_results/new_weights_local"
+base_data_dir: "/data/FOXES_Data/batch_results/vit/"
 flux_path: "${base_data_dir}/flux"
-aia_path: "/mnt/data/PAPER_DATA_WITH_335/AIA"
-output_path: "${base_data_dir}/new_weights_local_predictions.csv"
+aia_path: "/data/FOXES_Data/AIA"
+output_path: "${base_data_dir}/vit_predictions.csv"
 
 # Grid and patch parameters
 grid_size: [64, 64]
@@ -16,38 +16,38 @@ input_size: 512
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2023-01-01T00:00:00"
-    end_time: "2025-09-26T00:00:00"
+    start_time: "2024-03-20T00:00:00"
+    end_time: "2024-03-27T00:00:00"
   
   # Flare detection parameters
   # Thresholds: median + (std_multiplier * standard_deviation) - calculated in log space
   flare_detection:
     # Threshold multipliers (in log space - more appropriate for flux data)
     threshold_std_multiplier: 1
-    core_threshold_std_multiplier: 2.0      # Higher threshold for stable cores
-    growth_threshold_std_multiplier: 1.5   # Lower threshold for region growth
+    core_threshold_std_multiplier: 2.5      # Higher threshold for stable cores
+    growth_threshold_std_multiplier: 1.0   # Lower threshold for region growth
     
     # Size constraints
-    min_core_patches: 6                    # Minimum core size for stability
-    min_patches: 12                        # Minimum total region size
-    max_patches: 300                       # Maximum region size
+    min_core_patches: 0                    # Minimum core size for stability
+    min_patches: 0                        # Minimum total region size (set to 0 or null to disable)
+    max_patches: 0                       # Maximum region size (set to 0 or null to disable)
+    min_flux_threshold: 0.0000001              # Minimum sum flux for a region to be accepted (set to null to disable)
     
     # Morphological operations
-    closing_iterations: 5                  # More closing to fill gaps and reduce flickering
-    dilation_iterations: 1                 # Dilation for region growth
+    closing_iterations: 3                  # More closing to fill gaps and reduce flickering
+    dilation_iterations: 3                # Dilation for region growth
     prevent_overlap: true                  # Prevent overlapping regions
+    core_merge_distance: 0                # Distance (patches) to merge close/overlapping cores (0 = disabled)
     
     # Temporal smoothing (applied to detected region flux values and sizes)
-    flux_smoothing_window: 3               # Window size for flux value and size smoothing
+    flux_smoothing_window: 1               # Window size for flux value and size smoothing
     
-    # Hysteresis (appear/disappear thresholds to reduce flickering)
-    use_hysteresis: true                   # Enable hysteresis for stable region tracking
-    appear_threshold_std_multiplier: 2.0    # Higher threshold - regions must exceed this to appear (defaults to core_threshold if not set)
-    disappear_threshold_std_multiplier: 1.2 # Lower threshold - regions disappear below this (defaults to growth_threshold if not set)
-    hysteresis_max_gap_frames: 10           # Maximum frames a region can be missing before disappearing
+    # Region size change constraints (for tracked regions in sequences)
+    max_size_growth_factor: 0            # Maximum allowed size ratio between frames (e.g., 2.0 = can double, set to 0 or null to disable)
+    max_size_shrinkage_factor: 0        # Minimum allowed size ratio between frames (e.g., 0.5 = can halve, set to 0 or null to disable)
     
     # Simultaneous flare detection
-    simultaneous_flare_threshold: 0.000001
+    simultaneous_flare_threshold: 0.000005
     sequence_window_hours: 1.0  # Time window for clustering groups into flare sequences
   
   # Output configuration
@@ -55,10 +55,12 @@ analysis:
     output_dir: "${base_data_dir}/patch_analysis_output"
     
     # Movie generation
-    create_contour_movie: true
+    create_contour_movie: false
     create_simultaneous_flare_movies: true
+    create_contour_movies_for_sequences: true  # Create contour movies for simultaneous flare sequences
+    create_flux_heatmap_movies_for_sequences: true  # Create flux heatmap movies for simultaneous flare sequences
     simultaneous_flare_window_days: .25
     movie_fps: 15
     movie_interval_seconds: 12
     show_sxr_timeseries: true
-    max_tracking_distance: 75  # Increased for better tracking across frames
+    max_tracking_distance: 70  # Increased for better tracking across frames
