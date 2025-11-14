@@ -7,6 +7,7 @@ from matplotlib import rcParams
 import pandas as pd
 from pathlib import Path
 import argparse
+import cv2
 from scipy import ndimage as nd
 from sklearn.cluster import DBSCAN
 import warnings
@@ -17,7 +18,6 @@ import os
 from multiprocessing import Pool
 import time
 from tqdm import tqdm
-import cv2
 
 
 def setup_barlow_font():
@@ -52,19 +52,12 @@ setup_barlow_font()
 
 
 """
-Flux Contribution Analysis and Flare Detection Script (Version 5 - Simplified DBSCAN)
+Flux Contribution Analysis and Flare Detection Script - Version 6
 
 This script analyzes flux contributions from different patches to identify 
 potential flaring events and visualize their spatial and temporal patterns.
 
-Version 5 features:
-1. Simplified DBSCAN Detection: Simple, intuitive DBSCAN clustering on flux maps.
-   Filters patches by threshold, then clusters by spatial position + flux value.
-   Easy to tune and understand - mimics how humans identify regions visually.
-2. DBSCAN Track Merging: Uses DBSCAN clustering to merge fragmented tracks that
-   belong to the same physical region, improving tracking robustness across temporal gaps.
-3. Traditional Thresholding: Uses median + standard deviation thresholding
-   (same as v1) for automatic threshold determination, calculated in log space.
+Version 6: Uses DBSCAN clustering for region detection (simplified from v5)
 """
 
 
@@ -203,6 +196,7 @@ class FluxContributionAnalyzer:
             return np.loadtxt(flux_file, delimiter=',')
         return None
 
+
     def detect_flare_events(self, timestamps=None):
         """
         Detect potential flare events based on tracked regions with temporal-spatial coherence.
@@ -301,7 +295,6 @@ class FluxContributionAnalyzer:
             
             # Start a new sequence with this group
             sequence_groups = [group_idx]
-            group_datetime = pd.to_datetime(group['datetime'].iloc[0])
             used_group_indices.add(group_idx)
             
             # Find all groups within sequence_window_hours of any group in this sequence
@@ -445,42 +438,12 @@ class FluxContributionAnalyzer:
                 return (timestamp, None)
             pred_data = pred_data.iloc[0]
             
-            # Check if DBSCAN-based detection is enabled
-            use_dbscan_detection = self.flare_config.get('use_dbscan_for_detection', False)
-            if use_dbscan_detection:
-                regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data, previous_regions=None)
-            else:
-                # Use traditional threshold-based detection
-                regions = self._detect_regions_for_timestamp(flux_contrib, timestamp, pred_data)
+            # Detect regions for this timestamp
+            regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data)
             return (timestamp, regions)
         except Exception as e:
             print(f"Error detecting regions for {timestamp}: {e}")
             return (timestamp, None)
-    
-    def _detect_regions_worker_with_previous(self, timestamp, previous_regions):
-        """Worker function for sequential region detection with previous region awareness"""
-        try:
-            flux_contrib = self.load_flux_contributions(timestamp)
-            if flux_contrib is None:
-                return None
-                
-            # Get prediction data
-            pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp]
-            if pred_data.empty:
-                return None
-            pred_data = pred_data.iloc[0]
-            
-            # Check if DBSCAN-based detection is enabled
-            use_dbscan_detection = self.flare_config.get('use_dbscan_for_detection', False)
-            if use_dbscan_detection:
-                regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data, previous_regions=previous_regions)
-            else:
-                # Use traditional threshold-based detection
-                regions = self._detect_regions_for_timestamp(flux_contrib, timestamp, pred_data)
-            return regions
-        except Exception as e:
-            print(f"Error detecting regions for {timestamp}: {e}")
-            return None
 
     def _constrain_region_size_change(self, prev_region, new_region, max_growth_factor=2.0, max_shrinkage_factor=0.5):
         """
@@ -650,86 +613,29 @@ class FluxContributionAnalyzer:
         region_tracks = {}  # track_id -> list of (timestamp, region_data)
         next_track_id = 1
         
-        # Check if previous region awareness is enabled
-        use_previous_regions = self.flare_config.get('dbscan_detection_use_previous_regions', False)
+        # First pass: collect all regions using multiprocessing
+        print("Phase 1/2: Detecting regions at each timestamp (parallel)...")
+        num_processes = min(os.cpu_count(), len(timestamps))
+        num_processes = max(1, num_processes - 1)  # Leave one CPU free
+        print(f"Using {num_processes} processes for region detection")
         
-        # First pass: collect all regions
-        # For previous region awareness, we need to track which regions belong to which tracks
-        # so we can pass track_ids to detection
-        detection_id_to_track_id = {}  # Maps (timestamp, detection_id) -> track_id
+        with Pool(processes=num_processes) as pool:
+            # Use imap for progress tracking
+            results = list(tqdm(pool.imap(self._detect_regions_worker, timestamps),
+                               desc="Detecting regions", unit="timestamp", total=len(timestamps)))
         
-        if use_previous_regions:
-            # Sequential detection to have access to previous regions
-            print("Phase 1/2: Detecting regions at each timestamp (sequential, with previous region awareness)...")
-            previous_regions_with_tracks = None  # Will store (region, track_id) tuples
-            for i, timestamp in enumerate(tqdm(timestamps, desc="Detecting regions", unit="timestamp")):
-                # Pass previous regions with their track IDs
-                previous_regions = None
-                if previous_regions_with_tracks is not None:
-                    previous_regions = [reg for reg, _ in previous_regions_with_tracks]
-                
-                regions = self._detect_regions_worker_with_previous(timestamp, previous_regions)
-                if regions is not None:
-                    all_regions[timestamp] = regions
-                    
-                    # After detection, do quick tracking to get track_ids for next iteration
-                    if i > 0:  # Can't track first timestamp
-                        prev_timestamp = timestamps[i-1]
-                        if prev_timestamp in all_regions:
-                            # Quick tracking: match current regions to previous tracks
-                            current_regions_with_tracks = []
-                            for region in regions:
-                                preferred_id = region.get('preferred_previous_region_id', None)
-                                if preferred_id is not None and previous_regions_with_tracks is not None:
-                                    # Find the track_id for this preferred detection_id
-                                    track_id = None
-                                    for prev_reg, prev_track_id in previous_regions_with_tracks:
-                                        if prev_reg.get('id') == preferred_id:
-                                            track_id = prev_track_id
-                                            break
-                                    
-                                    if track_id is not None:
-                                        # Store mapping and add track_id to region
-                                        detection_id_to_track_id[(timestamp, region.get('id'))] = track_id
-                                        region['preferred_track_id'] = track_id
-                                        current_regions_with_tracks.append((region, track_id))
-                                        continue
-                                
-                                # No preferred track, will be assigned during full tracking
-                                current_regions_with_tracks.append((region, None))
-                            
-                            previous_regions_with_tracks = current_regions_with_tracks
-                        else:
-                            previous_regions_with_tracks = [(reg, None) for reg in regions]
-                    else:
-                        # First timestamp - no tracks yet
-                        previous_regions_with_tracks = [(reg, None) for reg in regions]
-        else:
-            # Parallel detection (faster, but no previous region awareness)
-            print("Phase 1/2: Detecting regions at each timestamp (parallel)...")
-            num_processes = min(os.cpu_count(), len(timestamps))
-            num_processes = max(1, num_processes - 1)  # Leave one CPU free
-            print(f"Using {num_processes} processes for region detection")
-            
-            with Pool(processes=num_processes) as pool:
-                # Use imap for progress tracking
-                results = list(tqdm(pool.imap(self._detect_regions_worker, timestamps),
-                                   desc="Detecting regions", unit="timestamp", total=len(timestamps)))
-            
-            # Collect results
-            for timestamp, regions in results:
-                if regions is not None:
-                    all_regions[timestamp] = regions
+        # Collect results
+        for timestamp, regions in results:
+            if regions is not None:
+                all_regions[timestamp] = regions
             
         # Second pass: track regions across time
         print("Phase 2/2: Tracking regions across timestamps...")
         
         # Track active tracks (those updated recently) for optimization
         active_tracks = set()
-        max_time_gap = 30 * 60  # 30 minutes in seconds
-
-        # Tracking is based on spatial proximity only
-
+        max_time_gap = 60 * 60  # 60 minutes in seconds
+        
         for i, timestamp in tqdm(enumerate(timestamps), desc="Tracking regions", unit="timestamp", total=len(timestamps)):
             current_time = pd.to_datetime(timestamp)
             
@@ -749,155 +655,29 @@ class FluxContributionAnalyzer:
                 for region in current_regions:
                     region_copy = region.copy()
                     
-                    # FIRST: Check if this region OVERLAPS with multiple tracks
-                    # Only check overlap (not proximity) to avoid incorrectly reassigning nearby regions
-                    # Assign to the one where the flux ratio is highest (the flaring one)
-                    # This handles the case where DBSCAN merges regions
-                    region_mask = region_copy.get('mask', None)
-                    current_flux = region_copy.get('sum_flux', 0)
-                    overlapping_tracks = []
+                    # Find best matching existing track based on spatial proximity
                     best_track_id = None
                     best_distance = float('inf')
                     
-                    # Check all tracks for overlap only (not proximity)
-                    all_track_ids = list(region_tracks.keys())
-                    
-                    if region_mask is not None and current_flux > 0:
-                        prev_timestamp = timestamps[i-1] if i > 0 else None
+                    for track_id in recently_active_tracks:
+                        if not region_tracks[track_id]:
+                            continue
+                            
+                        last_timestamp, last_region = region_tracks[track_id][-1]
                         
-                        for track_id in all_track_ids:
-                            if not region_tracks[track_id]:
-                                continue
-                            
-                            # Get the region from the previous timestamp (not just last in track)
-                            prev_region_in_track = None
-                            for ts, reg in reversed(region_tracks[track_id]):
-                                if ts == prev_timestamp:
-                                    prev_region_in_track = reg
-                                    break
-                            
-                            # If no previous timestamp region, use last region in track
-                            if prev_region_in_track is None:
-                                last_timestamp, prev_region_in_track = region_tracks[track_id][-1]
-                            
-                            last_mask = prev_region_in_track.get('mask', None)
-                            last_flux = prev_region_in_track.get('sum_flux', 0)
-                            
-                            # Check for overlap only (not proximity)
-                            if last_mask is not None:
-                                overlap = np.logical_and(region_mask, last_mask)
-                                has_overlap = np.any(overlap)
-                                
-                                if has_overlap:
-                                    # Calculate distance
-                                    distance = np.sqrt(
-                                        (region_copy['centroid_img_x'] - prev_region_in_track['centroid_img_x'])**2 + 
-                                        (region_copy['centroid_img_y'] - prev_region_in_track['centroid_img_y'])**2
-                                    )
-                                    
-                                    # Get flux of overlapping patches to see which previous region
-                                    # the high-flux area belongs to
-                                    overlap_flux_sum = 0.0
-                                    # Load flux to get overlap flux values
-                                    flux_contrib = self.load_flux_contributions(timestamp)
-                                    if flux_contrib is not None:
-                                        overlap_y, overlap_x = np.where(overlap)
-                                        if len(overlap_y) > 0:
-                                            overlap_flux = flux_contrib[overlap_y, overlap_x]
-                                            overlap_flux_sum = np.sum(overlap_flux)
-                                    
-                                    # Calculate flux ratio: current / previous
-                                    # Higher ratio means this region flared more
-                                    flux_ratio = current_flux / (last_flux + 1e-12)
-                                    
-                                    # Score: prioritize based on overlap flux and flux ratio
-                                    if overlap_flux_sum > 0:
-                                        # Compare overlap flux to previous region's flux
-                                        overlap_flux_ratio = overlap_flux_sum / (last_flux + 1e-12)
-                                        score = overlap_flux_sum * overlap_flux_ratio / (distance + 1.0)
-                                    else:
-                                        # Use total flux ratio
-                                        score = flux_ratio / (distance + 1.0)
-                                    
-                                    overlapping_tracks.append((track_id, score, flux_ratio, current_flux, distance, overlap_flux_sum))
-                    
-                    # If overlapping with multiple tracks, assign to the one with highest score (flaring region)
-                    if len(overlapping_tracks) > 1:
-                        # Sort by score (descending) - highest score = most flaring
-                        overlapping_tracks.sort(key=lambda x: x[1], reverse=True)
-                        best_track_id = overlapping_tracks[0][0]
-                        best_distance = overlapping_tracks[0][4]  # Distance from the chosen track
-                    
-                    # SECOND: If no merge detected, check preferred track IDs from DBSCAN detection
-                    if best_track_id is None:
-                        preferred_previous_region_id = region_copy.get('preferred_previous_region_id', None)
-                        preferred_track_id = region_copy.get('preferred_track_id', None)
+                        # Calculate Euclidean distance between centroids
+                        distance = np.sqrt(
+                            (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
+                            (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
+                        )
                         
-                        # If preferred_track_id is set (from quick tracking), use it directly
-                        if preferred_track_id is not None:
-                            if preferred_track_id in region_tracks and region_tracks[preferred_track_id]:
-                                last_timestamp, last_region = region_tracks[preferred_track_id][-1]
-                                distance = np.sqrt(
-                                    (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
-                                    (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
-                                )
-                                # Use preferred track - be more lenient with distance since this is a merge
-                                preferred_max_distance = max_distance * 2.0
-                                if distance < preferred_max_distance:
-                                    best_track_id = preferred_track_id
-                                    best_distance = distance
-                        
-                        # If preferred_previous_region_id is set but no track_id yet, find the track
-                        elif preferred_previous_region_id is not None and i > 0:
-                            prev_timestamp = timestamps[i-1]
-                            # Find which track the previous region with this detection ID belongs to
-                            for track_id, track_history in region_tracks.items():
-                                if not track_history:
-                                    continue
-                                # Check if any region in this track matches the preferred detection ID
-                                for ts, reg in track_history:
-                                    if ts == prev_timestamp:
-                                        # Use detection_id if stored, otherwise use id (for backward compatibility)
-                                        last_detection_id = reg.get('detection_id', reg.get('id'))
-                                        if last_detection_id == preferred_previous_region_id:
-                                            # Found the track! Use it
-                                            last_ts, last_reg = track_history[-1]
-                                            distance = np.sqrt(
-                                                (region_copy['centroid_img_x'] - last_reg['centroid_img_x'])**2 + 
-                                                (region_copy['centroid_img_y'] - last_reg['centroid_img_y'])**2
-                                            )
-                                            preferred_max_distance = max_distance * 2.0
-                                            if distance < preferred_max_distance:
-                                                best_track_id = track_id
-                                                best_distance = distance
-                                            break
-                                if best_track_id is not None:
-                                    break
-                    
-                    # THIRD: If still no track found, find best match by spatial proximity only
-                    if best_track_id is None:
-                        for track_id in recently_active_tracks:
-                            if not region_tracks[track_id]:
-                                continue
-                                
-                            last_timestamp, last_region = region_tracks[track_id][-1]
-
-                            # Calculate spatial distance
-                            distance = np.sqrt(
-                                (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
-                                (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
-                            )
-
-                            if distance < max_distance and distance < best_distance:
-                                best_distance = distance
-                                best_track_id = track_id
+                        if distance < max_distance and distance < best_distance:
+                            best_distance = distance
+                            best_track_id = track_id
                     
                     # Add region to existing track or create new track
                     if best_track_id is not None:
-                        # Store original detection ID before overwriting with track_id
-                        original_detection_id = region_copy.get('id')
                         region_copy['id'] = best_track_id
-                        region_copy['detection_id'] = original_detection_id  # Keep original for lookup
                         region_copy['timestamp'] = timestamp  # Add timestamp for constraint method
                         
                         # Constrain region size change to prevent rapid growth/shrinkage
@@ -910,7 +690,7 @@ class FluxContributionAnalyzer:
                         if max_shrinkage_factor == 0:
                             max_shrinkage_factor = None
                         
-                        # Only apply constraint if at least one factor is enabled
+                        # Only apply constraint if both factors are enabled
                         if max_growth_factor is not None or max_shrinkage_factor is not None:
                             region_copy = self._constrain_region_size_change(
                                 prev_region=last_region,
@@ -922,10 +702,7 @@ class FluxContributionAnalyzer:
                         region_tracks[best_track_id].append((timestamp, region_copy))
                         active_tracks.add(best_track_id)
                     else:
-                        # Store original detection ID before overwriting with track_id
-                        original_detection_id = region_copy.get('id')
                         region_copy['id'] = next_track_id
-                        region_copy['detection_id'] = original_detection_id  # Keep original for lookup
                         region_copy['timestamp'] = timestamp
                         region_tracks[next_track_id] = [(timestamp, region_copy)]
                         active_tracks.add(next_track_id)
@@ -934,16 +711,7 @@ class FluxContributionAnalyzer:
         # Filter out tracks with only one region (no temporal continuity)
         region_tracks = {k: v for k, v in region_tracks.items() if len(v) > 1}
         
-        print(f"Found {len(region_tracks)} region tracks after initial tracking")
-        
-        # Apply DBSCAN clustering to merge fragmented tracks
-        use_dbscan = self.flare_config.get('use_dbscan_clustering', True)
-        if use_dbscan and len(region_tracks) > 1:
-            dbscan_eps = self.flare_config.get('dbscan_eps', 100.0)  # Spatial distance threshold (pixels)
-            dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 2)  # Minimum tracks in cluster
-            print(f"Applying DBSCAN clustering (eps={dbscan_eps}, min_samples={dbscan_min_samples})...")
-            region_tracks = self._cluster_and_merge_tracks(region_tracks, dbscan_eps, dbscan_min_samples)
-            print(f"Found {len(region_tracks)} region tracks after DBSCAN clustering")
+        print(f"Found {len(region_tracks)} region tracks across {len(timestamps)} timestamps")
         
         # Apply temporal smoothing to flux values
         smoothing_window = self.flare_config.get('flux_smoothing_window', 3)
@@ -952,136 +720,6 @@ class FluxContributionAnalyzer:
         
         
         return region_tracks
-    
-    def _cluster_and_merge_tracks(self, region_tracks, eps, min_samples):
-        """
-        Use DBSCAN clustering to merge fragmented tracks that belong to the same physical region.
-        
-        Extracts features from each track (spatial position, temporal span, flux) and clusters
-        them using DBSCAN. Tracks in the same cluster are merged.
-        
-        Args:
-            region_tracks: Dictionary of track_id -> list of (timestamp, region_data)
-            eps: Maximum distance between tracks to be in same cluster (pixels)
-            min_samples: Minimum number of tracks required to form a cluster
-            
-        Returns:
-            Merged region_tracks dictionary
-        """
-        if len(region_tracks) < 2:
-            return region_tracks
-        
-        # Extract features for each track
-        track_features = []
-        track_ids = list(region_tracks.keys())
-        
-        for track_id in track_ids:
-            track_data = region_tracks[track_id]
-            
-            # Calculate average centroid position (spatial feature)
-            centroids_x = [r['centroid_img_x'] for _, r in track_data]
-            centroids_y = [r['centroid_img_y'] for _, r in track_data]
-            avg_x = np.mean(centroids_x)
-            avg_y = np.mean(centroids_y)
-            
-            # Calculate temporal center (convert to seconds since first timestamp)
-            timestamps = [pd.to_datetime(ts) for ts, _ in track_data]
-            if len(timestamps) > 1:
-                time_span = (timestamps[-1] - timestamps[0]).total_seconds()
-                time_center = (timestamps[0] + pd.Timedelta(seconds=time_span/2)).timestamp()
-            else:
-                time_span = 0
-                time_center = timestamps[0].timestamp()
-            
-            # Normalize time to be on similar scale as spatial coordinates
-            # Use a scaling factor: 1 pixel per second (adjust based on your data)
-            time_scale = self.flare_config.get('dbscan_time_scale', 1.0)  # pixels per second
-            normalized_time = time_center * time_scale
-            
-            # Average flux (log scale for better distribution)
-            fluxes = [r['sum_flux'] for _, r in track_data]
-            avg_flux = np.mean(fluxes)
-            log_flux = np.log10(avg_flux + 1e-10)  # Add small value to avoid log(0)
-            
-            # Normalize flux to spatial scale (flux values are typically much smaller)
-            flux_scale = self.flare_config.get('dbscan_flux_scale', 0.0)  # 0 = don't use flux in clustering
-            normalized_flux = log_flux * flux_scale
-            
-            # Feature vector: [x, y, normalized_time, normalized_flux]
-            # If flux_scale is 0, only use [x, y, normalized_time]
-            if flux_scale > 0:
-                features = np.array([avg_x, avg_y, normalized_time, normalized_flux])
-            else:
-                features = np.array([avg_x, avg_y, normalized_time])
-            
-            track_features.append(features)
-        
-        track_features = np.array(track_features)
-        
-        # Apply DBSCAN clustering
-        if len(track_features) < min_samples:
-            # Not enough tracks to cluster
-            return region_tracks
-        
-        # Normalize features for DBSCAN (important for mixed units)
-        feature_means = np.mean(track_features, axis=0)
-        feature_stds = np.std(track_features, axis=0)
-        feature_stds[feature_stds == 0] = 1  # Avoid division by zero
-        normalized_features = (track_features - feature_means) / feature_stds
-        
-        # Adjust eps for normalized features
-        # eps is in original units, need to scale it
-        normalized_eps = eps / np.mean(feature_stds[:2])  # Use spatial std for scaling
-        
-        clustering = DBSCAN(eps=normalized_eps, min_samples=min_samples, metric='euclidean')
-        cluster_labels = clustering.fit_predict(normalized_features)
-        
-        # Merge tracks in the same cluster
-        merged_tracks = {}
-        cluster_groups = {}
-        
-        for idx, (track_id, label) in enumerate(zip(track_ids, cluster_labels)):
-            if label == -1:
-                # Noise point - keep as separate track
-                merged_tracks[track_id] = region_tracks[track_id]
-            else:
-                # Add to cluster group
-                if label not in cluster_groups:
-                    cluster_groups[label] = []
-                cluster_groups[label].append(track_id)
-        
-        # Merge tracks in each cluster
-        next_new_id = max(track_ids) + 1 if track_ids else 1
-        for cluster_id, track_ids_in_cluster in cluster_groups.items():
-            if len(track_ids_in_cluster) == 1:
-                # Single track in cluster, keep as is
-                merged_tracks[track_ids_in_cluster[0]] = region_tracks[track_ids_in_cluster[0]]
-            else:
-                # Merge multiple tracks
-                # Combine all regions from all tracks, sort by timestamp
-                all_regions = []
-                for tid in track_ids_in_cluster:
-                    all_regions.extend(region_tracks[tid])
-                
-                # Sort by timestamp
-                all_regions.sort(key=lambda x: pd.to_datetime(x[0]))
-                
-                # Update region IDs to the new merged track ID (create new tuples)
-                merged_regions = []
-                for timestamp, region_data in all_regions:
-                    region_data_copy = region_data.copy()
-                    region_data_copy['id'] = next_new_id
-                    merged_regions.append((timestamp, region_data_copy))
-                
-                merged_tracks[next_new_id] = merged_regions
-                next_new_id += 1
-        
-        num_merged = len(cluster_groups)
-        num_noise = np.sum(cluster_labels == -1)
-        if num_merged > 0:
-            print(f"  DBSCAN: Merged {num_merged} clusters, {num_noise} tracks kept separate (noise)")
-        
-        return merged_tracks
     
     def _apply_temporal_smoothing(self, region_tracks, window_size=3):
         """
@@ -1194,251 +832,147 @@ class FluxContributionAnalyzer:
         
         return merged_labeled_cores, num_merged_cores
 
-    def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data, previous_regions=None):
+    def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data):
         """
-        Detect active regions using DBSCAN clustering directly on flux maps.
+        Region detection using DBSCAN clustering.
         
-        This method clusters patches based on their spatial position and flux values,
-        creating active regions from the clusters. This approach can find irregularly
-        shaped regions and is less sensitive to threshold tuning.
-        
-        Args:
-            flux_contrib: 2D array of flux contributions
-            timestamp: Current timestamp
-            pred_data: Prediction data dictionary
-            previous_regions: Optional list of previous timestamp's regions (for temporal awareness)
-            
-        Returns:
-            List of region dictionaries (same format as threshold-based detection)
+        This method:
+        1. Filters patches using median + std threshold
+        2. Clusters significant patches using DBSCAN
+        3. Creates regions from clusters
         """
-        # Get DBSCAN detection parameters
-        dbscan_eps = self.flare_config.get('dbscan_detection_eps', 2.0)  # Spatial distance in patches
-        dbscan_min_samples = self.flare_config.get('dbscan_detection_min_samples', 3)  # Min patches per region
-        dbscan_threshold_std_multiplier = self.flare_config.get('dbscan_detection_threshold_std_multiplier', 1.0)  # Threshold multiplier for filtering patches
+        # Get DBSCAN config values
+        threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
+        dbscan_eps = self.flare_config.get('dbscan_eps', 2.0)
+        dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 5)
+        dbscan_use_flux = self.flare_config.get('dbscan_use_flux', False)
+        dbscan_flux_weight = self.flare_config.get('dbscan_flux_weight', 1.0)
+        min_patches = self.flare_config.get('min_patches', 20)
+        max_patches = self.flare_config.get('max_patches', 300)
+        min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
         
-        # Filter patches using median + std threshold (same as v1 thresholding method)
-        # Calculate median and std in log space (more appropriate for flux data)
+        # Allow None to disable constraints
+        if min_patches == 0:
+            min_patches = None
+        if max_patches == 0:
+            max_patches = None
+        
+        # Step 1: Filter patches using median + std threshold
         flux_values = flux_contrib.flatten()
         # Filter out zero/negative values for log calculation
         positive_flux = flux_values[flux_values > 0]
         if len(positive_flux) == 0:
-            return []  # No positive flux values
+            return []
+        
         log_flux = np.log(positive_flux)
         median_log_flux = np.median(log_flux)
         std_log_flux = np.std(log_flux)
-        # Convert back to linear space for threshold
-        min_flux_for_clustering = np.exp(median_log_flux + dbscan_threshold_std_multiplier * std_log_flux)
+        threshold = np.exp(median_log_flux + threshold_std_multiplier * std_log_flux)
         
-        # Get patches above minimum flux threshold
-        significant_mask = flux_contrib > min_flux_for_clustering
+        # Find significant patches
+        significant_mask = flux_contrib > threshold
         significant_patches = np.where(significant_mask)
         
         if len(significant_patches[0]) == 0:
             return []
         
-        # Extract features: (y, x) or (y, x, log_flux)
-        # Since we already filtered by flux threshold, we may not need flux in clustering
+        # Get patch coordinates and flux values
         patch_y = significant_patches[0]
         patch_x = significant_patches[1]
-        # Always get flux values for region property calculations (sum_flux, max_flux)
         patch_flux = flux_contrib[significant_patches]
         
-        # Simple DBSCAN clustering: spatial position + optional flux value, gradient, or previous region proximity
-        # This mimics how humans identify regions - patches that are close in space
-        # and have similar flux characteristics belong to the same region
-        use_flux_in_clustering = self.flare_config.get('dbscan_detection_use_flux', False)
-        use_gradient_in_clustering = self.flare_config.get('dbscan_detection_use_gradient', False)
-        use_previous_regions = self.flare_config.get('dbscan_detection_use_previous_regions', False)
+        # Step 2: Prepare features for DBSCAN
+        if dbscan_use_flux:
+            # Use spatial coordinates + log flux
+            # Filter out zero/negative flux
+            valid_mask = patch_flux > 0
+            if np.sum(valid_mask) == 0:
+                return []
+            
+            patch_y = patch_y[valid_mask]
+            patch_x = patch_x[valid_mask]
+            patch_flux = patch_flux[valid_mask]
+            
+            log_flux_values = np.log(patch_flux)
+            # Normalize log flux (zero mean, unit std) and apply weight
+            log_flux_normalized = (log_flux_values - np.mean(log_flux_values)) / (np.std(log_flux_values) + 1e-10)
+            log_flux_scaled = log_flux_normalized * dbscan_flux_weight
+            
+            features = np.column_stack([patch_y, patch_x, log_flux_scaled])
+        else:
+            # Use only spatial coordinates
+            features = np.column_stack([patch_y, patch_x])
         
-        # Warn if both flux and gradient are enabled (they're mutually exclusive)
-        if use_flux_in_clustering and use_gradient_in_clustering:
-            print("Warning: Both use_flux and use_gradient are enabled. Using gradient (takes precedence).")
-            use_flux_in_clustering = False
-        
-        # Start with spatial features
-        features = np.column_stack([patch_y, patch_x])
-        
-        # Add optional features
-        if use_gradient_in_clustering:
-            # Calculate flux gradient (magnitude of spatial change) at each patch
-            # This helps identify region boundaries and edges
-            flux_gradient = self._calculate_flux_gradient(flux_contrib, significant_mask, patch_y, patch_x)
-            # Use log gradient for better distribution
-            log_gradient = np.log10(flux_gradient + 1e-10)
-            features = np.column_stack([features, log_gradient])
-        elif use_flux_in_clustering:
-            # Use log flux for better distribution (flux values span many orders of magnitude)
-            log_flux = np.log10(patch_flux + 1e-10)
-            features = np.column_stack([features, log_flux])
-        
-        # Add previous region proximity feature if enabled and previous regions are available
-        if use_previous_regions and previous_regions is not None and len(previous_regions) > 0:
-            # Calculate distance to nearest previous region centroid for each patch
-            prev_region_proximity = self._calculate_previous_region_proximity(
-                patch_y, patch_x, previous_regions
-            )
-            features = np.column_stack([features, prev_region_proximity])
-        
-        # Normalize features for DBSCAN (important for mixed units: patches vs log flux)
-        feature_means = np.mean(features, axis=0)
-        feature_stds = np.std(features, axis=0)
-        feature_stds[feature_stds == 0] = 1  # Avoid division by zero
-        normalized_features = (features - feature_means) / feature_stds
-        
-        # Adjust eps for normalized features
-        # eps is in original units (patches), need to scale it for normalized space
-        # Use spatial std for scaling (flux dimension handled separately if used)
-        normalized_eps = dbscan_eps / np.mean(feature_stds[:2])
-        
-        # Apply weights to optional feature dimensions
-        feature_idx = 2  # Start after spatial dimensions (y, x)
-        if use_gradient_in_clustering:
-            # Get gradient weight to control how much gradient similarity matters
-            gradient_weight = self.flare_config.get('dbscan_detection_gradient_weight', 0.3)
-            # Scale the gradient dimension by its weight
-            normalized_features[:, feature_idx] = normalized_features[:, feature_idx] * gradient_weight
-            feature_idx += 1
-        elif use_flux_in_clustering:
-            # Get flux weight to control how much flux similarity matters
-            flux_weight = self.flare_config.get('dbscan_detection_flux_weight', 0.3)
-            # Scale the flux dimension by its weight
-            normalized_features[:, feature_idx] = normalized_features[:, feature_idx] * flux_weight
-            feature_idx += 1
-        
-        # Apply weight to previous region proximity feature
-        if use_previous_regions and previous_regions is not None and len(previous_regions) > 0:
-            prev_region_weight = self.flare_config.get('dbscan_detection_previous_region_weight', 0.3)
-            normalized_features[:, feature_idx] = normalized_features[:, feature_idx] * prev_region_weight
-        
-        # Apply DBSCAN clustering
-        if len(normalized_features) < dbscan_min_samples:
+        # Step 3: Apply DBSCAN clustering
+        if len(features) < dbscan_min_samples:
             return []
         
-        clustering = DBSCAN(eps=normalized_eps, min_samples=dbscan_min_samples, metric='euclidean')
-        cluster_labels = clustering.fit_predict(normalized_features)
+        dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
+        cluster_labels = dbscan.fit_predict(features)
         
-        # Extract regions from clusters
-        regions = []
-        accepted_region_id = 0
+        # Get unique cluster IDs (excluding noise: -1)
         unique_labels = np.unique(cluster_labels)
+        unique_labels = unique_labels[unique_labels != -1]
         
-        # DBSCAN already handles minimum cluster size via min_samples parameter
-        # No need for additional size constraints - let DBSCAN do its job
-        min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
+        if len(unique_labels) == 0:
+            return []
         
-        for label in unique_labels:
-            if label == -1:
-                continue  # Skip noise points
+        # Step 4: Create regions from clusters
+        regions = []
+        structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
+        
+        for cluster_id in unique_labels:
+            cluster_mask = cluster_labels == cluster_id
             
             # Get patches in this cluster
-            cluster_mask = cluster_labels == label
             cluster_y = patch_y[cluster_mask]
             cluster_x = patch_x[cluster_mask]
             cluster_flux = patch_flux[cluster_mask]
             
-            cluster_size = len(cluster_y)
-            
-            # Create binary mask for this region
+            # Create binary mask for this cluster
             region_mask = np.zeros_like(flux_contrib, dtype=bool)
             region_mask[cluster_y, cluster_x] = True
             
+            # Apply morphological closing to fill small gaps
+            region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
+            
+            region_size = np.sum(region_mask)
+            
+            # Size filtering
+            min_check = (min_patches is None) or (region_size >= min_patches)
+            max_check = (max_patches is None) or (region_size <= max_patches)
+            if not (min_check and max_check):
+                continue
+            
             # Calculate region properties
-            sum_flux = np.sum(cluster_flux)
-            max_flux = np.max(cluster_flux)
+            region_flux_values = flux_contrib[region_mask]
+            sum_flux = np.sum(region_flux_values)
+            max_flux = np.max(region_flux_values)
             
             # Filter by minimum flux threshold if enabled
             if min_flux_threshold is not None and sum_flux < min_flux_threshold:
                 continue
             
-            # Calculate centroid
-            centroid_y = np.mean(cluster_y)
-            centroid_x = np.mean(cluster_x)
+            # Get region centroid
+            coords = np.where(region_mask)
+            centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
             
             # Convert to image coordinates
             img_y = centroid_y * self.patch_size + self.patch_size // 2
             img_x = centroid_x * self.patch_size + self.patch_size // 2
             
+            # Calculate region-based prediction
+            region_prediction = sum_flux
+            
             # Calculate label position
-            min_y, max_y = np.min(cluster_y), np.max(cluster_y)
-            min_x, max_x = np.min(cluster_x), np.max(cluster_x)
+            min_y, max_y = np.min(coords[0]), np.max(coords[0])
+            min_x, max_x = np.min(coords[1]), np.max(coords[1])
             label_y = max(0, min_y - 2)
             label_x = centroid_x
             
-            # Check if this cluster is close to multiple previous regions (overlap or proximity)
-            # If so, determine which previous region it should be assigned to based on flux
-            # This ensures the flaring region (current high flux) gets assigned correctly
-            preferred_previous_region_id = None
-            if previous_regions is not None and len(previous_regions) > 0:
-                # Check both overlapping and nearby previous regions
-                # Use a proximity threshold (in patches) - regions within this distance are considered candidates
-                proximity_threshold_patches = 5  # Regions within 5 patches are considered close
-                candidate_previous = []
-                
-                for prev_region in previous_regions:
-                    prev_mask = prev_region.get('mask', None)
-                    prev_centroid_y = prev_region.get('centroid_patch_y', None)
-                    prev_centroid_x = prev_region.get('centroid_patch_x', None)
-                    
-                    if prev_mask is None or prev_centroid_y is None or prev_centroid_x is None:
-                        continue
-                    
-                    # Check for overlap
-                    overlap = np.logical_and(region_mask, prev_mask)
-                    has_overlap = np.any(overlap)
-                    
-                    # Check for proximity (centroid distance)
-                    centroid_distance = np.sqrt(
-                        (centroid_y - prev_centroid_y)**2 + 
-                        (centroid_x - prev_centroid_x)**2
-                    )
-                    is_nearby = centroid_distance <= proximity_threshold_patches
-                    
-                    if has_overlap or is_nearby:
-                        prev_id = prev_region.get('id', None)
-                        if prev_id is not None:
-                            candidate_previous.append((prev_id, prev_region, has_overlap, centroid_distance))
-                
-                # If close to multiple previous regions, determine which one to assign to
-                if len(candidate_previous) > 1:
-                    # Strategy: Assign to the previous region where the current merged region
-                    # has the highest flux (indicating it's the one that's flaring)
-                    # Simple approach: just use the current merged region's total flux
-                    # The region with highest current flux is the one that's flaring
-                    
-                    # Sort by current merged region's flux (it's the same for all, but we want to ensure
-                    # we're assigning to the region that makes sense)
-                    # Actually, we should compare: which previous region would this merged region belong to?
-                    # The answer: the one where the merged region's flux is highest relative to that previous region
-                    
-                    prev_region_scores = []
-                    for prev_id, prev_region, has_overlap, centroid_distance in candidate_previous:
-                        prev_flux = prev_region.get('sum_flux', 0)
-                        
-                        # Score: prioritize based on current merged region's flux
-                        # The merged region with highest flux should be assigned to the previous region
-                        # that it's closest to AND where the flux increase is largest
-                        flux_ratio = sum_flux / (prev_flux + 1e-12)  # Avoid division by zero
-                        
-                        # Score: higher current flux + higher flux ratio + closer distance = better match
-                        # Weight overlap more heavily
-                        overlap_bonus = 10.0 if has_overlap else 1.0
-                        score = sum_flux * flux_ratio * overlap_bonus / (centroid_distance + 1.0)
-                        prev_region_scores.append((prev_id, score))
-                    
-                    # Assign to previous region with highest score
-                    if len(prev_region_scores) > 0:
-                        prev_region_scores.sort(key=lambda x: x[1], reverse=True)  # Sort by score (descending)
-                        preferred_previous_region_id = prev_region_scores[0][0]  # Highest score region ID
-                elif len(candidate_previous) == 1:
-                    # Only one candidate, use it
-                    preferred_previous_region_id = candidate_previous[0][0]
-            
-            accepted_region_id += 1
-            
-            region_data = {
-                'id': accepted_region_id,
-                'size': cluster_size,
-                'core_size': cluster_size,  # For DBSCAN, core_size = total size
+            regions.append({
+                'id': len(regions) + 1,
+                'size': region_size,
                 'sum_flux': sum_flux,
                 'max_flux': max_flux,
                 'centroid_patch_y': centroid_y,
@@ -1448,279 +982,12 @@ class FluxContributionAnalyzer:
                 'label_y': label_y,
                 'label_x': label_x,
                 'mask': region_mask,
-                'core_mask': region_mask,  # Same as mask for DBSCAN
-                'prediction': sum_flux,
+                'prediction': region_prediction,
                 'groundtruth': pred_data.get('groundtruth', None)
-            }
-            
-            # Store preferred previous region ID if found (for tracking to use)
-            if preferred_previous_region_id is not None:
-                region_data['preferred_previous_region_id'] = preferred_previous_region_id
-            
-            regions.append(region_data)
+            })
         
         if len(regions) > 0:
-            print(f"  {timestamp}: Found {len(regions)} active regions using DBSCAN (eps={dbscan_eps}, min_samples={dbscan_min_samples})")
-        
-        return regions
-
-    def _calculate_previous_region_proximity(self, patch_y, patch_x, previous_regions):
-        """
-        Calculate proximity to previous regions for each patch.
-        
-        Returns the distance (in patches) to the nearest previous region centroid.
-        Patches closer to previous regions will have lower values, making them
-        more likely to cluster together with patches from the same previous region.
-        
-        Args:
-            patch_y, patch_x: Patch coordinates (in patch space)
-            previous_regions: List of previous timestamp's region dictionaries
-            
-        Returns:
-            Array of distances to nearest previous region (in patches)
-        """
-        if not previous_regions or len(previous_regions) == 0:
-            # No previous regions, return large distance for all patches
-            return np.full(len(patch_y), 1000.0)
-        
-        # Get centroids of previous regions (in patch space)
-        prev_centroids = []
-        for region in previous_regions:
-            centroid_y = region.get('centroid_patch_y', None)
-            centroid_x = region.get('centroid_patch_x', None)
-            if centroid_y is not None and centroid_x is not None:
-                prev_centroids.append((centroid_y, centroid_x))
-        
-        if len(prev_centroids) == 0:
-            # No valid centroids, return large distance
-            return np.full(len(patch_y), 1000.0)
-        
-        # Calculate distance from each patch to nearest previous region centroid
-        prev_centroids = np.array(prev_centroids)
-        
-        # Fully vectorized calculation: for each patch, find distance to nearest previous centroid
-        patch_coords = np.column_stack([patch_y, patch_x])  # Shape: (n_patches, 2)
-        
-        # Compute distances from all patches to all centroids
-        # Shape: (n_patches, n_centroids)
-        distances_to_all = np.sqrt(
-            (patch_coords[:, 0:1] - prev_centroids[:, 0])**2 + 
-            (patch_coords[:, 1:2] - prev_centroids[:, 1])**2
-        )
-        
-        # Find minimum distance for each patch
-        distances = np.min(distances_to_all, axis=1)
-        
-        return distances
-
-    def _calculate_flux_gradient(self, flux_contrib, significant_mask, patch_y, patch_x):
-        """
-        Calculate the magnitude of flux gradient (spatial change) at each patch.
-        
-        The gradient represents how much flux changes spatially, which helps identify
-        region boundaries and edges. Patches with similar gradients are likely in
-        similar regions (e.g., both on boundaries or both in interiors).
-        
-        Args:
-            flux_contrib: Full flux contribution map
-            significant_mask: Mask of significant patches
-            patch_y, patch_x: Coordinates of significant patches
-            
-        Returns:
-            Array of gradient magnitudes for each significant patch
-        """
-        # Calculate spatial gradients using numpy
-        # Gradient in y and x directions
-        grad_y, grad_x = np.gradient(flux_contrib)
-        
-        # Calculate gradient magnitude: sqrt(grad_y^2 + grad_x^2)
-        gradient_magnitude = np.sqrt(grad_y**2 + grad_x**2)
-        
-        # Extract gradient values for significant patches only
-        patch_gradients = gradient_magnitude[patch_y, patch_x]
-        
-        return patch_gradients
-
-    def _detect_regions_for_timestamp(self, flux_contrib, timestamp, pred_data):
-        """
-        Robust region detection with dual-threshold approach and morphological operations.
-        
-        This method uses:
-        1. High-confidence cores (strict threshold) - ensures stable region centers
-        2. Growth from cores (permissive threshold) - captures full region extent
-        3. Morphological closing - fills small gaps for stability
-        """
-        # Get config values with new dual-threshold parameters
-        core_std_multiplier = self.flare_config.get('core_threshold_std_multiplier', 2.0)
-        growth_std_multiplier = self.flare_config.get('growth_threshold_std_multiplier', 1.5)
-        min_core_patches = self.flare_config.get('min_core_patches', 6)
-        min_patches = self.flare_config.get('min_patches', 20)
-        max_patches = self.flare_config.get('max_patches', 300)
-        # Allow None to disable constraints (0 also treated as disabled for min, but None is preferred)
-        if min_patches == 0:
-            min_patches = None
-        if max_patches == 0:
-            max_patches = None
-        closing_iterations = self.flare_config.get('closing_iterations', 5)
-        dilation_iterations = self.flare_config.get('dilation_iterations', 3)
-        prevent_overlap = self.flare_config.get('prevent_overlap', True)
-        
-        # Stage 1: Find high-confidence cores (strict threshold)
-        # Calculate median and std in log space (more appropriate for flux data)
-        flux_values = flux_contrib.flatten()
-        # Filter out zero/negative values for log calculation
-        positive_flux = flux_values[flux_values > 0]
-        if len(positive_flux) == 0:
-            return []  # No positive flux values
-        log_flux = np.log(positive_flux)
-        median_log_flux = np.median(log_flux)
-        std_log_flux = np.std(log_flux)
-        # Convert back to linear space for thresholds
-        # Core threshold (higher) - regions must exceed this to appear
-        core_threshold = np.exp(median_log_flux + core_std_multiplier * std_log_flux)
-        # Growth threshold (lower) - regions can grow to this extent
-        growth_threshold = np.exp(median_log_flux + growth_std_multiplier * std_log_flux)
-        
-        # Use core threshold for core detection
-        core_mask = flux_contrib > core_threshold
-        
-        # Stage 2: Define growth region (more permissive threshold)
-        growth_mask = flux_contrib > growth_threshold
-        
-        # Apply morphological closing to growth mask to fill small gaps
-        structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
-        if closing_iterations > 0:
-            growth_mask = nd.binary_closing(growth_mask, structure=structure_8, iterations=closing_iterations)
-        
-        # Find connected core regions
-        labeled_cores, num_cores = nd.label(core_mask, structure=structure_8)
-        
-        # Merge close/overlapping cores if enabled
-        core_merge_distance = self.flare_config.get('core_merge_distance', 0)  # 0 = disabled
-        if num_cores > 1 and core_merge_distance > 0:
-            labeled_cores, num_cores = self._merge_close_cores(
-                labeled_cores, num_cores, core_merge_distance, structure_8
-            )
-        
-        if num_cores > 0:
-            overlap_mode = "non-overlapping" if prevent_overlap else "overlapping"
-            print(f"  {timestamp}: Found {num_cores} cores at {core_std_multiplier}σ threshold ({core_threshold:.2e}) - {overlap_mode} growth")
-        
-        regions = []
-        accepted_region_id = 0
-        
-        # Track all claimed pixels to prevent overlap (if enabled)
-        claimed_mask = np.zeros_like(growth_mask, dtype=bool) if prevent_overlap else None
-        
-        for core_id in range(1, num_cores + 1):
-            core_region_mask = labeled_cores == core_id
-            core_size = np.sum(core_region_mask)
-            
-            # Require minimum core size for stability
-            if core_size < min_core_patches:
-                continue
-            
-            if prevent_overlap and np.any(core_region_mask & claimed_mask):
-                continue
-            
-            # Mark core pixels as claimed immediately (if overlap prevention enabled)
-            if prevent_overlap:
-                claimed_mask = claimed_mask | core_region_mask
-            
-            # Grow region from core
-            grown_mask = core_region_mask.copy()
-            if dilation_iterations > 0:
-                if prevent_overlap:
-                    # Iterative dilation: grow one step at a time, checking for overlaps
-                    initial_size = np.sum(grown_mask)
-                    for iteration in range(dilation_iterations):
-                        # Find pixels that can be added (in growth mask and not claimed)
-                        available_mask = growth_mask & ~claimed_mask
-                        
-                        # Dilate by one step
-                        new_growth = nd.binary_dilation(
-                            grown_mask,
-                            structure=structure_8,
-                            iterations=1
-                        ) & available_mask
-                        
-                        # Only add new pixels that don't overlap with existing regions
-                        new_pixels = new_growth & ~grown_mask
-                        if np.sum(new_pixels) == 0:
-                            break  # No more growth possible
-                        
-                        # Add new pixels to this region
-                        grown_mask = grown_mask | new_pixels
-                        
-                        # Immediately mark new pixels as claimed to prevent overlap
-                        claimed_mask = claimed_mask | new_pixels
-                else:
-                    # Original behavior: grow all at once (may overlap)
-                    grown_mask = nd.binary_dilation(
-                        core_region_mask,
-                        structure=structure_8,
-                        iterations=dilation_iterations,
-                        mask=growth_mask
-                    )
-            
-            region_size = np.sum(grown_mask)
-            
-            # Size filtering on grown region (None disables the constraint)
-            min_check = (min_patches is None) or (region_size >= min_patches)
-            max_check = (max_patches is None) or (region_size <= max_patches)
-            if min_check and max_check:
-                accepted_region_id += 1
-                
-                # Mark ALL pixels as claimed to prevent future overlap (if enabled)
-                if prevent_overlap:
-                    claimed_mask = claimed_mask | grown_mask
-                
-                region_flux = flux_contrib[grown_mask]
-                sum_flux = np.sum(region_flux)
-                max_flux = np.max(region_flux)
-                
-                # Filter by minimum flux threshold if enabled
-                min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
-                if min_flux_threshold is not None and sum_flux < min_flux_threshold:
-                    continue  # Skip regions with insufficient flux
-                
-                # Get region centroid from grown region
-                coords = np.where(grown_mask)
-                centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
-                
-                # Convert to image coordinates
-                img_y = centroid_y * self.patch_size + self.patch_size // 2
-                img_x = centroid_x * self.patch_size + self.patch_size // 2
-                
-                # Calculate region-based prediction (sum of flux contributions in this region)
-                region_prediction = sum_flux
-                
-                # Calculate label position
-                min_y, max_y = np.min(coords[0]), np.max(coords[0])
-                min_x, max_x = np.min(coords[1]), np.max(coords[1])
-                label_y = max(0, min_y - 2)
-                label_x = centroid_x
-                
-                regions.append({
-                    'id': accepted_region_id,
-                    'size': region_size,
-                    'core_size': core_size,  # Track core size separately
-                    'sum_flux': sum_flux,
-                    'max_flux': max_flux,
-                    'centroid_patch_y': centroid_y,
-                    'centroid_patch_x': centroid_x,
-                    'centroid_img_y': img_y,
-                    'centroid_img_x': img_x,
-                    'label_y': label_y,
-                    'label_x': label_x,
-                    'mask': grown_mask,
-                    'core_mask': core_region_mask,  # Keep core mask for reference
-                    'prediction': region_prediction,
-                    'groundtruth': pred_data.get('groundtruth', None)
-                })
-        
-        if prevent_overlap and len(regions) > 1:
-            self._verify_no_overlaps(regions, timestamp)
+            print(f"  {timestamp}: Found {len(regions)} regions using DBSCAN (eps={dbscan_eps}, min_samples={dbscan_min_samples})")
         
         return regions
     
@@ -2450,6 +1717,7 @@ def _get_output_dir(analyzer, args):
         base_dir = analyzer.config.get('base_data_dir', '/mnt/data/COMBINED')
         output_dir_str = output_dir_str.replace('${base_data_dir}', base_dir)
     return Path(output_dir_str)
+
 
 
 def _detect_and_save_flares(analyzer, output_dir):
