@@ -556,8 +556,6 @@ class FluxContributionAnalyzer:
                 last_flux = last_region.get('sum_flux', 0.0)
                 flux_gap = abs(last_flux - current_flux)
                 return (
-                    -last_flux,
-                    flux_gap,
                     distance,
                     track_id
                 )
@@ -569,8 +567,6 @@ class FluxContributionAnalyzer:
                 last_flux = last_region.get('sum_flux', 0.0)
                 flux_gap = abs(last_flux - current_flux)
                 return (
-                    -last_flux,
-                    flux_gap,
                     distance,
                     track_id
                 )
@@ -578,15 +574,6 @@ class FluxContributionAnalyzer:
         
         for i, timestamp in tqdm(enumerate(timestamps), desc="Tracking regions", unit="timestamp", total=len(timestamps)):
             current_time = pd.to_datetime(timestamp)
-            
-            # Get recently active tracks (within max_time_gap) for faster matching
-            recently_active_tracks = set()
-            for track_id in list(active_tracks):
-                if track_id in region_tracks and region_tracks[track_id]:
-                    last_timestamp, _ = region_tracks[track_id][-1]
-                    time_diff = abs((current_time - pd.to_datetime(last_timestamp)).total_seconds())
-                    if time_diff <= max_time_gap:
-                        recently_active_tracks.add(track_id)
             
             # Process regions detected at this timestamp
             if timestamp in all_regions:
@@ -611,44 +598,55 @@ class FluxContributionAnalyzer:
                     relaxed_tracks = []
                     overlap_tracks = []
                     
-                    for track_id in recently_active_tracks:
-                        if not region_tracks[track_id]:
-                            continue
+                    # Optimization: Use vectorized distance calculations if we have multiple active tracks
+                    if len(active_tracks) > 0:
+                        # Prepare arrays for vectorized computation
+                        track_ids_list = list(active_tracks)
+                        track_data = [(tid, region_tracks[tid][-1]) for tid in track_ids_list]
+                        
+                        # Extract centroid coordinates as arrays
+                        # track_data is [(track_id, (timestamp, region_dict)), ...]
+                        last_x = np.array([data[1][1]['centroid_img_x'] for data in track_data])
+                        last_y = np.array([data[1][1]['centroid_img_y'] for data in track_data])
+                        
+                        # Vectorized distance calculation (all tracks at once!)
+                        distances = np.sqrt(
+                            (region_copy['centroid_img_x'] - last_x)**2 + 
+                            (region_copy['centroid_img_y'] - last_y)**2
+                        )
+                        
+                        # Filter by maximum distance threshold (vectorized)
+                        valid_mask = distances < max_relaxed_distance
+                        valid_indices = np.where(valid_mask)[0]
+                        
+                        # Process only valid tracks
+                        for idx in valid_indices:
+                            track_id, track_history = track_data[idx]
+                            last_timestamp, last_region = track_history
+                            distance = float(distances[idx])
                             
-                        last_timestamp, last_region = region_tracks[track_id][-1]
-                        
-                        # Calculate Euclidean distance between centroids (cheap operation)
-                        distance = np.sqrt(
-                            (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
-                            (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
-                        )
-                        
-                        # Skip tracks that are too far away (early exit optimization)
-                        if distance >= max_relaxed_distance:
-                            continue
-                        
-                        last_flux = last_region.get('sum_flux', 0.0)
-                        last_is_flaring = bool(
-                            flare_priority_flux is not None and last_flux >= flare_priority_flux
-                        )
-                        
-                        # Only compute expensive mask overlap for nearby regions
-                        overlap_pixels = 0
-                        if distance < max_distance * 1.5 and current_mask is not None:
-                            last_mask = last_region.get('mask')
-                            if last_mask is not None and current_mask.shape == last_mask.shape:
-                                overlap_pixels = int(np.sum(current_mask & last_mask))
-                        
-                        if overlap_pixels > 0:
-                            overlap_tracks.append((track_id, distance, last_region, overlap_pixels))
-                            continue
-                        
-                        track_tuple = (track_id, distance, last_region)
-                        
-                        if distance < max_distance:
-                            candidate_tracks.append(track_tuple)
-                        elif (region_copy['is_flaring'] or last_is_flaring) and distance < max_relaxed_distance:
-                            relaxed_tracks.append(track_tuple)
+                            last_flux = last_region.get('sum_flux', 0.0)
+                            last_is_flaring = bool(
+                                flare_priority_flux is not None and last_flux >= flare_priority_flux
+                            )
+                            
+                            # Only compute expensive mask overlap for nearby regions
+                            overlap_pixels = 0
+                            if distance < max_distance * 1.5 and current_mask is not None:
+                                last_mask = last_region.get('mask')
+                                if last_mask is not None and current_mask.shape == last_mask.shape:
+                                    overlap_pixels = int(np.sum(current_mask & last_mask))
+                            
+                            if overlap_pixels > 0:
+                                overlap_tracks.append((track_id, distance, last_region, overlap_pixels))
+                                continue
+                            
+                            track_tuple = (track_id, distance, last_region)
+                            
+                            if distance < max_distance:
+                                candidate_tracks.append(track_tuple)
+                            elif (region_copy['is_flaring'] or last_is_flaring) and distance < max_relaxed_distance:
+                                relaxed_tracks.append(track_tuple)
                     
                     if overlap_tracks:
                         best_track_id, _, _, _ = min(overlap_tracks, key=make_overlap_sort_key(current_flux, current_size, flare_priority_flux))
@@ -726,74 +724,6 @@ class FluxContributionAnalyzer:
         
         return region_tracks
 
-    def _merge_close_cores(self, labeled_cores, num_cores, merge_distance, structure):
-        """
-        Merge core regions that are close based on centroid distance.
-        
-        This method calculates centroids for each core and merges cores that are
-        within merge_distance patches of each other, preventing unrelated distant
-        cores from being merged.
-        
-        Args:
-            labeled_cores: Labeled array of core regions
-            num_cores: Number of distinct core regions
-            merge_distance: Maximum distance (in patches) to merge cores
-            structure: Structuring element for labeling (not used in new approach)
-            
-        Returns:
-            Tuple of (merged_labeled_cores, num_merged_cores)
-        """
-        if num_cores == 0 or merge_distance <= 0:
-            return labeled_cores, num_cores
-        
-        # Calculate centroids for each core
-        core_centroids = {}
-        for core_id in range(1, num_cores + 1):
-            core_mask = labeled_cores == core_id
-            coords = np.where(core_mask)
-            if len(coords[0]) > 0:
-                core_centroids[core_id] = (np.mean(coords[0]), np.mean(coords[1]))
-        
-        if len(core_centroids) == 0:
-            return labeled_cores, num_cores
-        
-        # Merge cores that are within merge_distance patches
-        used_cores = set()
-        new_label = 1
-        label_map = {}  # Map old core_id to new merged label
-        
-        for core_id in range(1, num_cores + 1):
-            if core_id in used_cores or core_id not in core_centroids:
-                continue
-            
-            # Start a new merged region
-            used_cores.add(core_id)
-            label_map[core_id] = new_label
-            
-            # Find nearby cores to merge
-            cy, cx = core_centroids[core_id]
-            for other_id in range(core_id + 1, num_cores + 1):
-                if other_id in used_cores or other_id not in core_centroids:
-                    continue
-                
-                oy, ox = core_centroids[other_id]
-                distance = np.sqrt((cy - oy)**2 + (cx - ox)**2)
-                
-                if distance <= merge_distance:
-                    # Merge this core into the current merged region
-                    used_cores.add(other_id)
-                    label_map[other_id] = new_label
-            
-            new_label += 1
-        
-        # Create final merged labeled array
-        merged_labeled_cores = np.zeros_like(labeled_cores, dtype=int)
-        for old_id, new_id in label_map.items():
-            merged_labeled_cores[labeled_cores == old_id] = new_id
-        
-        num_merged_cores = len(set(label_map.values()))
-        
-        return merged_labeled_cores, num_merged_cores
 
     def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data):
         """
@@ -1787,7 +1717,7 @@ def _filter_timestamps_by_interval(timestamps, interval_seconds):
     return filtered
 
 
-def _get_flare_sequences(simultaneous_flares, window_days):
+def _get_flare_sequences(simultaneous_flares, window_hours):
     """
     Get flare sequences from simultaneous_flares DataFrame using sequence_id.
     
@@ -1816,8 +1746,8 @@ def _get_flare_sequences(simultaneous_flares, window_days):
         sequence_max_time = max(datetimes)
         
         # Calculate video window: extend window_days above and below the sequence range
-        video_start_time = sequence_min_time - pd.Timedelta(days=window_days)
-        video_end_time = sequence_max_time + pd.Timedelta(days=window_days)
+        video_start_time = sequence_min_time - pd.Timedelta(hours=window_hours)
+        video_end_time = sequence_max_time + pd.Timedelta(hours=window_hours)
         
         # Center timestamp for filename (not used for window calculation)
         center_timestamp = pd.Series(datetimes).median()
@@ -1843,10 +1773,10 @@ def _create_simultaneous_flare_movies(analyzer, simultaneous_flares, output_dir,
     
     movie_fps = args.movie_fps if args.movie_fps != 2 else analyzer.output_config.get('movie_fps', 2)
     movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
-    simultaneous_window_days = analyzer.output_config.get('simultaneous_flare_window_days', 1)
+    simultaneous_window_hours = analyzer.output_config.get('simultaneous_window_hours', 1)
     
     # Use sequence_id from detect_simultaneous_flares instead of re-clustering
-    flare_sequences = _get_flare_sequences(simultaneous_flares, simultaneous_window_days)
+    flare_sequences = _get_flare_sequences(simultaneous_flares, simultaneous_window_hours)
     print(f"Creating movies for {len(flare_sequences)} flare sequences")
     
     analyzer.output_dir = str(output_dir)
@@ -1872,7 +1802,7 @@ def _create_simultaneous_flare_movies(analyzer, simultaneous_flares, output_dir,
         print(f"\n  Movie {seq_idx + 1}/{len(flare_sequences)}: Flare Sequence {sequence_id}")
         print(f"    Sequence contains {sequence['num_groups']} groups with {sequence['num_events']} events")
         print(f"    Sequence time range: {sequence_min_str} to {sequence_max_str}")
-        print(f"    Video window (with ±{simultaneous_window_days} days padding): {window_start_str} to {window_end_str}")
+        print(f"    Video window (with ±{simultaneous_window_hours} hours padding): {window_start_str} to {window_end_str}")
         
         available_timestamps = analyzer.predictions_df[
             (analyzer.predictions_df['datetime'] >= window_start) & 
