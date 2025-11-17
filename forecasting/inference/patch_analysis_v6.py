@@ -1,3 +1,4 @@
+from typing import Any
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for faster rendering
@@ -92,6 +93,11 @@ class FluxContributionAnalyzer:
             predictions_csv = self.config['output_path'].replace('${base_data_dir}', base_dir)
             aia_path = self.config['aia_path'].replace('${base_data_dir}', base_dir)
             
+            # Extract grid/patch parameters from config
+            grid_size = tuple(self.config.get('grid_size', grid_size))
+            patch_size = self.config.get('patch_size', patch_size)
+            input_size = self.config.get('input_size', input_size)
+            
             # Extract analysis parameters
             self.analysis_config = self.config.get('analysis', {})
             self.flare_config = self.analysis_config.get('flare_detection', {})
@@ -117,6 +123,9 @@ class FluxContributionAnalyzer:
         self.patch_size = patch_size
         self.input_size = input_size
         self.time_period = time_period
+        self.show_bright_patch_markers = bool(
+            self.flare_config.get('show_bright_patch_markers', True)
+        )
 
         # Convert timestamps to datetime
         self.predictions_df['datetime'] = pd.to_datetime(self.predictions_df['timestamp'])
@@ -239,6 +248,11 @@ class FluxContributionAnalyzer:
                     'centroid_patch_x': region_data.get('centroid_patch_x', 0.0),
                     'centroid_img_y': region_data.get('centroid_img_y', 0.0),
                     'centroid_img_x': region_data.get('centroid_img_x', 0.0),
+                    'bright_patch_y': region_data.get('bright_patch_y', None),
+                    'bright_patch_x': region_data.get('bright_patch_x', None),
+                    'bright_patch_img_y': region_data.get('bright_patch_img_y', None),
+                    'bright_patch_img_x': region_data.get('bright_patch_img_x', None),
+                    'bright_patch_flux': region_data.get('bright_patch_flux', None),
                     'track_id': track_id  # Add track ID for reference
                 })
         
@@ -339,6 +353,9 @@ class FluxContributionAnalyzer:
                         'sum_flux': event['sum_flux'],
                         'centroid_img_y': event['centroid_img_y'],
                         'centroid_img_x': event['centroid_img_x'],
+                        'bright_patch_img_y': event.get('bright_patch_img_y'),
+                        'bright_patch_img_x': event.get('bright_patch_img_x'),
+                        'bright_patch_flux': event.get('bright_patch_flux'),
                         'group_size': len(group),
                         'sequence_size': len(sequence_group_indices)  # Number of groups in this sequence
                     })
@@ -445,152 +462,6 @@ class FluxContributionAnalyzer:
             print(f"Error detecting regions for {timestamp}: {e}")
             return (timestamp, None)
 
-    def _constrain_region_size_change(self, prev_region, new_region, max_growth_factor=2.0, max_shrinkage_factor=0.5):
-        """
-        Constrain how much a tracked region can grow or shrink between frames.
-        
-        Args:
-            prev_region: Region dict from previous timestamp (same track)
-            new_region: Region dict for current timestamp (same track)
-            max_growth_factor: Maximum allowed size ratio (new_size / prev_size), e.g., 2.0 = can double (None to disable)
-            max_shrinkage_factor: Minimum allowed size ratio (new_size / prev_size), e.g., 0.5 = can halve (None to disable)
-            
-        Returns:
-            Modified new_region with constrained size
-        """
-        if 'mask' not in prev_region or 'mask' not in new_region:
-            return new_region  # Can't constrain without masks
-        
-        prev_mask = prev_region['mask'].astype(bool)
-        new_mask = new_region['mask'].astype(bool)
-        
-        prev_size = int(prev_mask.sum())
-        new_size = int(new_mask.sum())
-        
-        # If no previous size, allow any size
-        if prev_size == 0:
-            return new_region
-        
-        # Calculate size ratio
-        size_ratio = new_size / prev_size
-        
-        # Check if size change is within allowed limits (None disables the constraint)
-        min_ratio = max_shrinkage_factor if max_shrinkage_factor is not None else 0
-        max_ratio = max_growth_factor if max_growth_factor is not None else float('inf')
-        
-        if min_ratio <= size_ratio <= max_ratio:
-            return new_region  # Size change is acceptable
-        
-        # Need to constrain the mask
-        structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]], dtype=bool)
-        
-        if max_growth_factor is not None and size_ratio > max_growth_factor:
-            # Growing too fast: constrain to max_growth_factor * prev_size
-            target_size = int(prev_size * max_growth_factor)
-            
-            # Start with previous mask and grow it iteratively
-            constrained_mask = prev_mask.copy()
-            current_size = prev_size
-            
-            # Grow by dilation until we reach target size or can't grow more
-            iterations = 0
-            max_iterations = 10  # Safety limit
-            while current_size < target_size and iterations < max_iterations:
-                # Dilate the mask
-                dilated = nd.binary_dilation(constrained_mask, structure=structure_8, iterations=1)
-                # Only add pixels that are in the new_mask (the detected region)
-                new_pixels = dilated & new_mask & ~constrained_mask
-                
-                if np.sum(new_pixels) == 0:
-                    break  # Can't grow more
-                
-                # Add pixels up to target size
-                pixels_to_add = min(np.sum(new_pixels), target_size - current_size)
-                if pixels_to_add > 0:
-                    # Get indices of new pixels and add the closest ones
-                    new_pixel_coords = np.where(new_pixels)
-                    if len(new_pixel_coords[0]) > 0:
-                        # Add pixels starting from those closest to existing mask
-                        # Simple approach: add all available pixels up to limit
-                        constrained_mask = constrained_mask | new_pixels
-                        current_size = int(constrained_mask.sum())
-                        if current_size >= target_size:
-                            break
-                
-                iterations += 1
-            
-            # If still too large, randomly remove pixels to reach target
-            if current_size > target_size:
-                excess = current_size - target_size
-                all_pixels = np.where(constrained_mask)
-                if len(all_pixels[0]) > excess:
-                    # Remove excess pixels (prefer removing from edges)
-                    # Simple approach: remove pixels furthest from centroid
-                    centroid_y = np.mean(all_pixels[0])
-                    centroid_x = np.mean(all_pixels[1])
-                    distances = np.sqrt((all_pixels[0] - centroid_y)**2 + (all_pixels[1] - centroid_x)**2)
-                    # Remove pixels with largest distances
-                    remove_indices = np.argsort(distances)[-excess:]
-                    constrained_mask[all_pixels[0][remove_indices], all_pixels[1][remove_indices]] = False
-        
-        elif max_shrinkage_factor is not None and size_ratio < max_shrinkage_factor:
-            # Shrinking too fast: constrain to max_shrinkage_factor * prev_size
-            target_size = int(prev_size * max_shrinkage_factor)
-            
-            # Start with intersection of prev and new masks
-            constrained_mask = prev_mask & new_mask
-            current_size = int(constrained_mask.sum())
-            
-            # If intersection is too small, add pixels from new_mask closest to prev_mask
-            if current_size < target_size:
-                # Get pixels in new_mask but not in constrained_mask
-                available_pixels = new_mask & ~constrained_mask
-                pixels_needed = target_size - current_size
-                
-                if np.sum(available_pixels) > 0 and pixels_needed > 0:
-                    # Add pixels closest to the previous mask
-                    available_coords = np.where(available_pixels)
-                    prev_coords = np.where(prev_mask)
-                    
-                    if len(available_coords[0]) > 0 and len(prev_coords[0]) > 0:
-                        # Calculate distances from available pixels to previous mask centroid
-                        prev_centroid_y = np.mean(prev_coords[0])
-                        prev_centroid_x = np.mean(prev_coords[1])
-                        distances = np.sqrt(
-                            (available_coords[0] - prev_centroid_y)**2 + 
-                            (available_coords[1] - prev_centroid_x)**2
-                        )
-                        # Add closest pixels
-                        add_indices = np.argsort(distances)[:pixels_needed]
-                        constrained_mask[available_coords[0][add_indices], available_coords[1][add_indices]] = True
-        
-        # Recompute region properties from constrained mask
-        if np.sum(constrained_mask) > 0:
-            # Need to get flux_contrib to recalculate flux
-            # Try to get it from the region data or load it
-            timestamp = new_region.get('timestamp', None)
-            if timestamp:
-                flux_contrib = self.load_flux_contributions(timestamp)
-                if flux_contrib is not None:
-                    region_flux = flux_contrib[constrained_mask]
-                    new_region['sum_flux'] = float(np.sum(region_flux))
-                    new_region['max_flux'] = float(np.max(region_flux)) if region_flux.size > 0 else 0.0
-            
-            # Recalculate centroid
-            coords = np.where(constrained_mask)
-            if len(coords[0]) > 0:
-                centroid_y = np.mean(coords[0])
-                centroid_x = np.mean(coords[1])
-                new_region['centroid_patch_y'] = centroid_y
-                new_region['centroid_patch_x'] = centroid_x
-                new_region['centroid_img_y'] = centroid_y * self.patch_size + self.patch_size // 2
-                new_region['centroid_img_x'] = centroid_x * self.patch_size + self.patch_size // 2
-            
-            new_region['mask'] = constrained_mask
-            new_region['size'] = int(np.sum(constrained_mask))
-        
-        return new_region
-
     def track_regions_over_time(self, timestamps, max_distance=None):
         """
         Track regions across time using spatial proximity and temporal continuity.
@@ -635,6 +506,75 @@ class FluxContributionAnalyzer:
         # Track active tracks (those updated recently) for optimization
         active_tracks = set()
         max_time_gap = 60 * 60  # 60 minutes in seconds
+        flare_priority_flux = self.flare_config.get(
+            'flare_priority_flux',
+            self.flare_config.get(
+                'simultaneous_flare_threshold',
+                self.flare_config.get('min_flux_threshold', None)
+            )
+        )
+        flare_distance_relax_factor = self.flare_config.get('flare_distance_relax_factor', 2.0)
+        if flare_distance_relax_factor is None or flare_distance_relax_factor <= 1:
+            flare_distance_relax_factor = 1.0
+        max_relaxed_distance = max_distance * flare_distance_relax_factor
+        
+        # Define sort key functions once (optimization - avoid recreation in loop)
+        def make_overlap_sort_key(current_flux, current_size, flare_priority_flux):
+            def overlap_sort_key(item):
+                track_id, distance, last_region, overlap_pixels = item
+                last_flux = last_region.get('sum_flux', 0.0)
+                last_mask = last_region.get('mask')
+                last_size = last_region.get('size')
+                if last_size is None and last_mask is not None:
+                    try:
+                        last_size = int(np.sum(last_mask))
+                    except Exception:
+                        last_size = 0
+                if last_size is None:
+                    last_size = 0
+                last_is_flaring = bool(
+                    flare_priority_flux is not None and last_flux >= flare_priority_flux
+                )
+                flux_gap = abs(last_flux - current_flux)
+                overlap_prev_ratio = overlap_pixels / max(last_size, 1)
+                overlap_curr_ratio = overlap_pixels / max(current_size, 1)
+                overlap_ratio = max(overlap_prev_ratio, overlap_curr_ratio)
+                return (
+                    0 if last_is_flaring else 1,
+                    -last_flux,
+                    -overlap_ratio,
+                    -overlap_pixels,
+                    flux_gap,
+                    distance,
+                    track_id
+                )
+            return overlap_sort_key
+        
+        def make_candidate_sort_key(current_flux):
+            def candidate_sort_key(item):
+                track_id, distance, last_region = item
+                last_flux = last_region.get('sum_flux', 0.0)
+                flux_gap = abs(last_flux - current_flux)
+                return (
+                    -last_flux,
+                    flux_gap,
+                    distance,
+                    track_id
+                )
+            return candidate_sort_key
+        
+        def make_relaxed_sort_key(current_flux):
+            def relaxed_sort_key(item):
+                track_id, distance, last_region = item
+                last_flux = last_region.get('sum_flux', 0.0)
+                flux_gap = abs(last_flux - current_flux)
+                return (
+                    -last_flux,
+                    flux_gap,
+                    distance,
+                    track_id
+                )
+            return relaxed_sort_key
         
         for i, timestamp in tqdm(enumerate(timestamps), desc="Tracking regions", unit="timestamp", total=len(timestamps)):
             current_time = pd.to_datetime(timestamp)
@@ -654,10 +594,22 @@ class FluxContributionAnalyzer:
                 
                 for region in current_regions:
                     region_copy = region.copy()
+                    current_flux = region_copy.get('sum_flux', 0.0)
+                    current_mask = region_copy.get('mask')
+                    current_size = region_copy.get('size')
+                    if current_size is None and current_mask is not None:
+                        current_size = int(np.sum(current_mask))
+                    if current_size is None:
+                        current_size = 0
+                    region_copy['is_flaring'] = bool(
+                        flare_priority_flux is not None and current_flux >= flare_priority_flux
+                    )
                     
                     # Find best matching existing track based on spatial proximity
                     best_track_id = None
-                    best_distance = float('inf')
+                    candidate_tracks = []
+                    relaxed_tracks = []
+                    overlap_tracks = []
                     
                     for track_id in recently_active_tracks:
                         if not region_tracks[track_id]:
@@ -665,39 +617,50 @@ class FluxContributionAnalyzer:
                             
                         last_timestamp, last_region = region_tracks[track_id][-1]
                         
-                        # Calculate Euclidean distance between centroids
+                        # Calculate Euclidean distance between centroids (cheap operation)
                         distance = np.sqrt(
                             (region_copy['centroid_img_x'] - last_region['centroid_img_x'])**2 + 
                             (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
                         )
                         
-                        if distance < max_distance and distance < best_distance:
-                            best_distance = distance
-                            best_track_id = track_id
+                        # Skip tracks that are too far away (early exit optimization)
+                        if distance >= max_relaxed_distance:
+                            continue
+                        
+                        last_flux = last_region.get('sum_flux', 0.0)
+                        last_is_flaring = bool(
+                            flare_priority_flux is not None and last_flux >= flare_priority_flux
+                        )
+                        
+                        # Only compute expensive mask overlap for nearby regions
+                        overlap_pixels = 0
+                        if distance < max_distance * 1.5 and current_mask is not None:
+                            last_mask = last_region.get('mask')
+                            if last_mask is not None and current_mask.shape == last_mask.shape:
+                                overlap_pixels = int(np.sum(current_mask & last_mask))
+                        
+                        if overlap_pixels > 0:
+                            overlap_tracks.append((track_id, distance, last_region, overlap_pixels))
+                            continue
+                        
+                        track_tuple = (track_id, distance, last_region)
+                        
+                        if distance < max_distance:
+                            candidate_tracks.append(track_tuple)
+                        elif (region_copy['is_flaring'] or last_is_flaring) and distance < max_relaxed_distance:
+                            relaxed_tracks.append(track_tuple)
+                    
+                    if overlap_tracks:
+                        best_track_id, _, _, _ = min(overlap_tracks, key=make_overlap_sort_key(current_flux, current_size, flare_priority_flux))
+                    elif candidate_tracks:
+                        best_track_id, _, _ = min(candidate_tracks, key=make_candidate_sort_key(current_flux))
+                    elif relaxed_tracks:
+                        best_track_id, _, _ = min(relaxed_tracks, key=make_relaxed_sort_key(current_flux))
                     
                     # Add region to existing track or create new track
                     if best_track_id is not None:
                         region_copy['id'] = best_track_id
                         region_copy['timestamp'] = timestamp  # Add timestamp for constraint method
-                        
-                        # Constrain region size change to prevent rapid growth/shrinkage
-                        last_timestamp, last_region = region_tracks[best_track_id][-1]
-                        max_growth_factor = self.flare_config.get('max_size_growth_factor', 2.0)
-                        max_shrinkage_factor = self.flare_config.get('max_size_shrinkage_factor', 0.5)
-                        # Allow None or 0 to disable constraints
-                        if max_growth_factor == 0:
-                            max_growth_factor = None
-                        if max_shrinkage_factor == 0:
-                            max_shrinkage_factor = None
-                        
-                        # Only apply constraint if both factors are enabled
-                        if max_growth_factor is not None or max_shrinkage_factor is not None:
-                            region_copy = self._constrain_region_size_change(
-                                prev_region=last_region,
-                                new_region=region_copy,
-                                max_growth_factor=max_growth_factor,
-                                max_shrinkage_factor=max_shrinkage_factor
-                            )
                         
                         region_tracks[best_track_id].append((timestamp, region_copy))
                         active_tracks.add(best_track_id)
@@ -847,15 +810,7 @@ class FluxContributionAnalyzer:
         dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 5)
         dbscan_use_flux = self.flare_config.get('dbscan_use_flux', False)
         dbscan_flux_weight = self.flare_config.get('dbscan_flux_weight', 1.0)
-        min_patches = self.flare_config.get('min_patches', 20)
-        max_patches = self.flare_config.get('max_patches', 300)
         min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
-        
-        # Allow None to disable constraints
-        if min_patches == 0:
-            min_patches = None
-        if max_patches == 0:
-            max_patches = None
         
         # Step 1: Filter patches using median + std threshold
         flux_values = flux_contrib.flatten()
@@ -936,13 +891,11 @@ class FluxContributionAnalyzer:
             # Apply morphological closing to fill small gaps
             region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
             
-            region_size = np.sum(region_mask)
-            
-            # Size filtering
-            min_check = (min_patches is None) or (region_size >= min_patches)
-            max_check = (max_patches is None) or (region_size <= max_patches)
-            if not (min_check and max_check):
+            coords = np.where(region_mask)
+            if len(coords[0]) == 0:
                 continue
+            
+            region_size = len(coords[0])
             
             # Calculate region properties
             region_flux_values = flux_contrib[region_mask]
@@ -954,12 +907,19 @@ class FluxContributionAnalyzer:
                 continue
             
             # Get region centroid
-            coords = np.where(region_mask)
             centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
             
             # Convert to image coordinates
             img_y = centroid_y * self.patch_size + self.patch_size // 2
             img_x = centroid_x * self.patch_size + self.patch_size // 2
+            
+            # Brightest patch within region
+            brightest_idx = int(np.argmax(region_flux_values))
+            bright_patch_y = int(coords[0][brightest_idx])
+            bright_patch_x = int(coords[1][brightest_idx])
+            bright_patch_img_y = bright_patch_y * self.patch_size + self.patch_size // 2
+            bright_patch_img_x = bright_patch_x * self.patch_size + self.patch_size // 2
+            bright_patch_flux = float(region_flux_values[brightest_idx])
             
             # Calculate region-based prediction
             region_prediction = sum_flux
@@ -983,7 +943,12 @@ class FluxContributionAnalyzer:
                 'label_x': label_x,
                 'mask': region_mask,
                 'prediction': region_prediction,
-                'groundtruth': pred_data.get('groundtruth', None)
+                'groundtruth': pred_data.get('groundtruth', None),
+                'bright_patch_y': bright_patch_y,
+                'bright_patch_x': bright_patch_x,
+                'bright_patch_img_y': bright_patch_img_y,
+                'bright_patch_img_x': bright_patch_img_x,
+                'bright_patch_flux': bright_patch_flux
             })
         
         if len(regions) > 0:
@@ -1155,6 +1120,19 @@ class FluxContributionAnalyzer:
                                 region_data_copy['label_y'] = max(0, centroid_y - 2)
                                 region_data_copy['label_x'] = centroid_x
                             
+                            # Ensure bright patch image coordinates are available
+                            if ('bright_patch_img_y' not in region_data_copy or 
+                                'bright_patch_img_x' not in region_data_copy):
+                                bright_patch_y = region_data_copy.get('bright_patch_y')
+                                bright_patch_x = region_data_copy.get('bright_patch_x')
+                                if bright_patch_y is not None and bright_patch_x is not None:
+                                    region_data_copy['bright_patch_img_y'] = (
+                                        bright_patch_y * self.patch_size + self.patch_size // 2
+                                    )
+                                    region_data_copy['bright_patch_img_x'] = (
+                                        bright_patch_x * self.patch_size + self.patch_size // 2
+                                    )
+                            
                             detected_regions.append(region_data_copy)
                             break
 
@@ -1221,6 +1199,28 @@ class FluxContributionAnalyzer:
                                    ha='center', va='bottom', fontsize=12, fontweight='bold',
                                    bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8, edgecolor=color),
                                    color='black')
+                        
+                        # Highlight brightest patch within region
+                        if self.show_bright_patch_markers and 'bright_patch_y' in region and 'bright_patch_x' in region:
+                            # Convert patch grid coordinates to AIA image pixels
+                            patch_to_img_scale_y = aia.shape[0] / float(self.grid_size[0])
+                            patch_to_img_scale_x = aia.shape[1] / float(self.grid_size[1])
+                            
+                            # Place star at center of the brightest patch
+                            bright_y_img = (region['bright_patch_y'] + 0.5) * patch_to_img_scale_y
+                            bright_x_img = (region['bright_patch_x'] + 0.5) * patch_to_img_scale_x
+                            
+                            ax_aia.scatter(
+                                bright_x_img,
+                                bright_y_img,
+                                marker='*',
+                                s=180,
+                                color=color,
+                                edgecolors='white',
+                                linewidths=0.8,
+                                alpha=0.85,
+                                zorder=5
+                            )
                 
                 ax_aia.set_title(f'AIA 131/171/304 Å Composite\n{timestamp}', fontsize=12)
                 ax_aia.axis('off')
@@ -1420,7 +1420,19 @@ class FluxContributionAnalyzer:
                 for track_id, track_history in region_tracks.items():
                     for track_timestamp, region_data in track_history:
                         if track_timestamp == timestamp:
-                            detected_regions.append(region_data.copy())
+                            region_copy = region_data.copy()
+                            if ('bright_patch_img_y' not in region_copy or 
+                                'bright_patch_img_x' not in region_copy):
+                                bright_patch_y = region_copy.get('bright_patch_y')
+                                bright_patch_x = region_copy.get('bright_patch_x')
+                                if bright_patch_y is not None and bright_patch_x is not None:
+                                    region_copy['bright_patch_img_y'] = (
+                                        bright_patch_y * self.patch_size + self.patch_size // 2
+                                    )
+                                    region_copy['bright_patch_img_x'] = (
+                                        bright_patch_x * self.patch_size + self.patch_size // 2
+                                    )
+                            detected_regions.append(region_copy)
                             break
 
             # Set up color mapping for regions
@@ -1467,6 +1479,20 @@ class FluxContributionAnalyzer:
                                        bbox=dict(boxstyle="round,pad=0.3", facecolor='white', 
                                                 alpha=0.8, edgecolor=color),
                                        color='black')
+                        
+                        # Highlight brightest patch on heatmap grid
+                        if self.show_bright_patch_markers and 'bright_patch_x' in region and 'bright_patch_y' in region:
+                            ax_flux.scatter(
+                                region['bright_patch_x'],
+                                region['bright_patch_y'],
+                                marker='*',
+                                s=150,
+                                color=color,
+                                edgecolors='white',
+                                linewidths=0.8,
+                                alpha=0.85,
+                                zorder=5
+                            )
             
             ax_flux.set_title(f'Flux Contribution Heat Map\n{timestamp}', fontsize=14, fontweight='bold')
             ax_flux.set_xlabel('Patch X', fontsize=12)
