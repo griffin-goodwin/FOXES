@@ -11,6 +11,7 @@ import argparse
 import cv2
 from scipy import ndimage as nd
 from sklearn.cluster import DBSCAN
+from scipy.ndimage import maximum_filter
 import warnings
 import yaml
 from datetime import datetime
@@ -456,7 +457,14 @@ class FluxContributionAnalyzer:
             pred_data = pred_data.iloc[0]
             
             # Detect regions for this timestamp
-            regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data)
+            # Check which detection method to use
+            use_peak_clustering = self.flare_config.get('use_peak_clustering', False)
+            
+            if use_peak_clustering:
+                regions = self._detect_regions_with_peak_clustering(flux_contrib, timestamp, pred_data)
+            else:
+                regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data)
+            
             return (timestamp, regions)
         except Exception as e:
             print(f"Error detecting regions for {timestamp}: {e}")
@@ -556,6 +564,8 @@ class FluxContributionAnalyzer:
                 last_flux = last_region.get('sum_flux', 0.0)
                 flux_gap = abs(last_flux - current_flux)
                 return (
+                    -last_flux,
+                    flux_gap,
                     distance,
                     track_id
                 )
@@ -567,6 +577,8 @@ class FluxContributionAnalyzer:
                 last_flux = last_region.get('sum_flux', 0.0)
                 flux_gap = abs(last_flux - current_flux)
                 return (
+                    -last_flux,
+                    flux_gap,
                     distance,
                     track_id
                 )
@@ -724,27 +736,163 @@ class FluxContributionAnalyzer:
         
         return region_tracks
 
-
-    def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data):
+    def _find_flux_peaks(self, flux_contrib, min_flux_threshold, neighborhood_size=3):
         """
-        Region detection using DBSCAN clustering.
+        Identify local maxima (peaks) in the flux contribution map.
+        
+        Args:
+            flux_contrib: 2D array of flux contributions
+            min_flux_threshold: Minimum flux value to consider as a peak
+            neighborhood_size: Size of the neighborhood for local maximum detection
+            
+        Returns:
+            peak_coords: List of (y, x) coordinates of peaks
+            peak_fluxes: List of flux values at peaks
+        """
+        # Find local maxima using maximum filter
+        local_max = maximum_filter(flux_contrib, size=neighborhood_size) == flux_contrib
+        
+        # Apply threshold
+        peaks_mask = local_max & (flux_contrib > min_flux_threshold)
+        
+        # Get peak coordinates and values
+        peak_coords = np.where(peaks_mask)
+        peak_coords = list(zip(peak_coords[0], peak_coords[1]))
+        peak_fluxes = [flux_contrib[y, x] for y, x in peak_coords]
+        
+        return peak_coords, peak_fluxes
+
+    def _assign_patches_to_peaks(self, patch_coords, patch_fluxes, peak_coords, peak_fluxes, 
+                                   flux_contrib, max_distance=10):
+        """
+        Assign patches to peaks based on:
+        1. Spatial proximity to peak
+        2. Flux monotonicity (flux should generally decrease from peak to patch)
+        
+        Args:
+            patch_coords: List of (y, x) coordinates of significant patches
+            patch_fluxes: Flux values at patch coordinates
+            peak_coords: List of (y, x) coordinates of peaks
+            peak_fluxes: Flux values at peaks
+            flux_contrib: 2D flux array for path analysis
+            max_distance: Maximum distance (in patches) to assign a patch to a peak
+            
+        Returns:
+            cluster_labels: Array of cluster IDs for each patch (-1 for unassigned)
+        """
+        if len(peak_coords) == 0:
+            return np.full(len(patch_coords), -1)
+        
+        n_patches = len(patch_coords)
+        cluster_labels = np.full(n_patches, -1)
+        
+        # Convert to numpy arrays for vectorized operations
+        patch_coords_arr = np.array(patch_coords)
+        peak_coords_arr = np.array(peak_coords)
+        peak_fluxes_arr = np.array(peak_fluxes)
+        
+        for i, (py, px) in enumerate(patch_coords):
+            patch_flux = patch_fluxes[i]
+            
+            # Calculate distances to all peaks
+            distances = np.sqrt(np.sum((peak_coords_arr - np.array([py, px]))**2, axis=1))
+            
+            # Filter peaks within max_distance
+            nearby_peaks = distances <= max_distance
+            
+            if not np.any(nearby_peaks):
+                continue
+            
+            # Among nearby peaks, find those with higher flux than current patch
+            # (patch should be downhill from peak)
+            valid_peaks_mask = nearby_peaks & (peak_fluxes_arr > patch_flux)
+            
+            if not np.any(valid_peaks_mask):
+                # If no valid peaks (higher flux), assign to nearest peak within distance
+                valid_peaks_mask = nearby_peaks
+            
+            # Find the closest valid peak
+            valid_distances = np.where(valid_peaks_mask, distances, np.inf)
+            closest_peak_idx = np.argmin(valid_distances)
+            
+            if valid_distances[closest_peak_idx] != np.inf:
+                # Check flux monotonicity along the path (simplified check)
+                peak_y, peak_x = peak_coords_arr[closest_peak_idx]
+                peak_flux = peak_fluxes_arr[closest_peak_idx]
+                
+                # Simple monotonicity check: patch flux should be less than peak flux
+                # and the flux should generally decrease along the path
+                if self._check_flux_decrease(flux_contrib, (peak_y, peak_x), (py, px), self.flare_config.get('flux_decrease_strictness', 0.7)):
+                    cluster_labels[i] = closest_peak_idx
+        
+        return cluster_labels
+    
+    def _check_flux_decrease(self, flux_contrib, peak_coord, patch_coord, strictness=0.7):
+        """
+        Check if flux generally decreases from peak to patch.
+        
+        Args:
+            flux_contrib: 2D flux array
+            peak_coord: (y, x) coordinate of peak
+            patch_coord: (y, x) coordinate of patch
+            strictness: Fraction of points along path that must show decrease (0-1)
+            
+        Returns:
+            True if flux generally decreases from peak to patch
+        """
+        peak_y, peak_x = peak_coord
+        patch_y, patch_x = patch_coord
+        
+        # Sample points along the line from peak to patch
+        n_samples = int(max(abs(peak_y - patch_y), abs(peak_x - patch_x))) + 1
+        
+        if n_samples <= 1:
+            return True  # Peak and patch are the same or adjacent
+        
+        # Generate sample points
+        y_samples = np.linspace(peak_y, patch_y, n_samples).astype(int)
+        x_samples = np.linspace(peak_x, patch_x, n_samples).astype(int)
+        
+        # Clip to valid indices
+        y_samples = np.clip(y_samples, 0, flux_contrib.shape[0] - 1)
+        x_samples = np.clip(x_samples, 0, flux_contrib.shape[1] - 1)
+        
+        # Get flux values along path
+        flux_values = flux_contrib[y_samples, x_samples]
+        
+        # Check if flux generally decreases
+        # Count how many consecutive pairs show decrease or stay roughly constant
+        decreasing_count = 0
+        for i in range(len(flux_values) - 1):
+            if flux_values[i+1] <= flux_values[i] / 0.9:  # Allow small increases (noise tolerance ~11%)
+                decreasing_count += 1
+        
+        decrease_fraction = decreasing_count / max(len(flux_values) - 1, 1)
+        
+        return decrease_fraction >= strictness
+
+    def _detect_regions_with_peak_clustering(self, flux_contrib, timestamp, pred_data):
+        """
+        Region detection using peak-based clustering.
         
         This method:
-        1. Filters patches using median + std threshold
-        2. Clusters significant patches using DBSCAN
-        3. Creates regions from clusters
+        1. Identifies flux peaks (local maxima)
+        2. Assigns patches to peaks based on spatial proximity and flux decrease
+        3. Creates regions from peak-assigned clusters
+        
+        This approach ensures each region has a clear peak and flux decreases outward,
+        preventing spurious merging/unmerging of distinct active regions.
         """
-        # Get DBSCAN config values
+        # Get config values
         threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
-        dbscan_eps = self.flare_config.get('dbscan_eps', 2.0)
-        dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 5)
-        dbscan_use_flux = self.flare_config.get('dbscan_use_flux', False)
-        dbscan_flux_weight = self.flare_config.get('dbscan_flux_weight', 1.0)
         min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
+        peak_neighborhood_size = self.flare_config.get('peak_neighborhood_size', 3)
+        peak_min_flux_multiplier = self.flare_config.get('peak_min_flux_multiplier', 1.5)
+        max_assignment_distance = self.flare_config.get('peak_assignment_max_distance', 10)
+        flux_decrease_strictness = self.flare_config.get('flux_decrease_strictness', 0.7)
         
         # Step 1: Filter patches using median + std threshold
         flux_values = flux_contrib.flatten()
-        # Filter out zero/negative values for log calculation
         positive_flux = flux_values[flux_values > 0]
         if len(positive_flux) == 0:
             return []
@@ -762,61 +910,50 @@ class FluxContributionAnalyzer:
             return []
         
         # Get patch coordinates and flux values
-        patch_y = significant_patches[0]
-        patch_x = significant_patches[1]
-        patch_flux = flux_contrib[significant_patches]
+        patch_coords = list(zip(significant_patches[0], significant_patches[1]))
+        patch_fluxes = [flux_contrib[y, x] for y, x in patch_coords]
         
-        # Step 2: Prepare features for DBSCAN
-        if dbscan_use_flux:
-            # Use spatial coordinates + log flux
-            # Filter out zero/negative flux
-            valid_mask = patch_flux > 0
-            if np.sum(valid_mask) == 0:
-                return []
-            
-            patch_y = patch_y[valid_mask]
-            patch_x = patch_x[valid_mask]
-            patch_flux = patch_flux[valid_mask]
-            
-            log_flux_values = np.log(patch_flux)
-            # Normalize log flux (zero mean, unit std) and apply weight
-            log_flux_normalized = (log_flux_values - np.mean(log_flux_values)) / (np.std(log_flux_values) + 1e-10)
-            log_flux_scaled = log_flux_normalized * dbscan_flux_weight
-            
-            features = np.column_stack([patch_y, patch_x, log_flux_scaled])
-        else:
-            # Use only spatial coordinates
-            features = np.column_stack([patch_y, patch_x])
+        # Step 2: Identify flux peaks
+        peak_threshold = threshold * peak_min_flux_multiplier
+        peak_coords, peak_fluxes = self._find_flux_peaks(
+            flux_contrib, 
+            peak_threshold,
+            neighborhood_size=peak_neighborhood_size
+        )
         
-        # Step 3: Apply DBSCAN clustering
-        if len(features) < dbscan_min_samples:
-            return []
+        if len(peak_coords) == 0:
+            # No peaks found, fall back to treating highest flux patch as peak
+            max_idx = np.argmax(patch_fluxes)
+            peak_coords = [patch_coords[max_idx]]
+            peak_fluxes = [patch_fluxes[max_idx]]
         
-        dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
-        cluster_labels = dbscan.fit_predict(features)
-        
-        # Get unique cluster IDs (excluding noise: -1)
-        unique_labels = np.unique(cluster_labels)
-        unique_labels = unique_labels[unique_labels != -1]
-        
-        if len(unique_labels) == 0:
-            return []
+        # Step 3: Assign patches to peaks
+        cluster_labels = self._assign_patches_to_peaks(
+            patch_coords, 
+            patch_fluxes, 
+            peak_coords, 
+            peak_fluxes,
+            flux_contrib,
+            max_distance=max_assignment_distance
+        )
         
         # Step 4: Create regions from clusters
         regions = []
         structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
         
-        for cluster_id in unique_labels:
+        for cluster_id in range(len(peak_coords)):
             cluster_mask = cluster_labels == cluster_id
             
+            if not np.any(cluster_mask):
+                continue
+            
             # Get patches in this cluster
-            cluster_y = patch_y[cluster_mask]
-            cluster_x = patch_x[cluster_mask]
-            cluster_flux = patch_flux[cluster_mask]
+            cluster_patch_coords = [patch_coords[i] for i in range(len(patch_coords)) if cluster_mask[i]]
             
             # Create binary mask for this cluster
             region_mask = np.zeros_like(flux_contrib, dtype=bool)
-            region_mask[cluster_y, cluster_x] = True
+            for cy, cx in cluster_patch_coords:
+                region_mask[cy, cx] = True
             
             # Apply morphological closing to fill small gaps
             region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
@@ -843,7 +980,7 @@ class FluxContributionAnalyzer:
             img_y = centroid_y * self.patch_size + self.patch_size // 2
             img_x = centroid_x * self.patch_size + self.patch_size // 2
             
-            # Brightest patch within region
+            # Brightest patch within region (should be the peak)
             brightest_idx = int(np.argmax(region_flux_values))
             bright_patch_y = int(coords[0][brightest_idx])
             bright_patch_x = int(coords[1][brightest_idx])
@@ -878,13 +1015,175 @@ class FluxContributionAnalyzer:
                 'bright_patch_x': bright_patch_x,
                 'bright_patch_img_y': bright_patch_img_y,
                 'bright_patch_img_x': bright_patch_img_x,
-                'bright_patch_flux': bright_patch_flux
+                'bright_patch_flux': bright_patch_flux,
+                'peak_y': peak_coords[cluster_id][0],
+                'peak_x': peak_coords[cluster_id][1],
+                'peak_flux': peak_fluxes[cluster_id]
             })
         
-        if len(regions) > 0:
-            print(f"  {timestamp}: Found {len(regions)} regions using DBSCAN (eps={dbscan_eps}, min_samples={dbscan_min_samples})")
-        
         return regions
+
+
+    # def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data):
+    #     """
+    #     Region detection using DBSCAN clustering.
+        
+    #     This method:
+    #     1. Filters patches using median + std threshold
+    #     2. Clusters significant patches using DBSCAN
+    #     3. Creates regions from clusters
+    #     """
+    #     # Get DBSCAN config values
+    #     threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
+    #     dbscan_eps = self.flare_config.get('dbscan_eps', 2.0)
+    #     dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 5)
+    #     dbscan_use_flux = self.flare_config.get('dbscan_use_flux', False)
+    #     dbscan_flux_weight = self.flare_config.get('dbscan_flux_weight', 1.0)
+    #     min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
+        
+    #     # Step 1: Filter patches using median + std threshold
+    #     flux_values = flux_contrib.flatten()
+    #     # Filter out zero/negative values for log calculation
+    #     positive_flux = flux_values[flux_values > 0]
+    #     if len(positive_flux) == 0:
+    #         return []
+        
+    #     log_flux = np.log(positive_flux)
+    #     median_log_flux = np.median(log_flux)
+    #     std_log_flux = np.std(log_flux)
+    #     threshold = np.exp(median_log_flux + threshold_std_multiplier * std_log_flux)
+        
+    #     # Find significant patches
+    #     significant_mask = flux_contrib > threshold
+    #     significant_patches = np.where(significant_mask)
+        
+    #     if len(significant_patches[0]) == 0:
+    #         return []
+        
+    #     # Get patch coordinates and flux values
+    #     patch_y = significant_patches[0]
+    #     patch_x = significant_patches[1]
+    #     patch_flux = flux_contrib[significant_patches]
+        
+    #     # Step 2: Prepare features for DBSCAN
+    #     if dbscan_use_flux:
+    #         # Use spatial coordinates + log flux
+    #         # Filter out zero/negative flux
+    #         valid_mask = patch_flux > 0
+    #         if np.sum(valid_mask) == 0:
+    #             return []
+            
+    #         patch_y = patch_y[valid_mask]
+    #         patch_x = patch_x[valid_mask]
+    #         patch_flux = patch_flux[valid_mask]
+            
+    #         log_flux_values = np.log(patch_flux)
+    #         # Normalize log flux (zero mean, unit std) and apply weight
+    #         log_flux_normalized = (log_flux_values - np.mean(log_flux_values)) / (np.std(log_flux_values) + 1e-10)
+    #         log_flux_scaled = log_flux_normalized * dbscan_flux_weight
+            
+    #         features = np.column_stack([patch_y, patch_x, log_flux_scaled])
+    #     else:
+    #         # Use only spatial coordinates
+    #         features = np.column_stack([patch_y, patch_x])
+        
+    #     # Step 3: Apply DBSCAN clustering
+    #     if len(features) < dbscan_min_samples:
+    #         return []
+        
+    #     dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
+    #     cluster_labels = dbscan.fit_predict(features)
+        
+    #     # Get unique cluster IDs (excluding noise: -1)
+    #     unique_labels = np.unique(cluster_labels)
+    #     unique_labels = unique_labels[unique_labels != -1]
+        
+    #     if len(unique_labels) == 0:
+    #         return []
+        
+    #     # Step 4: Create regions from clusters
+    #     regions = []
+    #     structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
+        
+    #     for cluster_id in unique_labels:
+    #         cluster_mask = cluster_labels == cluster_id
+            
+    #         # Get patches in this cluster
+    #         cluster_y = patch_y[cluster_mask]
+    #         cluster_x = patch_x[cluster_mask]
+    #         cluster_flux = patch_flux[cluster_mask]
+            
+    #         # Create binary mask for this cluster
+    #         region_mask = np.zeros_like(flux_contrib, dtype=bool)
+    #         region_mask[cluster_y, cluster_x] = True
+            
+    #         # Apply morphological closing to fill small gaps
+    #         region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
+            
+    #         coords = np.where(region_mask)
+    #         if len(coords[0]) == 0:
+    #             continue
+            
+    #         region_size = len(coords[0])
+            
+    #         # Calculate region properties
+    #         region_flux_values = flux_contrib[region_mask]
+    #         sum_flux = np.sum(region_flux_values)
+    #         max_flux = np.max(region_flux_values)
+            
+    #         # Filter by minimum flux threshold if enabled
+    #         if min_flux_threshold is not None and sum_flux < min_flux_threshold:
+    #             continue
+            
+    #         # Get region centroid
+    #         centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
+            
+    #         # Convert to image coordinates
+    #         img_y = centroid_y * self.patch_size + self.patch_size // 2
+    #         img_x = centroid_x * self.patch_size + self.patch_size // 2
+            
+    #         # Brightest patch within region
+    #         brightest_idx = int(np.argmax(region_flux_values))
+    #         bright_patch_y = int(coords[0][brightest_idx])
+    #         bright_patch_x = int(coords[1][brightest_idx])
+    #         bright_patch_img_y = bright_patch_y * self.patch_size + self.patch_size // 2
+    #         bright_patch_img_x = bright_patch_x * self.patch_size + self.patch_size // 2
+    #         bright_patch_flux = float(region_flux_values[brightest_idx])
+            
+    #         # Calculate region-based prediction
+    #         region_prediction = sum_flux
+            
+    #         # Calculate label position
+    #         min_y, max_y = np.min(coords[0]), np.max(coords[0])
+    #         min_x, max_x = np.min(coords[1]), np.max(coords[1])
+    #         label_y = max(0, min_y - 2)
+    #         label_x = centroid_x
+            
+    #         regions.append({
+    #             'id': len(regions) + 1,
+    #             'size': region_size,
+    #             'sum_flux': sum_flux,
+    #             'max_flux': max_flux,
+    #             'centroid_patch_y': centroid_y,
+    #             'centroid_patch_x': centroid_x,
+    #             'centroid_img_y': img_y,
+    #             'centroid_img_x': img_x,
+    #             'label_y': label_y,
+    #             'label_x': label_x,
+    #             'mask': region_mask,
+    #             'prediction': region_prediction,
+    #             'groundtruth': pred_data.get('groundtruth', None),
+    #             'bright_patch_y': bright_patch_y,
+    #             'bright_patch_x': bright_patch_x,
+    #             'bright_patch_img_y': bright_patch_img_y,
+    #             'bright_patch_img_x': bright_patch_img_x,
+    #             'bright_patch_flux': bright_patch_flux
+    #         })
+        
+    #     if len(regions) > 0:
+    #         print(f"  {timestamp}: Found {len(regions)} regions using DBSCAN (eps={dbscan_eps}, min_samples={dbscan_min_samples})")
+        
+    #     return regions
     
     def _verify_no_overlaps(self, regions, timestamp):
         """Verify that regions don't overlap with each other"""
@@ -1067,10 +1366,8 @@ class FluxContributionAnalyzer:
                             break
 
             # Set up color mapping for regions (consistent colors across frames)
-            region_colors = [
-                '#000000', '#004949', '#009292', '#FF6DB6', '#FFB6DB', '#490092', 
-                '#006DDB', '#B66DFF', '#6DB6FF', '#B6DBFF', '#920000', '#924900', 
-                '#DB6D00', '#24FF24', '#D82632'
+            region_colors_list = [
+                '#e81e63', '#9c27b0','#3f51b5', '#00bcd4', '#00bcd4', '#00bcd4', '#8bc34a', '#8bc34a', '#8bc34a', '#8bc34a'    
             ]
             region_to_color = {}
             
@@ -1078,7 +1375,7 @@ class FluxContributionAnalyzer:
                 # Use track IDs for consistent color assignment across frames
                 track_ids = sorted(region_tracks.keys())
                 for i, track_id in enumerate(track_ids):
-                    region_to_color[track_id] = region_colors[i % len(region_colors)]
+                    region_to_color[track_id] = region_colors_list[i % len(region_colors_list)]
             else:
                 # Fallback if no tracks (shouldn't happen, but handle gracefully)
                 fallback_colors = plt.cm.Set3(np.linspace(0, 1, max(len(detected_regions), 1)))
@@ -1211,7 +1508,7 @@ class FluxContributionAnalyzer:
                     
                     if not window_data.empty:
                         ax_sxr.plot(window_data['datetime'], window_data['groundtruth'], 
-                                   's-', color='#fb8072', linewidth=3, markersize=4,
+                                   's-', color='#673ab7', linewidth=2, markersize=3,
                                    label='Ground Truth (Actual SXR)', alpha=0.8)
                 
                 # 2. Plot integrated model prediction - BLUE
@@ -1227,15 +1524,15 @@ class FluxContributionAnalyzer:
                 
                 if not window_predictions.empty:
                     ax_sxr.plot(window_predictions['datetime'], window_predictions['predictions'], 
-                               'D-', color='#80b1d3', linewidth=3, markersize=4,
+                               'D-', color='#f44336', linewidth=2, markersize=3,
                                label='Model Prediction', alpha=0.8)
                 
                 # 3. Plot individual region flux contributions - each region gets its own colored line
                 # Use consistent colors for each region (matching the contours on AIA image)
                 # Extended color palette to avoid rapid repetition with many regions
-                region_colors_list = [
-                  '#000000', '#004949','#009292', '#FF6DB6', '#FFB6DB', '#490092', '#006DDB', '#B66DFF', '#6DB6FF', '#B6DBFF', '#920000', '#924900', '#DB6D00', '#24FF24','#D82632'      
-                ]
+                # region_colors_list = [
+                #   '#e81e63', '#9c27b0','#3f51b5', '#00bcd4', '#00bcd4', '#00bcd4', '#8bc34a', '#8bc34a', '#8bc34a', '#8bc34a'    
+                # ]
                 
                 # Get sorted track IDs for consistent color assignment
                 track_ids = sorted(region_tracks.keys())
@@ -1264,12 +1561,12 @@ class FluxContributionAnalyzer:
                         # Only show in legend if region is currently visible
                         if track_id in current_region_ids:
                             ax_sxr.plot(track_timestamps, track_flux_values, 
-                                       'o-', color=color, linewidth=2, markersize=4,
+                                       'o-', color=color, linewidth=2, markersize=3,
                                        label=f'Region {track_id}', alpha=0.7)
                         else:
                             # Plot without label (won't appear in legend)
                             ax_sxr.plot(track_timestamps, track_flux_values, 
-                                       'o-', color=color, linewidth=2, markersize=4,
+                                       'o-', color=color, linewidth=2, markersize=3,
                                        alpha=0.3)  # Dimmer for inactive regions
                 
                 # Mark current time
