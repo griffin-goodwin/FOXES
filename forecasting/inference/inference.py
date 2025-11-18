@@ -446,8 +446,8 @@ def main():
                                   sxr_dir=config_data['Stereo_data']['sxr_dir'],
                                   wavelengths=[171, 193, 211, 304], only_prediction=True)
     else:
-        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir']+'/test/',
-                                  sxr_dir=config_data['data']['sxr_dir']+'/test/',
+        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir']+'/val/',
+                                  sxr_dir=config_data['data']['sxr_dir']+'/val/',
                                   wavelengths=config_data['wavelengths'],
                                   only_prediction=prediction_only)
 

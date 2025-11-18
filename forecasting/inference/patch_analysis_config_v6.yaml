@@ -17,27 +17,38 @@ input_size: 512
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2024-08-01T00:00:00"
-    end_time: "2024-08-15T00:00:00"
+    start_time: "2023-01-01T00:00:00"
+    end_time: "2025-12-31T23:59:59"
   
   # Flare detection parameters - DBSCAN based
   flare_detection:
-    # Threshold for filtering patches before DBSCAN (median + std_multiplier * std)
-    threshold_std_multiplier: 4
+    # Detection method selection
+    use_peak_clustering: true          # Use peak-based clustering (recommended for stable regions)
+                                       # When true: uses peak detection with flux decrease criterion
+                                       # When false: uses standard DBSCAN clustering
     
-    # DBSCAN clustering parameters
-    dbscan_eps: 2                    # Maximum distance between patches in a cluster (in patch units)
+    # Threshold for filtering patches before clustering (median + std_multiplier * std)
+    threshold_std_multiplier: 1
+    # DBSCAN clustering parameters (used when use_peak_clustering = false)
+    dbscan_eps: 2                      # Maximum distance between patches in a cluster (in patch units)
     dbscan_min_samples: 1              # Minimum number of patches required to form a cluster
-    dbscan_use_flux: true              # Whether to include flux as a feature in DBSCAN
-    dbscan_flux_weight: 0.2             # Weight for flux dimension when use_flux is true
+    dbscan_use_flux: false              # Whether to include flux as a feature in DBSCAN
+    dbscan_flux_weight: 0.25           # Weight for flux dimension when use_flux is true
+    
+    # Peak-based clustering parameters (used when use_peak_clustering = true)
+    peak_neighborhood_size: 15          # Neighborhood size for finding local maxima (3 = 3x3 window)
+    peak_min_flux_multiplier: 5     # Minimum flux multiplier above threshold for peak detection
+    peak_assignment_max_distance: 5   # Maximum distance (patches) to assign patch to peak
+    flux_decrease_strictness: 0.2      # Fraction of path points that must show flux decrease (0-1)
+                                       # Lower = more lenient, higher = stricter monotonicity requirement
     
     # Region filtering
-    min_flux_threshold: 0.000001      # Minimum sum flux for a region to be accepted (set to null to disable)
+    min_flux_threshold: 0.0000005       # Minimum sum flux for a region to be accepted (set to null to disable)
     
     # Temporal smoothing (applied to detected region flux values and sizes)
     flux_smoothing_window: 1            # Window size for flux value and size smoothing
     
-    flare_distance_relax_factor: 1.5    # Multiplies max_tracking_distance for flaring tracks to keep labels through merges
+    flare_distance_relax_factor: 2.5    # Multiplies max_tracking_distance for flaring tracks to keep labels through merges
     show_bright_patch_markers: true     # Draw a star at the max-flux patch per region
     
     # Simultaneous flare detection
@@ -52,9 +63,9 @@ analysis:
     create_contour_movie: false
     create_simultaneous_flare_movies: true
     create_contour_movies_for_sequences: true  # Create contour movies for simultaneous flare sequences
-    create_flux_heatmap_movies_for_sequences: true  # Create flux heatmap movies for simultaneous flare sequences
+    create_flux_heatmap_movies_for_sequences: false  # Create flux heatmap movies for simultaneous flare sequences
     simultaneous_window_hours: 1
     movie_fps: 15
     movie_interval_seconds: 12
     show_sxr_timeseries: true
-    max_tracking_distance: 25  # Maximum distance for tracking regions across frames
+    max_tracking_distance: 15  # Maximum distance for tracking regions across frames
