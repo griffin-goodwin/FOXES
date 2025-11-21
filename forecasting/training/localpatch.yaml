@@ -1,8 +1,8 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/mnt/data/PAPER_DATA_WITH_335"  # Change this line for different datasets
-base_checkpoint_dir: "/mnt/data/PAPER_DATA_WITH_335"    # Change this line for different datasets
-wavelengths: [94, 131, 171, 193, 211, 304, 335]  # AIA wavelengths in Angstroms
+base_data_dir: "/data/FOXES_Data"  # Change this line for different datasets
+base_checkpoint_dir: "/data/FOXES_Data"    # Change this line for different datasets
+wavelengths: [171, 193, 211, 304]  # AIA wavelengths in Angstroms
 
 # GPU configuration
 # Options:
@@ -21,7 +21,7 @@ calculate_base_weights: false  # Whether to calculate class-based weights for lo
 
 vit_custom:
     embed_dim: 256
-    num_channels: 7
+    num_channels: 4
     num_classes: 1
     patch_size: 8
     num_patches: 4096
@@ -51,5 +51,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: paper-8-patch
-  notes: Regression from AIA images (6 channels) to GOES SXR flux
+  wb_name: paper-8-patch-4ch
+  notes: Regression from AIA images (4 channels) to GOES SXR flux

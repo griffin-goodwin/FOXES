@@ -16,6 +16,7 @@ Example commands:
 """
 
 import argparse
+from operator import truediv
 import os
 import subprocess
 import sys
@@ -164,7 +165,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
                               # Note: Inference with attention weights uses more memory than training
             'input_size': 512,
             'no_weights': True,  # Set to False to save attention weights (uses more memory)
-            'no_flux': False,  # Set to False to save flux contributions (uses more memory)
+            'no_flux': True,  # Set to False to save flux contributions (uses more memory)
             'patch_size': 8
         },
         'vit_custom': {
