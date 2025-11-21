@@ -43,6 +43,9 @@ class ViTLocal(pl.LightningModule):
     def forward(self, x, return_attention=True):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
 
+    def forward_for_callback(self, x, return_attention=True):
+        return self.model(x, self.sxr_norm, return_attention=return_attention)
+
     def configure_optimizers(self):
         # Use AdamW with weight decay for better regularization
         optimizer = torch.optim.AdamW(
@@ -314,8 +317,7 @@ class LocalAttentionBlock(nn.Module):
         # For a 32x32 grid of patches with local_window=3, each patch can only
         # attend to patches within a 3x3 window around it
         
-        # This is a simplified version - you'd need to implement based on your grid size
-        num_patches = self.num_patches  # 32x32 patches
+        num_patches = self.num_patches  
         grid_size = int(math.sqrt(num_patches))
         
         # Create mask for patches only: [num_patches, num_patches]

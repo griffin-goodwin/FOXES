@@ -6,7 +6,7 @@
 base_data_dir: "/data/FOXES_Data/batch_results/vit/"
 flux_path: "${base_data_dir}/flux"
 aia_path: "/data/FOXES_Data/AIA"
-output_path: "${base_data_dir}/vit_predictions.csv"
+output_path: "${base_data_dir}/vit_predictions_all.csv"
 
 # Grid and patch parameters
 grid_size: [64, 64]
@@ -17,33 +17,21 @@ input_size: 512
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2023-01-01T00:00:00"
-    end_time: "2025-12-31T23:59:59"
+    start_time: "2023-08-01T00:00:00"
+    end_time: "2023-08-10T23:59:59"
   
   # Flare detection parameters - DBSCAN based
   flare_detection:
-    # Detection method selection
-    use_peak_clustering: true          # Use peak-based clustering (recommended for stable regions)
-                                       # When true: uses peak detection with flux decrease criterion
-                                       # When false: uses standard DBSCAN clustering
     
     # Threshold for filtering patches before clustering (median + std_multiplier * std)
-    threshold_std_multiplier: 1
-    # DBSCAN clustering parameters (used when use_peak_clustering = false)
-    dbscan_eps: 2                      # Maximum distance between patches in a cluster (in patch units)
-    dbscan_min_samples: 1              # Minimum number of patches required to form a cluster
-    dbscan_use_flux: false              # Whether to include flux as a feature in DBSCAN
-    dbscan_flux_weight: 0.25           # Weight for flux dimension when use_flux is true
-    
-    # Peak-based clustering parameters (used when use_peak_clustering = true)
+    threshold_std_multiplier: 3
     peak_neighborhood_size: 15          # Neighborhood size for finding local maxima (3 = 3x3 window)
-    peak_min_flux_multiplier: 5     # Minimum flux multiplier above threshold for peak detection
     peak_assignment_max_distance: 5   # Maximum distance (patches) to assign patch to peak
-    flux_decrease_strictness: 0.2      # Fraction of path points that must show flux decrease (0-1)
+    flux_decrease_strictness: 0.5      # Fraction of path points that must show flux decrease (0-1)
                                        # Lower = more lenient, higher = stricter monotonicity requirement
     
     # Region filtering
-    min_flux_threshold: 0.0000005       # Minimum sum flux for a region to be accepted (set to null to disable)
+    min_flux_threshold: 0.0000001       # Minimum sum flux for a region to be accepted (set to null to disable)
     
     # Temporal smoothing (applied to detected region flux values and sizes)
     flux_smoothing_window: 1            # Window size for flux value and size smoothing
@@ -52,7 +40,7 @@ analysis:
     show_bright_patch_markers: true     # Draw a star at the max-flux patch per region
     
     # Simultaneous flare detection
-    simultaneous_flare_threshold: 0.000005
+    simultaneous_flare_threshold: 0.000001
     sequence_window_hours: 1.0  # Time window for clustering groups into flare sequences
   
   # Output configuration
