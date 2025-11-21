@@ -1,0 +1,39 @@
+# Flare Catalog Builder Configuration
+# This file contains all parameters for building flare catalogs from FOXES predictions
+
+# Input/Output Paths
+paths:
+  config: "patch_analysis_config_v6.yaml"  # Path to patch analysis config
+  output_csv: "/data/FOXES_Data/flare_catalog_v6_with_hek.csv"  # Output catalog CSV
+  hek_catalog: "/data/FOXES_Data/hek_sample.csv"  # Pre-downloaded HEK catalog (optional)
+  sxr_plots_dir: "/data/FOXES_Data/sxr_plots_with_hek"  # Directory for SXR plots
+  # Optional overrides (leave null to use values from patch analysis config)
+  flux_path: null
+  predictions_csv: "/data/FOXES_Data/batch_results/vit/vit_predictions_all.csv"
+  aia_path: null
+
+# Time Range (for HEK fetching if hek_catalog not provided)
+time_range:
+  start_time: "2023-08-01T00:00:00"
+  end_time: "2023-08-15T23:59:59"
+  auto_fetch_hek: false  # Set to true to fetch HEK data automatically
+
+# Flare Detection Parameters
+detection:
+  min_goes_class: "B1.0"  # Minimum GOES class for catalog entries
+  cadence_seconds: 60  # Expected cadence of predictions
+  max_gap_minutes: 60.0  # Maximum allowed gap between samples within a sequence
+  min_duration_minutes: 2  # Minimum sequence duration
+  min_samples: 2  # Minimum number of frames in a sequence
+  min_coverage: 0.0  # Minimum cadence coverage ratio
+  min_prominence: 0.1  # Minimum peak prominence relative to baseline
+  min_peak_sum_flux: 0.0000001  # Minimum peak sum_flux for a valid sequence
+
+# Matching Parameters
+matching:
+  match_window_minutes: 20  # Time window for matching sequences to HEK events
+
+# Plotting Parameters
+plotting:
+  create_sxr_plots: true  # Whether to create SXR timeseries plots
+  plot_window_hours: 4.0  # Hours before/after event peak to show in plots

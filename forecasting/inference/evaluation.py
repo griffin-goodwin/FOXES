@@ -350,7 +350,7 @@ class SolarFlareEvaluator:
         }
 
         theme = 'white' if self.plot_background in ('white', 'light') else 'black'
-        axis_facecolor = '#FFFFFF' if theme == 'white' else '#0F0F20'
+        axis_facecolor = '#FFFFFF' if theme == 'white' else '#FFFFFF'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
         legend_facecolor = '#F5F5F5' if theme == 'white' else '#1E1E2F'
         grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
