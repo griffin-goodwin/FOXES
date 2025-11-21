@@ -170,11 +170,7 @@ class FluxContributionAnalyzer:
         for aia_file in possible_files:
             if aia_file.exists():
                 try:
-                    if aia_file.suffix == '.npy':
-                        aia_data = np.load(aia_file)
-                    else:  # .npz
-                        aia_data = np.load(aia_file)['arr_0']
-
+                    aia_data = np.load(aia_file)
                     # Get 94, 131, 171 Angstrom channels (dimensions 0, 1, 2)
                     aia_94 = aia_data[1]   # 94 Angstrom
                     aia_131 = aia_data[2]  # 131 Angstrom
@@ -205,270 +201,6 @@ class FluxContributionAnalyzer:
         if flux_file.exists():
             return np.loadtxt(flux_file, delimiter=',')
         return None
-
-
-    def detect_flare_events(self, timestamps=None):
-        """
-        Detect potential flare events based on tracked regions with temporal-spatial coherence.
-        
-        This method uses the tracked regions from track_regions_over_time() instead of
-        doing independent detection at each timestamp, ensuring temporal-spatial coherence.
-
-        Args:
-            timestamps: List of timestamps to analyze (if None, uses all timestamps from predictions_df)
-        """
-        if timestamps is None:
-            timestamps = self.predictions_df['timestamp'].tolist()
-        
-        print("Detecting flare events using tracked regions with temporal-spatial coherence...")
-        
-        # Track regions across time (this does the detection and tracking)
-        region_tracks = self.track_regions_over_time(timestamps)
-        
-        # Convert tracked regions to flare events DataFrame format
-        flare_events = []
-        
-        for track_id, track_history in region_tracks.items():
-            for timestamp, region_data in track_history:
-                # Get prediction data for this timestamp
-                pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp]
-                if pred_data.empty:
-                    continue
-                pred_data = pred_data.iloc[0]
-                
-                flare_events.append({
-                    'timestamp': timestamp,
-                    'datetime': pred_data['datetime'],
-                    'prediction': pred_data['predictions'],
-                    'groundtruth': pred_data.get('groundtruth', None),
-                    'region_size': region_data.get('size', 0),
-                    'max_flux': region_data.get('max_flux', 0.0),
-                    'mean_flux': region_data.get('sum_flux', 0.0) / max(region_data.get('size', 1), 1),
-                    'sum_flux': region_data.get('sum_flux', 0.0),
-                    'centroid_patch_y': region_data.get('centroid_patch_y', 0.0),
-                    'centroid_patch_x': region_data.get('centroid_patch_x', 0.0),
-                    'centroid_img_y': region_data.get('centroid_img_y', 0.0),
-                    'centroid_img_x': region_data.get('centroid_img_x', 0.0),
-                    'bright_patch_y': region_data.get('bright_patch_y', None),
-                    'bright_patch_x': region_data.get('bright_patch_x', None),
-                    'bright_patch_img_y': region_data.get('bright_patch_img_y', None),
-                    'bright_patch_img_x': region_data.get('bright_patch_img_x', None),
-                    'bright_patch_flux': region_data.get('bright_patch_flux', None),
-                    'track_id': track_id  # Add track ID for reference
-                })
-        
-        self.flare_events_df = pd.DataFrame(flare_events)
-        print(f"Detected {len(flare_events)} potential flare events from {len(region_tracks)} tracked regions")
-        return self.flare_events_df
-
-    def detect_simultaneous_flares(self, threshold=1e-5, sequence_window_hours=1.0):
-        """
-        Detect simultaneous flaring events - multiple distinct regions within the same flux prediction
-        where each region has a sum of flux above the threshold. Groups are then clustered into
-        flare sequences if they occur within ±sequence_window_hours of each other.
-        
-        Args:
-            threshold: Sum of flux threshold for considering a region as a flare
-            sequence_window_hours: Time window in hours for clustering groups into sequences (default: 1.0)
-        
-        Returns:
-            DataFrame with simultaneous flare events, including group_id and sequence_id
-        """
-        if not hasattr(self, 'flare_events_df') or len(self.flare_events_df) == 0:
-            print("Please run detect_flare_events() first")
-            return pd.DataFrame()
-        
-        # Filter regions by sum_flux threshold (not prediction threshold)
-        high_flux_regions = self.flare_events_df[self.flare_events_df['sum_flux'] >= threshold].copy()
-        
-        if len(high_flux_regions) == 0:
-            print(f"No regions found with sum_flux above threshold {threshold}")
-            return pd.DataFrame()
-        
-        # Step 1: Group regions by timestamp to find simultaneous flares within the same flux prediction
-        print("Step 1/3: Grouping regions by timestamp...")
-        simultaneous_groups = []
-        unique_timestamps = high_flux_regions['timestamp'].unique()
-        for timestamp in tqdm(unique_timestamps, desc="Grouping timestamps", unit="timestamp"):
-            group = high_flux_regions[high_flux_regions['timestamp'] == timestamp]
-            if len(group) >= 2:  # Multiple distinct regions at the same timestamp
-                simultaneous_groups.append(group)
-        
-        if len(simultaneous_groups) == 0:
-            print("No simultaneous flare events detected")
-            return pd.DataFrame()
-        
-        # Step 2: Cluster groups into sequences based on temporal proximity
-        # Each group has a timestamp - cluster groups that are within sequence_window_hours
-        print(f"Step 2/3: Clustering {len(simultaneous_groups)} groups into sequences...")
-        sequence_clusters = []
-        used_group_indices = set()
-        
-        for group_idx, group in tqdm(enumerate(simultaneous_groups), desc="Clustering groups", total=len(simultaneous_groups), unit="group"):
-            if group_idx in used_group_indices:
-                continue
-            
-            # Start a new sequence with this group
-            sequence_groups = [group_idx]
-            used_group_indices.add(group_idx)
-            
-            # Find all groups within sequence_window_hours of any group in this sequence
-            changed = True
-            while changed:
-                changed = False
-                for other_idx, other_group in enumerate(simultaneous_groups):
-                    if other_idx in used_group_indices:
-                        continue
-                    
-                    other_datetime = pd.to_datetime(other_group['datetime'].iloc[0])
-                    
-                    # Check if this group is within sequence_window_hours of any group in the sequence
-                    for seq_group_idx in sequence_groups:
-                        seq_group = simultaneous_groups[seq_group_idx]
-                        seq_datetime = pd.to_datetime(seq_group['datetime'].iloc[0])
-                        time_diff_hours = abs((other_datetime - seq_datetime).total_seconds() / 3600)
-                        
-                        if time_diff_hours <= sequence_window_hours:
-                            sequence_groups.append(other_idx)
-                            used_group_indices.add(other_idx)
-                            changed = True
-                            break
-            
-            sequence_clusters.append(sequence_groups)
-        
-        # Step 3: Create results DataFrame with both group_id and sequence_id
-        print(f"Step 3/3: Creating results DataFrame from {len(sequence_clusters)} sequences...")
-        simultaneous_events = []
-        for sequence_id, sequence_group_indices in tqdm(enumerate(sequence_clusters), desc="Building DataFrame", total=len(sequence_clusters), unit="sequence"):
-            for group_idx in sequence_group_indices:
-                group = simultaneous_groups[group_idx]
-                for idx, event in group.iterrows():
-                    simultaneous_events.append({
-                        'sequence_id': sequence_id,
-                        'group_id': group_idx,  # Original group ID (same timestamp)
-                        'timestamp': event['timestamp'],
-                        'datetime': event['datetime'],
-                        'prediction': event['prediction'],
-                        'region_size': event['region_size'],
-                        'max_flux': event['max_flux'],
-                        'sum_flux': event['sum_flux'],
-                        'centroid_img_y': event['centroid_img_y'],
-                        'centroid_img_x': event['centroid_img_x'],
-                        'bright_patch_img_y': event.get('bright_patch_img_y'),
-                        'bright_patch_img_x': event.get('bright_patch_img_x'),
-                        'bright_patch_flux': event.get('bright_patch_flux'),
-                        'group_size': len(group),
-                        'sequence_size': len(sequence_group_indices)  # Number of groups in this sequence
-                    })
-        
-        simultaneous_df = pd.DataFrame(simultaneous_events)
-        
-        if len(simultaneous_df) > 0:
-            print(f"Detected {len(simultaneous_groups)} timestamps with simultaneous flares")
-            print(f"Clustered into {len(sequence_clusters)} flare sequences (within ±{sequence_window_hours} hours)")
-            print(f"Total simultaneous events: {len(simultaneous_df)}")
-            
-            # Print summary by sequence
-            for sequence_id in sorted(simultaneous_df['sequence_id'].unique()):
-                sequence_events = simultaneous_df[simultaneous_df['sequence_id'] == sequence_id]
-                timestamps = sorted(sequence_events['datetime'].unique())
-                print(f"\nFlare Sequence {sequence_id}:")
-                print(f"  Number of groups: {sequence_events['sequence_size'].iloc[0]}")
-                print(f"  Time span: {timestamps[0]} to {timestamps[-1]}")
-                print(f"  Total events: {len(sequence_events)}")
-                
-                # Print each group in the sequence
-                for group_id in sorted(sequence_events['group_id'].unique()):
-                    group_events = sequence_events[sequence_events['group_id'] == group_id]
-                    timestamp = group_events['timestamp'].iloc[0]
-                    prediction = group_events['prediction'].iloc[0]
-                    print(f"    Group {group_id} at {timestamp}:")
-                    print(f"      Flux prediction: {prediction:.2e}")
-                    print(f"      Number of regions: {len(group_events)}")
-        
-        self.simultaneous_flares_df = simultaneous_df
-        return simultaneous_df
-
-    def create_flare_event_summary(self, output_path=None):
-        """Create a comprehensive summary of detected flare events"""
-        if not hasattr(self, 'flare_events_df'):
-            print("Please run detect_flare_events() first")
-            return
-
-        if len(self.flare_events_df) == 0:
-            print("No flare events detected")
-            return
-
-        # Sort by prediction strength
-        flare_events = self.flare_events_df.sort_values('prediction', ascending=False)
-
-        print(f"\n{'=' * 80}")
-        print(f"FLARE EVENT SUMMARY")
-        print(f"{'=' * 80}")
-        print(f"Total events detected: {len(flare_events)}")
-        print(f"Time range: {flare_events['datetime'].min()} to {flare_events['datetime'].max()}")
-
-        # Top 10 strongest events
-        print(f"\nTop 10 Strongest Flare Events:")
-        print("-" * 100)
-        print(f"{'Rank':<4} {'Timestamp':<20} {'Prediction':<12} {'Actual':<12} {'Region Size':<12} {'Max Flux':<12} {'Location':<15}")
-        print("-" * 100)
-
-        for i, (_, event) in enumerate(flare_events.head(10).iterrows()):
-            location = f"({event['centroid_img_y']:.0f},{event['centroid_img_x']:.0f})"
-            actual_value = f"{event['groundtruth']:.2e}" if 'groundtruth' in event and not pd.isna(event['groundtruth']) else "N/A"
-            print(f"{i + 1:<4} {event['datetime'].strftime('%Y-%m-%d %H:%M'):<20} "
-                  f"{event['prediction']:<12.2e} {actual_value:<12} {event['region_size']:<12} "
-                  f"{event['max_flux']:<12.2e} {location:<15}")
-
-        # Statistics
-        print(f"\nEvent Statistics:")
-        print(f"  Mean region size: {flare_events['region_size'].mean():.1f} patches")
-        print(f"  Mean prediction: {flare_events['prediction'].mean():.2e}")
-        print(f"  Max prediction: {flare_events['prediction'].max():.2e}")
-        print(f"  Min prediction: {flare_events['prediction'].min():.2e}")
-        
-        # Ground truth statistics if available
-        if 'groundtruth' in flare_events.columns:
-            valid_groundtruth = flare_events.dropna(subset=['groundtruth'])
-            if len(valid_groundtruth) > 0:
-                print(f"  Mean actual: {valid_groundtruth['groundtruth'].mean():.2e}")
-                print(f"  Max actual: {valid_groundtruth['groundtruth'].max():.2e}")
-                print(f"  Min actual: {valid_groundtruth['groundtruth'].min():.2e}")
-                print(f"  Ground truth available for: {len(valid_groundtruth)}/{len(flare_events)} events")
-
-        if output_path:
-            flare_events.to_csv(output_path, index=False)
-            print(f"\nFlare events saved to: {output_path}")
-
-        return flare_events
-
-    def _detect_regions_worker(self, timestamp):
-        """Worker function for parallel region detection"""
-        try:
-            flux_contrib = self.load_flux_contributions(timestamp)
-            if flux_contrib is None:
-                return (timestamp, None)
-                
-            # Get prediction data
-            pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp]
-            if pred_data.empty:
-                return (timestamp, None)
-            pred_data = pred_data.iloc[0]
-            
-            # Detect regions for this timestamp
-            # Check which detection method to use
-            use_peak_clustering = self.flare_config.get('use_peak_clustering', False)
-            
-            if use_peak_clustering:
-                regions = self._detect_regions_with_peak_clustering(flux_contrib, timestamp, pred_data)
-            else:
-                regions = self._detect_regions_with_dbscan(flux_contrib, timestamp, pred_data)
-            
-            return (timestamp, regions)
-        except Exception as e:
-            print(f"Error detecting regions for {timestamp}: {e}")
-            return (timestamp, None)
 
     def track_regions_over_time(self, timestamps, max_distance=None):
         """
@@ -693,7 +425,261 @@ class FluxContributionAnalyzer:
         
         
         return region_tracks
-    
+
+    def detect_flare_events(self, timestamps=None):
+        """
+        Detect potential flare events based on tracked regions with temporal-spatial coherence.
+
+        Args:
+            timestamps: List of timestamps to analyze (if None, uses all timestamps from predictions_df)
+        """
+        if timestamps is None:
+            timestamps = self.predictions_df['timestamp'].tolist()
+        
+        print("Detecting flare events using tracked regions with temporal-spatial coherence...")
+        
+        # Track regions across time
+        region_tracks = self.track_regions_over_time(timestamps)
+        
+        # Convert tracked regions to flare events DataFrame format
+        flare_events = []
+        
+        for track_id, track_history in region_tracks.items():
+            for timestamp, region_data in track_history:
+                # Get prediction data for this timestamp
+                pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp]
+                if pred_data.empty:
+                    continue
+                pred_data = pred_data.iloc[0]
+                
+                flare_events.append({
+                    'timestamp': timestamp,
+                    'datetime': pred_data['datetime'],
+                    'prediction': pred_data['predictions'],
+                    'groundtruth': pred_data.get('groundtruth', None),
+                    'region_size': region_data.get('size', 0),
+                    'max_flux': region_data.get('max_flux', 0.0),
+                    'mean_flux': region_data.get('sum_flux', 0.0) / max(region_data.get('size', 1), 1),
+                    'sum_flux': region_data.get('sum_flux', 0.0),
+                    'centroid_patch_y': region_data.get('centroid_patch_y', 0.0),
+                    'centroid_patch_x': region_data.get('centroid_patch_x', 0.0),
+                    'centroid_img_y': region_data.get('centroid_img_y', 0.0),
+                    'centroid_img_x': region_data.get('centroid_img_x', 0.0),
+                    'bright_patch_y': region_data.get('bright_patch_y', None),
+                    'bright_patch_x': region_data.get('bright_patch_x', None),
+                    'bright_patch_img_y': region_data.get('bright_patch_img_y', None),
+                    'bright_patch_img_x': region_data.get('bright_patch_img_x', None),
+                    'bright_patch_flux': region_data.get('bright_patch_flux', None),
+                    'track_id': track_id  # Add track ID for reference
+                    
+                })
+        
+        self.flare_events_df = pd.DataFrame(flare_events)
+        print(f"Detected {len(flare_events)} potential flare events from {len(region_tracks)} tracked regions")
+        return self.flare_events_df
+
+    def detect_simultaneous_flares(self, threshold=1e-5, sequence_window_hours=1.0):
+        """
+        Detect simultaneous flaring events - multiple distinct regions within the same flux prediction
+        where each region has a sum of flux above the threshold. Groups are then clustered into
+        flare sequences if they occur within ±sequence_window_hours of each other.
+        
+        Args:
+            threshold: Sum of flux threshold for considering a region as a flare
+            sequence_window_hours: Time window in hours for clustering groups into sequences (default: 1.0)
+        
+        Returns:
+            DataFrame with simultaneous flare events, including group_id and sequence_id
+        """
+        if not hasattr(self, 'flare_events_df') or len(self.flare_events_df) == 0:
+            print("Please run detect_flare_events() first")
+            return pd.DataFrame()
+        
+        # Filter regions by sum_flux threshold
+        high_flux_regions = self.flare_events_df[self.flare_events_df['sum_flux'] >= threshold].copy()
+        
+        if len(high_flux_regions) == 0:
+            print(f"No regions found with sum_flux above threshold {threshold}")
+            return pd.DataFrame()
+        
+        # Step 1: Group regions by timestamp to find simultaneous flares within the same flux prediction
+        print("Step 1/3: Grouping regions by timestamp...")
+        simultaneous_groups = []
+        unique_timestamps = high_flux_regions['timestamp'].unique()
+        for timestamp in tqdm(unique_timestamps, desc="Grouping timestamps", unit="timestamp"):
+            group = high_flux_regions[high_flux_regions['timestamp'] == timestamp]
+            if len(group) >= 2:  # Multiple distinct regions at the same timestamp
+                simultaneous_groups.append(group)
+        
+        if len(simultaneous_groups) == 0:
+            print("No simultaneous flare events detected")
+            return pd.DataFrame()
+        
+        # Step 2: Cluster groups into sequences based on temporal proximity
+        # Each group has a timestamp - cluster groups that are within sequence_window_hours
+        print(f"Step 2/3: Clustering {len(simultaneous_groups)} groups into sequences...")
+        sequence_clusters = []
+        used_group_indices = set()
+        
+        for group_idx, group in tqdm(enumerate(simultaneous_groups), desc="Clustering groups", total=len(simultaneous_groups), unit="group"):
+            if group_idx in used_group_indices:
+                continue
+            
+            # Start a new sequence with this group
+            sequence_groups = [group_idx]
+            used_group_indices.add(group_idx)
+            
+            # Find all groups within sequence_window_hours of any group in this sequence
+            changed = True
+            while changed:
+                changed = False
+                for other_idx, other_group in enumerate(simultaneous_groups):
+                    if other_idx in used_group_indices:
+                        continue
+                    
+                    other_datetime = pd.to_datetime(other_group['datetime'].iloc[0])
+                    
+                    # Check if this group is within sequence_window_hours of any group in the sequence
+                    for seq_group_idx in sequence_groups:
+                        seq_group = simultaneous_groups[seq_group_idx]
+                        seq_datetime = pd.to_datetime(seq_group['datetime'].iloc[0])
+                        time_diff_hours = abs((other_datetime - seq_datetime).total_seconds() / 3600)
+                        
+                        if time_diff_hours <= sequence_window_hours:
+                            sequence_groups.append(other_idx)
+                            used_group_indices.add(other_idx)
+                            changed = True
+                            break
+            
+            sequence_clusters.append(sequence_groups)
+        
+        # Step 3: Create results DataFrame with both group_id and sequence_id
+        print(f"Step 3/3: Creating results DataFrame from {len(sequence_clusters)} sequences...")
+        simultaneous_events = []
+        for sequence_id, sequence_group_indices in tqdm(enumerate(sequence_clusters), desc="Building DataFrame", total=len(sequence_clusters), unit="sequence"):
+            for group_idx in sequence_group_indices:
+                group = simultaneous_groups[group_idx]
+                for idx, event in group.iterrows():
+                    simultaneous_events.append({
+                        'sequence_id': sequence_id,
+                        'group_id': group_idx,  # Original group ID (same timestamp)
+                        'timestamp': event['timestamp'],
+                        'datetime': event['datetime'],
+                        'prediction': event['prediction'],
+                        'region_size': event['region_size'],
+                        'max_flux': event['max_flux'],
+                        'sum_flux': event['sum_flux'],
+                        'centroid_img_y': event['centroid_img_y'],
+                        'centroid_img_x': event['centroid_img_x'],
+                        'bright_patch_img_y': event.get('bright_patch_img_y'),
+                        'bright_patch_img_x': event.get('bright_patch_img_x'),
+                        'bright_patch_flux': event.get('bright_patch_flux'),
+                        'group_size': len(group),
+                        'sequence_size': len(sequence_group_indices)  # Number of groups in this sequence
+                    })
+        
+        simultaneous_df = pd.DataFrame(simultaneous_events)
+        
+        if len(simultaneous_df) > 0:
+            print(f"Detected {len(simultaneous_groups)} timestamps with simultaneous flares")
+            print(f"Clustered into {len(sequence_clusters)} flare sequences (within ±{sequence_window_hours} hours)")
+            print(f"Total simultaneous events: {len(simultaneous_df)}")
+            
+            # Print summary by sequence
+            for sequence_id in sorted(simultaneous_df['sequence_id'].unique()):
+                sequence_events = simultaneous_df[simultaneous_df['sequence_id'] == sequence_id]
+                timestamps = sorted(sequence_events['datetime'].unique())
+                print(f"\nFlare Sequence {sequence_id}:")
+                print(f"  Number of groups: {sequence_events['sequence_size'].iloc[0]}")
+                print(f"  Time span: {timestamps[0]} to {timestamps[-1]}")
+                print(f"  Total events: {len(sequence_events)}")
+                
+                # Print each group in the sequence
+                for group_id in sorted(sequence_events['group_id'].unique()):
+                    group_events = sequence_events[sequence_events['group_id'] == group_id]
+                    timestamp = group_events['timestamp'].iloc[0]
+                    prediction = group_events['prediction'].iloc[0]
+                    print(f"    Group {group_id} at {timestamp}:")
+                    print(f"      Flux prediction: {prediction:.2e}")
+                    print(f"      Number of regions: {len(group_events)}")
+        
+        self.simultaneous_flares_df = simultaneous_df
+        return simultaneous_df
+
+    def create_flare_event_summary(self, output_path=None):
+        """Create a comprehensive summary of detected flare events"""
+        if not hasattr(self, 'flare_events_df'):
+            print("Please run detect_flare_events() first")
+            return
+
+        if len(self.flare_events_df) == 0:
+            print("No flare events detected")
+            return
+
+        # Sort by prediction strength
+        flare_events = self.flare_events_df.sort_values('prediction', ascending=False)
+
+        print(f"\n{'=' * 80}")
+        print(f"FLARE EVENT SUMMARY")
+        print(f"{'=' * 80}")
+        print(f"Total events detected: {len(flare_events)}")
+        print(f"Time range: {flare_events['datetime'].min()} to {flare_events['datetime'].max()}")
+
+        # Top 10 strongest events
+        print(f"\nTop 10 Strongest Flare Events:")
+        print("-" * 100)
+        print(f"{'Rank':<4} {'Timestamp':<20} {'Prediction':<12} {'Actual':<12} {'Region Size':<12} {'Max Flux':<12} {'Location':<15}")
+        print("-" * 100)
+
+        for i, (_, event) in enumerate(flare_events.head(10).iterrows()):
+            location = f"({event['centroid_img_y']:.0f},{event['centroid_img_x']:.0f})"
+            actual_value = f"{event['groundtruth']:.2e}" if 'groundtruth' in event and not pd.isna(event['groundtruth']) else "N/A"
+            print(f"{i + 1:<4} {event['datetime'].strftime('%Y-%m-%d %H:%M'):<20} "
+                  f"{event['prediction']:<12.2e} {actual_value:<12} {event['region_size']:<12} "
+                  f"{event['max_flux']:<12.2e} {location:<15}")
+
+        # Statistics
+        print(f"\nEvent Statistics:")
+        print(f"  Mean region size: {flare_events['region_size'].mean():.1f} patches")
+        print(f"  Mean prediction: {flare_events['prediction'].mean():.2e}")
+        print(f"  Max prediction: {flare_events['prediction'].max():.2e}")
+        print(f"  Min prediction: {flare_events['prediction'].min():.2e}")
+        
+        # Ground truth statistics if available
+        if 'groundtruth' in flare_events.columns:
+            valid_groundtruth = flare_events.dropna(subset=['groundtruth'])
+            if len(valid_groundtruth) > 0:
+                print(f"  Mean actual: {valid_groundtruth['groundtruth'].mean():.2e}")
+                print(f"  Max actual: {valid_groundtruth['groundtruth'].max():.2e}")
+                print(f"  Min actual: {valid_groundtruth['groundtruth'].min():.2e}")
+                print(f"  Ground truth available for: {len(valid_groundtruth)}/{len(flare_events)} events")
+
+        if output_path:
+            flare_events.to_csv(output_path, index=False)
+            print(f"\nFlare events saved to: {output_path}")
+
+        return flare_events
+
+    def _detect_regions_worker(self, timestamp):
+        """Worker function for parallel region detection"""
+        try:
+            flux_contrib = self.load_flux_contributions(timestamp)
+            if flux_contrib is None:
+                return (timestamp, None)
+                
+            # Get prediction data
+            pred_data = self.predictions_df[self.predictions_df['timestamp'] == timestamp]
+            if pred_data.empty:
+                return (timestamp, None)
+            pred_data = pred_data.iloc[0]
+            
+            regions = self._detect_regions_with_peak_clustering(flux_contrib, timestamp, pred_data)
+
+            return (timestamp, regions)
+        except Exception as e:
+            print(f"Error detecting regions for {timestamp}: {e}")
+            return (timestamp, None)
+
     def _apply_temporal_smoothing(self, region_tracks, window_size=3):
         """
         Apply temporal smoothing to region flux values and size to reduce unrealistic jumps.
@@ -886,10 +872,8 @@ class FluxContributionAnalyzer:
         # Get config values
         threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
         min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
-        peak_neighborhood_size = self.flare_config.get('peak_neighborhood_size', 3)
-        peak_min_flux_multiplier = self.flare_config.get('peak_min_flux_multiplier', 1.5)
-        max_assignment_distance = self.flare_config.get('peak_assignment_max_distance', 10)
-        flux_decrease_strictness = self.flare_config.get('flux_decrease_strictness', 0.7)
+        peak_neighborhood_size = self.flare_config.get('peak_neighborhood_size', 15)     # Neighborhood size for finding local maxima (3 = 3x3 window)
+        max_assignment_distance = self.flare_config.get('peak_assignment_max_distance', 5)   # Maximum distance (patches) to assign patch to peak
         
         # Step 1: Filter patches using median + std threshold
         flux_values = flux_contrib.flatten()
@@ -914,10 +898,9 @@ class FluxContributionAnalyzer:
         patch_fluxes = [flux_contrib[y, x] for y, x in patch_coords]
         
         # Step 2: Identify flux peaks
-        peak_threshold = threshold * peak_min_flux_multiplier
         peak_coords, peak_fluxes = self._find_flux_peaks(
             flux_contrib, 
-            peak_threshold,
+            threshold,
             neighborhood_size=peak_neighborhood_size
         )
         
@@ -1022,177 +1005,6 @@ class FluxContributionAnalyzer:
             })
         
         return regions
-
-
-    # def _detect_regions_with_dbscan(self, flux_contrib, timestamp, pred_data):
-    #     """
-    #     Region detection using DBSCAN clustering.
-        
-    #     This method:
-    #     1. Filters patches using median + std threshold
-    #     2. Clusters significant patches using DBSCAN
-    #     3. Creates regions from clusters
-    #     """
-    #     # Get DBSCAN config values
-    #     threshold_std_multiplier = self.flare_config.get('threshold_std_multiplier', 2.0)
-    #     dbscan_eps = self.flare_config.get('dbscan_eps', 2.0)
-    #     dbscan_min_samples = self.flare_config.get('dbscan_min_samples', 5)
-    #     dbscan_use_flux = self.flare_config.get('dbscan_use_flux', False)
-    #     dbscan_flux_weight = self.flare_config.get('dbscan_flux_weight', 1.0)
-    #     min_flux_threshold = self.flare_config.get('min_flux_threshold', None)
-        
-    #     # Step 1: Filter patches using median + std threshold
-    #     flux_values = flux_contrib.flatten()
-    #     # Filter out zero/negative values for log calculation
-    #     positive_flux = flux_values[flux_values > 0]
-    #     if len(positive_flux) == 0:
-    #         return []
-        
-    #     log_flux = np.log(positive_flux)
-    #     median_log_flux = np.median(log_flux)
-    #     std_log_flux = np.std(log_flux)
-    #     threshold = np.exp(median_log_flux + threshold_std_multiplier * std_log_flux)
-        
-    #     # Find significant patches
-    #     significant_mask = flux_contrib > threshold
-    #     significant_patches = np.where(significant_mask)
-        
-    #     if len(significant_patches[0]) == 0:
-    #         return []
-        
-    #     # Get patch coordinates and flux values
-    #     patch_y = significant_patches[0]
-    #     patch_x = significant_patches[1]
-    #     patch_flux = flux_contrib[significant_patches]
-        
-    #     # Step 2: Prepare features for DBSCAN
-    #     if dbscan_use_flux:
-    #         # Use spatial coordinates + log flux
-    #         # Filter out zero/negative flux
-    #         valid_mask = patch_flux > 0
-    #         if np.sum(valid_mask) == 0:
-    #             return []
-            
-    #         patch_y = patch_y[valid_mask]
-    #         patch_x = patch_x[valid_mask]
-    #         patch_flux = patch_flux[valid_mask]
-            
-    #         log_flux_values = np.log(patch_flux)
-    #         # Normalize log flux (zero mean, unit std) and apply weight
-    #         log_flux_normalized = (log_flux_values - np.mean(log_flux_values)) / (np.std(log_flux_values) + 1e-10)
-    #         log_flux_scaled = log_flux_normalized * dbscan_flux_weight
-            
-    #         features = np.column_stack([patch_y, patch_x, log_flux_scaled])
-    #     else:
-    #         # Use only spatial coordinates
-    #         features = np.column_stack([patch_y, patch_x])
-        
-    #     # Step 3: Apply DBSCAN clustering
-    #     if len(features) < dbscan_min_samples:
-    #         return []
-        
-    #     dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
-    #     cluster_labels = dbscan.fit_predict(features)
-        
-    #     # Get unique cluster IDs (excluding noise: -1)
-    #     unique_labels = np.unique(cluster_labels)
-    #     unique_labels = unique_labels[unique_labels != -1]
-        
-    #     if len(unique_labels) == 0:
-    #         return []
-        
-    #     # Step 4: Create regions from clusters
-    #     regions = []
-    #     structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
-        
-    #     for cluster_id in unique_labels:
-    #         cluster_mask = cluster_labels == cluster_id
-            
-    #         # Get patches in this cluster
-    #         cluster_y = patch_y[cluster_mask]
-    #         cluster_x = patch_x[cluster_mask]
-    #         cluster_flux = patch_flux[cluster_mask]
-            
-    #         # Create binary mask for this cluster
-    #         region_mask = np.zeros_like(flux_contrib, dtype=bool)
-    #         region_mask[cluster_y, cluster_x] = True
-            
-    #         # Apply morphological closing to fill small gaps
-    #         region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
-            
-    #         coords = np.where(region_mask)
-    #         if len(coords[0]) == 0:
-    #             continue
-            
-    #         region_size = len(coords[0])
-            
-    #         # Calculate region properties
-    #         region_flux_values = flux_contrib[region_mask]
-    #         sum_flux = np.sum(region_flux_values)
-    #         max_flux = np.max(region_flux_values)
-            
-    #         # Filter by minimum flux threshold if enabled
-    #         if min_flux_threshold is not None and sum_flux < min_flux_threshold:
-    #             continue
-            
-    #         # Get region centroid
-    #         centroid_y, centroid_x = np.mean(coords[0]), np.mean(coords[1])
-            
-    #         # Convert to image coordinates
-    #         img_y = centroid_y * self.patch_size + self.patch_size // 2
-    #         img_x = centroid_x * self.patch_size + self.patch_size // 2
-            
-    #         # Brightest patch within region
-    #         brightest_idx = int(np.argmax(region_flux_values))
-    #         bright_patch_y = int(coords[0][brightest_idx])
-    #         bright_patch_x = int(coords[1][brightest_idx])
-    #         bright_patch_img_y = bright_patch_y * self.patch_size + self.patch_size // 2
-    #         bright_patch_img_x = bright_patch_x * self.patch_size + self.patch_size // 2
-    #         bright_patch_flux = float(region_flux_values[brightest_idx])
-            
-    #         # Calculate region-based prediction
-    #         region_prediction = sum_flux
-            
-    #         # Calculate label position
-    #         min_y, max_y = np.min(coords[0]), np.max(coords[0])
-    #         min_x, max_x = np.min(coords[1]), np.max(coords[1])
-    #         label_y = max(0, min_y - 2)
-    #         label_x = centroid_x
-            
-    #         regions.append({
-    #             'id': len(regions) + 1,
-    #             'size': region_size,
-    #             'sum_flux': sum_flux,
-    #             'max_flux': max_flux,
-    #             'centroid_patch_y': centroid_y,
-    #             'centroid_patch_x': centroid_x,
-    #             'centroid_img_y': img_y,
-    #             'centroid_img_x': img_x,
-    #             'label_y': label_y,
-    #             'label_x': label_x,
-    #             'mask': region_mask,
-    #             'prediction': region_prediction,
-    #             'groundtruth': pred_data.get('groundtruth', None),
-    #             'bright_patch_y': bright_patch_y,
-    #             'bright_patch_x': bright_patch_x,
-    #             'bright_patch_img_y': bright_patch_img_y,
-    #             'bright_patch_img_x': bright_patch_img_x,
-    #             'bright_patch_flux': bright_patch_flux
-    #         })
-        
-    #     if len(regions) > 0:
-    #         print(f"  {timestamp}: Found {len(regions)} regions using DBSCAN (eps={dbscan_eps}, min_samples={dbscan_min_samples})")
-        
-    #     return regions
-    
-    def _verify_no_overlaps(self, regions, timestamp):
-        """Verify that regions don't overlap with each other"""
-        for i, region1 in enumerate(regions):
-            for j, region2 in enumerate(regions[i+1:], i+1):
-                overlap = np.any(region1['mask'] & region2['mask'])
-                if overlap:
-                    overlap_pixels = np.sum(region1['mask'] & region2['mask'])
-                    print(f"    WARNING: Regions {region1['id']} and {region2['id']} overlap by {overlap_pixels} pixels!")
 
     def create_contour_movie(self, timestamps, auto_cleanup=True, fps=2, show_sxr_timeseries=True, 
                            all_timestamps_for_tracking=None, movie_filename=None):
@@ -2072,7 +1884,6 @@ def _create_simultaneous_flare_movies(analyzer, simultaneous_flares, output_dir,
     movie_interval_seconds = args.movie_interval_seconds if args.movie_interval_seconds is not None else analyzer.output_config.get('movie_interval_seconds', 15)
     simultaneous_window_hours = analyzer.output_config.get('simultaneous_window_hours', 1)
     
-    # Use sequence_id from detect_simultaneous_flares instead of re-clustering
     flare_sequences = _get_flare_sequences(simultaneous_flares, simultaneous_window_hours)
     print(f"Creating movies for {len(flare_sequences)} flare sequences")
     
@@ -2211,6 +2022,7 @@ def main():
     parser.add_argument('--movie_interval_seconds', type=int, help='Seconds between frames for movie (overrides config)')
     parser.add_argument('--show_sxr_timeseries', action='store_true', help='Show SXR time series for tracked regions in movie')
     parser.add_argument('--max_tracking_distance', type=int, default=50, help='Maximum distance for region tracking (pixels)')
+    parser.add_argument('--load_simultaneous_flares', help='Path to existing simultaneous_flares_summary.csv file to load (skips detection)')
 
     args = parser.parse_args()
 
@@ -2218,7 +2030,32 @@ def main():
     output_dir = _get_output_dir(analyzer, args)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    flare_events, simultaneous_flares = _detect_and_save_flares(analyzer, output_dir)
+    # Check if we should load existing simultaneous flares file
+    if args.load_simultaneous_flares:
+        simultaneous_flares_path = Path(args.load_simultaneous_flares)
+        if not simultaneous_flares_path.exists():
+            print(f"Error: File not found: {simultaneous_flares_path}")
+            return
+        
+        print(f"Loading simultaneous flares from: {simultaneous_flares_path}")
+        simultaneous_flares = pd.read_csv(simultaneous_flares_path)
+        
+        # Ensure datetime column is properly formatted
+        if 'datetime' in simultaneous_flares.columns:
+            simultaneous_flares['datetime'] = pd.to_datetime(simultaneous_flares['datetime'])
+        elif 'timestamp' in simultaneous_flares.columns:
+            simultaneous_flares['datetime'] = pd.to_datetime(simultaneous_flares['timestamp'])
+        
+        print(f"Loaded {len(simultaneous_flares)} simultaneous flare events")
+        if len(simultaneous_flares) > 0:
+            num_sequences = simultaneous_flares['sequence_id'].nunique() if 'sequence_id' in simultaneous_flares.columns else 0
+            num_groups = simultaneous_flares['group_id'].nunique() if 'group_id' in simultaneous_flares.columns else 0
+            print(f"  Found {num_groups} groups, clustered into {num_sequences} flare sequences")
+        
+        # Set flare_events to empty DataFrame since we're skipping detection
+        flare_events = pd.DataFrame()
+    else:
+        flare_events, simultaneous_flares = _detect_and_save_flares(analyzer, output_dir)
 
     create_contour_movie = args.create_contour_movie or analyzer.output_config.get('create_contour_movie', False)
     create_simultaneous_movies = analyzer.output_config.get('create_simultaneous_flare_movies', False)
@@ -2237,7 +2074,10 @@ def main():
             print("Warning: Cannot create contour movie without time period specified in config or command line")
 
     print(f"\nAnalysis complete! Results saved to: {output_dir}")
-    print(f"Found {len(flare_events)} potential flare events")
+    if args.load_simultaneous_flares:
+        print("(Loaded simultaneous flares from file - detection skipped)")
+    else:
+        print(f"Found {len(flare_events)} potential flare events")
     if len(simultaneous_flares) > 0:
         num_sequences = simultaneous_flares['sequence_id'].nunique() if 'sequence_id' in simultaneous_flares.columns else 0
         num_groups = simultaneous_flares['group_id'].nunique() if 'group_id' in simultaneous_flares.columns else 0
