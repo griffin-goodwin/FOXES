@@ -121,8 +121,20 @@ def load_hek_catalog(
     start_time: Optional[str],
     end_time: Optional[str],
     auto_fetch: bool = True,
+    auto_save_path: Optional[Path] = None,
 ) -> Optional[pd.DataFrame]:
-    """Load HEK catalog from CSV or fetch via SunPy if requested."""
+    """Load HEK catalog from CSV or fetch via SunPy if requested.
+    
+    Args:
+        catalog_path: Path to pre-downloaded HEK catalog CSV
+        start_time: Start time for HEK query (if auto-fetching)
+        end_time: End time for HEK query (if auto-fetching)
+        auto_fetch: Whether to fetch from HEK if no catalog provided
+        auto_save_path: Path to save auto-fetched HEK data
+        
+    Returns:
+        DataFrame with HEK flare entries or None
+    """
     if catalog_path:
         df = pd.read_csv(catalog_path)
         # Clean column names by stripping whitespace
@@ -131,12 +143,21 @@ def load_hek_catalog(
         print(f"Cleaned column names. Sample columns: {list(df.columns)[:5]}")
         return df
     if auto_fetch and start_time and end_time:
-        return fetch_hek_flares(start_time, end_time)
+        return fetch_hek_flares(start_time, end_time, save_path=auto_save_path)
     return None
 
 
-def fetch_hek_flares(start_time: str, end_time: str) -> pd.DataFrame:
-    """Fetch HEK flare catalog via SunPy with all observatories and coordinates."""
+def fetch_hek_flares(start_time: str, end_time: str, save_path: Optional[Path] = None) -> pd.DataFrame:
+    """Fetch HEK flare catalog via SunPy with all observatories and coordinates.
+    
+    Args:
+        start_time: Start time for HEK query
+        end_time: End time for HEK query
+        save_path: Optional path to save fetched HEK data as CSV
+        
+    Returns:
+        DataFrame with HEK flare entries
+    """
     if Fido is None or a is None:
         raise ImportError("sunpy is required to fetch HEK flare catalog.")
     print(f"Fetching HEK flare catalog from {start_time} to {end_time}...")
@@ -177,6 +198,13 @@ def fetch_hek_flares(start_time: str, end_time: str) -> pd.DataFrame:
     if 'obs_observatory' in df.columns:
         obs_counts = df['obs_observatory'].value_counts()
         print(f"Observatory breakdown: {dict(obs_counts)}")
+    
+    # Save fetched HEK data if path provided
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(save_path, index=False)
+        print(f"Saved fetched HEK data to {save_path}")
     
     return df
 
@@ -560,8 +588,23 @@ def match_events_to_hek_multi_obs(
     events_df: pd.DataFrame,
     hek_df: pd.DataFrame,
     match_window_minutes: float,
-) -> pd.DataFrame:
-    """Associate each FOXES event with HEK events from multiple observatories."""
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Associate each FOXES event with HEK events from multiple observatories,
+    and also return unmatched HEK events.
+    
+    Args:
+        events_df: DataFrame of FOXES-detected events
+        hek_df: DataFrame of HEK catalog events
+        match_window_minutes: Time tolerance for matching
+        
+    Returns:
+        Tuple of (matched_events_df, hek_only_events_df)
+        - matched_events_df: FOXES events with matched_hek_entries column and match_status
+        - hek_only_events_df: HEK events not matched to any FOXES detection
+    """
+
+    import json
+
     print(f"\n=== HEK Matching Debug ===")
     print(f"Events DF: {len(events_df)} rows, empty={events_df.empty}")
     print(f"HEK DF is None: {hek_df is None}")
@@ -569,11 +612,26 @@ def match_events_to_hek_multi_obs(
         print(f"HEK DF: {len(hek_df)} rows, empty={hek_df.empty}")
         print(f"HEK columns (first 10): {list(hek_df.columns)[:10]}")
     
-    if events_df.empty or hek_df is None or hek_df.empty:
-        print("Early exit: events or HEK df is empty/None")
+    # Handle edge cases
+    if events_df.empty and (hek_df is None or hek_df.empty):
+        print("Early exit: both events and HEK df are empty/None")
         events_df["matched_hek_entries"] = pd.NA
-        return events_df
+        events_df["match_status"] = "foxes_only"
+        return events_df, pd.DataFrame()
     
+    if events_df.empty:
+        print("No FOXES events - all HEK events are unmatched")
+        events_df["matched_hek_entries"] = pd.NA
+        events_df["match_status"] = "foxes_only"
+        return events_df, hek_df.copy() if hek_df is not None else pd.DataFrame()
+    
+    if hek_df is None or hek_df.empty:
+        print("No HEK events - all FOXES events are unmatched")
+        events_df = events_df.copy()
+        events_df["matched_hek_entries"] = pd.NA
+        events_df["match_status"] = "foxes_only"
+        return events_df, pd.DataFrame()
+
     events_df = events_df.copy()
     hek_df = hek_df.copy()
     
@@ -583,42 +641,53 @@ def match_events_to_hek_multi_obs(
         if col in hek_df.columns:
             print(f"Converting {col} to datetime...")
             hek_df[col] = pd.to_datetime(hek_df[col])
-    
+
     tolerance = pd.Timedelta(minutes=match_window_minutes)
     matched_entries: List[Optional[str]] = []
-    
+    match_status: List[str] = []
+
+    # Track which HEK entries have been matched
+    hek_df["__matched"] = False
+
     print(f"\nStarting matching with tolerance: ±{match_window_minutes} minutes")
     if len(events_df) > 0:
         print(f"Sample FOXES event: {events_df[['start_time', 'peak_time', 'end_time']].iloc[0].to_dict()}")
     if len(hek_df) > 0:
-        # Check which time columns actually exist
         time_cols_available = [col for col in ['event_starttime', 'event_peaktime', 'event_endtime'] if col in hek_df.columns]
         if time_cols_available:
             print(f"Sample HEK event: {hek_df[time_cols_available].iloc[0].to_dict()}")
         else:
             print(f"Sample HEK event (first 5 columns): {hek_df.iloc[0, :5].to_dict()}")
-    
+
     num_matched = 0
+    # Keep track of matched HEK row indices to find unmatched HEK at the end
+    matched_hek_indices = set()
+
     for idx, event in events_df.iterrows():
         event_start = event["start_time"]
         event_end = event["end_time"]
         event_peak = event["peak_time"]
         
-        # Create matching window around the FOXES event
         window_start = event_start - tolerance
         window_end = event_end + tolerance
-        
+
         # Find overlapping HEK events
         overlapping = hek_df[
             (hek_df["event_endtime"] >= window_start)
             & (hek_df["event_starttime"] <= window_end)
         ]
-        
+
         if overlapping.empty:
             matched_entries.append(pd.NA)
+            match_status.append("foxes_only")
             continue
-        
+
         num_matched += 1
+        match_status.append("matched")
+        # Mark these HEK entries as matched
+        hek_df.loc[overlapping.index, "__matched"] = True
+        matched_hek_indices.update(overlapping.index)
+
         if num_matched <= 3:  # Show details for first 3 matches
             print(f"\nMatch #{num_matched}: FOXES event at {event_peak}")
             print(f"  Window: {window_start} to {window_end}")
@@ -626,34 +695,27 @@ def match_events_to_hek_multi_obs(
             if len(overlapping) > 0:
                 obs_list = overlapping['obs_observatory'].unique() if 'obs_observatory' in overlapping.columns else ['Unknown']
                 print(f"  Observatories: {list(obs_list)}")
-        
+
         # Group by peak time to find events from different observatories
-        # that are reporting the same physical flare
         event_groups = overlapping.groupby("event_peaktime")
-        
+
         # Find the group with peak time closest to FOXES event
         peak_distances = []
         for peak_time, group in event_groups:
             distance = abs((peak_time - event_peak).total_seconds())
             peak_distances.append((distance, peak_time, group))
-        
+
         if peak_distances:
-            # Get the closest group
             _, _, best_group = min(peak_distances, key=lambda x: x[0])
-            
-            # Create a summary of all observatory entries for this flare
             entries = []
             for _, hek_event in best_group.iterrows():
                 obs = hek_event.get("obs_observatory", "Unknown")
                 goes_class = hek_event.get("fl_goescls", "")
                 coords = hek_event.get("hpc_coord", "")
                 ar_num = hek_event.get("ar_noaanum", "")
-                
-                # Strip whitespace from string values
                 obs = obs.strip() if isinstance(obs, str) else str(obs)
                 goes_class = goes_class.strip() if isinstance(goes_class, str) else str(goes_class)
                 coords = coords.strip() if isinstance(coords, str) else str(coords)
-                
                 entry_info = {
                     "observatory": obs,
                     "goes_class": goes_class,
@@ -664,23 +726,47 @@ def match_events_to_hek_multi_obs(
                     "end_time": str(hek_event.get("event_endtime", "")).strip()
                 }
                 entries.append(entry_info)
-            
-            # Store as JSON string for easy parsing later
-            import json
             matched_entries.append(json.dumps(entries))
         else:
             matched_entries.append(pd.NA)
-    
+
     events_df["matched_hek_entries"] = matched_entries
+    events_df["match_status"] = match_status
+
+    # Get unmatched HEK events (HEK-only events not associated with any FOXES detection)
+    unmatched_hek_df = hek_df[~hek_df["__matched"]].copy()
     
-    # Report matching statistics
-    print(f"\n=== Matching Complete ===")
+    # Remove temporary column
+    if "__matched" in unmatched_hek_df.columns:
+        unmatched_hek_df.drop(columns="__matched", inplace=True)
+    if "__matched" in hek_df.columns:
+        hek_df.drop(columns="__matched", inplace=True)
+    
+    # Add match_status to unmatched HEK events
+    if not unmatched_hek_df.empty:
+        unmatched_hek_df["match_status"] = "hek_only"
+
+    print(f"\n=== Matching Summary ===")
     print(f"Total FOXES events: {len(events_df)}")
-    print(f"Events with HEK matches: {num_matched}")
-    print(f"Match rate: {num_matched / len(events_df) * 100:.1f}%")
-    print(f"Events without matches: {len(events_df) - num_matched}")
+    print(f"  - Matched (FOXES + HEK): {num_matched}")
+    print(f"  - FOXES-only (no HEK match): {len(events_df) - num_matched}")
+    print(f"Total HEK events: {len(hek_df)}")
+    print(f"  - HEK-only (no FOXES match): {len(unmatched_hek_df)}")
+    if len(events_df) > 0:
+        print(f"Match rate (FOXES): {num_matched / len(events_df) * 100:.1f}%")
+    if len(hek_df) > 0:
+        print(f"Match rate (HEK): {(len(hek_df) - len(unmatched_hek_df)) / len(hek_df) * 100:.1f}%")
+
+    if not unmatched_hek_df.empty:
+        print(f"\nFirst 3 HEK-only events:")
+        sample = unmatched_hek_df.head(3)
+        for _, row in sample.iterrows():
+            obs = row.get("obs_observatory", "Unknown")
+            cls = row.get("fl_goescls", "")
+            coords = row.get("hpc_coord", "")
+            print(f'  [{row.get("event_peaktime", "")}] {obs} {cls}  {coords}')
     
-    return events_df
+    return events_df, unmatched_hek_df
 
 
 def load_catalog_config(config_path: str) -> Dict:
@@ -690,8 +776,16 @@ def load_catalog_config(config_path: str) -> Dict:
     return config
 
 
-def build_flare_catalog(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, object]:
-    """Main orchestration function."""
+def build_flare_catalog(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, object]:
+    """Main orchestration function.
+    
+    Returns:
+        Tuple of (catalog_df, hek_only_df, flare_events_df, analyzer)
+        - catalog_df: FOXES events with HEK matches and match_status column
+        - hek_only_df: HEK events not matched to any FOXES detection
+        - flare_events_df: Raw track data from analyzer
+        - analyzer: The FluxContributionAnalyzer instance
+    """
     config_time_period = None
     analyzer = FluxContributionAnalyzer(
         config_path=config['paths']['config'],
@@ -729,13 +823,22 @@ def build_flare_catalog(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, objec
         min_peak_flux=config['detection']['min_peak_sum_flux'],
     )
     
-    # Step 4: Load and normalize HEK catalog
+    # Step 4: Load and normalize HEK catalog (with auto-save if fetching)
     min_flux = flux_threshold_from_class(config['detection']['min_goes_class'])
+    
+    # Determine save path for auto-fetched HEK data
+    hek_auto_save_path = None
+    if config['time_range'].get('auto_fetch_hek') and not config['paths'].get('hek_catalog'):
+        # Save to same directory as output_csv with descriptive name
+        output_path = Path(config['paths']['output_csv'])
+        hek_auto_save_path = output_path.parent / f"hek_catalog_{start_time[:10]}_{end_time[:10]}.csv"
+    
     hek_df = load_hek_catalog(
         Path(config['paths']['hek_catalog']) if config['paths']['hek_catalog'] else None,
         start_time,
         end_time,
         auto_fetch=config['time_range']['auto_fetch_hek'],
+        auto_save_path=hek_auto_save_path,
     )
     if hek_df is not None and not hek_df.empty:
         print(f"HEK columns before normalization: {list(hek_df.columns)[:10]}...")
@@ -744,27 +847,28 @@ def build_flare_catalog(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, objec
         print(f"HEK shape after normalization: {hek_df.shape}")
     
     # Step 5: Match individual FOXES events to HEK events (multi-observatory)
-    catalog_df = match_events_to_hek_multi_obs(
+    catalog_df, hek_only_df = match_events_to_hek_multi_obs(
         filtered_events,
         hek_df,
         match_window_minutes=config['matching']['match_window_minutes'],
     )
     
-    # Step 6: Add metadata
-    catalog_df["min_goes_class_requirement"] = config['detection']['min_goes_class']
-    catalog_df["cadence_seconds"] = config['detection']['cadence_seconds']
-    catalog_df["quality_config"] = [
-        {
-            "min_duration_minutes": config['detection']['min_duration_minutes'],
-            "min_samples": config['detection']['min_samples'],
-            "min_coverage": config['detection']['min_coverage'],
-            "max_gap_minutes": config['detection']['max_gap_minutes'],
-            "min_prominence": config['detection']['min_prominence'],
-            "min_peak_sum_flux": config['detection']['min_peak_sum_flux'],
-        }
-    ] * len(catalog_df)
+    # Step 6: Add metadata to FOXES events
+    if not catalog_df.empty:
+        catalog_df["min_goes_class_requirement"] = config['detection']['min_goes_class']
+        catalog_df["cadence_seconds"] = config['detection']['cadence_seconds']
+        catalog_df["quality_config"] = [
+            {
+                "min_duration_minutes": config['detection']['min_duration_minutes'],
+                "min_samples": config['detection']['min_samples'],
+                "min_coverage": config['detection']['min_coverage'],
+                "max_gap_minutes": config['detection']['max_gap_minutes'],
+                "min_prominence": config['detection']['min_prominence'],
+                "min_peak_sum_flux": config['detection']['min_peak_sum_flux'],
+            }
+        ] * len(catalog_df)
     
-    return catalog_df, flare_events_df, analyzer
+    return catalog_df, hek_only_df, flare_events_df, analyzer
 
 
 
@@ -1192,7 +1296,7 @@ def create_sxr_timeseries_plots_from_tracks(
                                 # Add text annotation with GOES class if available
                                 if goes_class and obs in ['SDO', 'SWPC']:  # Only annotate reliable sources
                                     # Get y-position for annotation (top of plot)
-                                    y_pos = ax_ts.get_ylim()[1] * 0.8
+                                    y_pos = ax_ts.get_ylim()[1] * 0.7
                                     ax_ts.annotate(goes_class, (hek_peak_time, y_pos),
                                                  xytext=(0, -10), textcoords='offset points',
                                                  ha='center', va='top', fontsize=8,
@@ -1439,13 +1543,31 @@ def main() -> None:
     args = parse_args()
     config = load_catalog_config(args.config)
     
-    catalog_df, flare_events_df, analyzer = build_flare_catalog(config)
+    catalog_df, hek_only_df, flare_events_df, analyzer = build_flare_catalog(config)
     
-    # Save catalog
+    # Save catalog outputs
     output_path = Path(config['paths']['output_csv'])
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save FOXES events (matched + foxes_only)
     catalog_df.to_csv(output_path, index=False)
-    print(f"Wrote flare catalog with {len(catalog_df)} rows to {output_path}")
+    print(f"\n=== Output Summary ===")
+    print(f"Wrote FOXES events catalog with {len(catalog_df)} rows to {output_path}")
+    
+    # Count by match status
+    if 'match_status' in catalog_df.columns:
+        matched_count = (catalog_df['match_status'] == 'matched').sum()
+        foxes_only_count = (catalog_df['match_status'] == 'foxes_only').sum()
+        print(f"  - Matched events (FOXES + HEK): {matched_count}")
+        print(f"  - FOXES-only events (no HEK match): {foxes_only_count}")
+    
+    # Save HEK-only events to separate file
+    if not hek_only_df.empty:
+        hek_only_path = output_path.parent / f"{output_path.stem}_hek_only.csv"
+        hek_only_df.to_csv(hek_only_path, index=False)
+        print(f"Wrote HEK-only events with {len(hek_only_df)} rows to {hek_only_path}")
+    else:
+        print("No HEK-only events (all HEK events matched to FOXES detections)")
     
     # Create SXR plots if requested
     if config['plotting']['create_sxr_plots']:
