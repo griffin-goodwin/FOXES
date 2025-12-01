@@ -1,0 +1,99 @@
+# =============================================================================
+# Flare Analysis Configuration
+# =============================================================================
+# Unified config for FOXES flare detection, tracking, and HEK catalog matching
+#
+# Usage: python flare_analysis.py --config flare_analysis_config.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Data Paths
+# -----------------------------------------------------------------------------
+paths:
+  data_dir: "/data/FOXES_Data"
+  flux_path: "/data/FOXES_Data/batch_results/vit/flux"
+  aia_path: "/data/FOXES_Data/AIA"
+  predictions_csv: "/data/FOXES_Data/batch_results/vit/vit_predictions_all.csv"
+  hek_catalog: '/data/FOXES_Data/hek_catalog_2012-04-15_2012-04-20.csv' # null to auto-fetch
+  output_dir: "/data/FOXES_Data"
+
+# -----------------------------------------------------------------------------
+# Time Range
+# -----------------------------------------------------------------------------
+time_range:
+  start: "2012-04-15T00:00:00"
+  end: "2012-04-20T23:59:59"
+  auto_fetch_hek: true
+
+# -----------------------------------------------------------------------------
+# Detection Parameters
+# -----------------------------------------------------------------------------
+detection:
+  # Minimum GOES class for catalog (filters weak events)
+  min_goes_class: "B1.0"
+  
+  # Flux threshold for region detection
+  min_flux_threshold: 0.0000001  # 1e-7
+  
+  # Peak clustering parameters
+  threshold_std_multiplier: 5.0   # Higher = fewer false positives
+  peak_neighborhood_size: 20      # Local max window size (patches)
+  peak_assignment_max_distance: 10 # Max patch-to-peak distance
+  flux_decrease_strictness: 0.2   # Flux monotonicity requirement (0-1)
+  
+  # HEK matching
+  hek_match_window_minutes: 5.0
+
+# -----------------------------------------------------------------------------
+# Peak Detection (within tracks)
+# -----------------------------------------------------------------------------
+# Controls how flare peaks are identified within tracked regions
+peak_detection:
+  height_multiplier: 5       # Peak must be this multiple of baseline
+  baseline_quantile: 0.1         # Percentile for baseline (lower = more sensitive)
+  min_peak_separation_minutes: 15 # Minimum time between peaks
+  validation_window: 6       # Number of points to check on each side of peak for validation
+  validation_min_lower: 2    # Minimum number of lower points required on each side
+
+# -----------------------------------------------------------------------------
+# Region Tracking
+# -----------------------------------------------------------------------------
+tracking:
+  max_tracking_distance: 25       # Max pixel distance between frames
+  max_time_gap_minutes: 120.0     # Max gap to bridge (2 hours)
+  flare_distance_relax_factor: 4.5  # Distance multiplier for flaring regions
+  flux_smoothing_window: 1        # Temporal smoothing window
+
+# -----------------------------------------------------------------------------
+# Event Quality Filters
+# -----------------------------------------------------------------------------
+quality:
+  cadence_seconds: 60.0           # Expected data cadence
+  max_gap_minutes: 30.0           # Max gap within a sequence
+  min_duration_minutes: 5.0       # Minimum event duration
+  min_samples: 6                  # Minimum frames in event
+
+# -----------------------------------------------------------------------------
+# Grid / Patch Parameters
+# -----------------------------------------------------------------------------
+grid:
+  grid_size: [64, 64]
+  patch_size: 8
+  input_size: 512
+
+# -----------------------------------------------------------------------------
+# HEK-Only Event Filtering
+# -----------------------------------------------------------------------------
+# Controls which HEK events (not matched to FOXES) are reported/plotted
+# Only events with adequate FOXES data coverage are included
+hek_coverage:
+  coverage_window_minutes: 30.0   # Time window (±minutes) around HEK peak
+  max_gap_minutes: 10.0           # Max gap to nearest FOXES data point
+  min_points_around_peak: 3       # Min points required BEFORE and AFTER peak
+
+# -----------------------------------------------------------------------------
+# Output Options
+# -----------------------------------------------------------------------------
+output:
+  create_plots: true
+  plot_window_hours: 2.0
