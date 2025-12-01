@@ -341,9 +341,15 @@ def detect_flare_events_in_track(
     
     # Find peaks with minimum prominence and distance
     min_distance = max(len(flux_series) // 20, 5)  # At least 5% of track length or 5 samples
+    
+    # Handle None/null prominence - use a very small default if disabled
+    effective_prominence = None
+    if min_prominence is not None:
+        effective_prominence = min_prominence * baseline.median()
+    
     peaks, properties = find_peaks(
         flux_series.values,
-        prominence=min_prominence * baseline.median(),
+        prominence=effective_prominence,  # None disables prominence check in find_peaks
         distance=min_distance,  # Minimum distance between peaks
         height=baseline.median() * 1.5,  # Must be above 1.5x baseline
     )
@@ -365,17 +371,27 @@ def detect_flare_events_in_track(
         
         # Find start (going backwards from peak)
         start_idx = peak_idx
+        at_data_start = False  # NEW: Track if we hit data boundary
         for i in range(peak_idx - 1, -1, -1):
             if flux_series.iloc[i] < baseline_threshold:
                 start_idx = i + 1
                 break
+        else:
+            # NEW: Reached beginning of data without finding start - this is a boundary event
+            start_idx = 0
+            at_data_start = True
         
         # Find end (going forwards from peak)
         end_idx = peak_idx
+        at_data_end = False  # NEW: Track if we hit data boundary
         for i in range(peak_idx + 1, len(flux_series)):
             if flux_series.iloc[i] < baseline_threshold:
                 end_idx = i - 1
                 break
+        else:
+            # NEW: Reached end of data without finding end - this is a boundary event
+            end_idx = len(track_df) - 1
+            at_data_end = True
         
         # Ensure we have valid indices
         start_idx = max(0, start_idx)
@@ -391,8 +407,12 @@ def detect_flare_events_in_track(
         end_time = event_df["datetime"].iloc[-1]
         duration_minutes = (end_time - start_time).total_seconds() / 60.0
         
-        # Skip events that are too short
-        if duration_minutes < min_duration_minutes:
+        # NEW: Be more lenient with duration for boundary events
+        is_boundary_event = at_data_start or at_data_end
+        effective_min_duration = min_duration_minutes / 2.0 if is_boundary_event else min_duration_minutes
+        
+        # Skip events that are too short (with lenient threshold for boundary events)
+        if duration_minutes < effective_min_duration:
             continue
         
         # Calculate event metrics
@@ -423,6 +443,9 @@ def detect_flare_events_in_track(
             "decay_time_minutes": decay_time_minutes,
             "peak_centroid_img_x": peak_row.get("centroid_img_x", np.nan),
             "peak_centroid_img_y": peak_row.get("centroid_img_y", np.nan),
+            "is_boundary_event": is_boundary_event,  # NEW: Flag boundary events
+            "at_data_start": at_data_start,          # NEW
+            "at_data_end": at_data_end,              # NEW
         })
     
     return flare_events
@@ -517,14 +540,30 @@ def build_flare_events(
     """Detect individual flare events within each track."""
     all_events: List[Dict[str, object]] = []
     
+    # Track filtering statistics for debugging
+    filter_stats = {
+        'total_tracks': 0,
+        'total_sequences': 0,
+        'skipped_too_few_samples': 0,
+        'skipped_no_peaks': 0,
+        'tracks_with_events': 0,
+    }
+    
     for track_id, track_df in flare_events_df.groupby("track_id"):
+        filter_stats['total_tracks'] += 1
         track_df = track_df.sort_values("datetime")
         
         # Split track into contiguous sequences first (handle data gaps)
         sequences = split_track_sequences(track_df, max_gap_minutes)
         
+        track_had_events = False
         for seq_idx, seq_df in enumerate(sequences):
-            if len(seq_df) < 3:  # Need minimum points for peak detection
+            filter_stats['total_sequences'] += 1
+            
+            # Lowered threshold from 3 to 2 to catch more short-lived regions
+            if len(seq_df) < 2:
+                filter_stats['skipped_too_few_samples'] += 1
+                print(f"  [FILTER] Track {track_id} seq {seq_idx}: skipped - only {len(seq_df)} sample(s) (need >= 2)")
                 continue
                 
             # Detect flare events within this sequence
@@ -533,6 +572,19 @@ def build_flare_events(
                 min_prominence=min_prominence,
                 min_duration_minutes=min_duration_minutes,
             )
+            
+            if len(events) == 0:
+                filter_stats['skipped_no_peaks'] += 1
+                # Log why no peaks were found
+                flux_range = seq_df["sum_flux"].max() - seq_df["sum_flux"].min()
+                flux_median = seq_df["sum_flux"].median()
+                time_span = (seq_df["datetime"].max() - seq_df["datetime"].min()).total_seconds() / 60.0
+                print(f"  [FILTER] Track {track_id} seq {seq_idx}: no peaks detected - "
+                      f"{len(seq_df)} samples, {time_span:.1f} min span, "
+                      f"flux range={flux_range:.2e}, median={flux_median:.2e}")
+                continue
+            
+            track_had_events = True
             
             # Add sequence metadata to each event
             for event in events:
@@ -550,8 +602,20 @@ def build_flare_events(
                 event["coverage_ratio"] = event["num_samples"] / expected_samples
                 
                 all_events.append(event)
+        
+        if track_had_events:
+            filter_stats['tracks_with_events'] += 1
     
-    print(f"Detected {len(all_events)} individual flare events from {flare_events_df['track_id'].nunique()} tracks")
+    # Print summary statistics
+    print(f"\n=== Flare Event Detection Summary ===")
+    print(f"  Total tracks analyzed: {filter_stats['total_tracks']}")
+    print(f"  Total sequences (after gap splitting): {filter_stats['total_sequences']}")
+    print(f"  Sequences skipped (< 2 samples): {filter_stats['skipped_too_few_samples']}")
+    print(f"  Sequences skipped (no peaks detected): {filter_stats['skipped_no_peaks']}")
+    print(f"  Tracks with at least one event: {filter_stats['tracks_with_events']}")
+    print(f"  Total flare events detected: {len(all_events)}")
+    print(f"=====================================\n")
+    
     return all_events
 
 
@@ -565,37 +629,133 @@ def filter_flare_events(
 ) -> pd.DataFrame:
     """Apply quality gates to individual flare events."""
     records = []
+    
+    # Track rejection reasons for debugging
+    rejection_stats = {
+        'duration': 0,
+        'samples': 0,
+        'coverage': 0,
+        'prominence': 0,
+        'peak_flux': 0,
+    }
+    
+    print(f"\n=== Quality Filter Debug (thresholds) ===")
+    print(f"  min_duration_minutes: {min_duration_minutes}")
+    print(f"  min_samples: {min_samples}")
+    print(f"  min_coverage: {min_coverage}")
+    print(f"  min_prominence: {min_prominence}")
+    print(f"  min_peak_flux: {min_peak_flux}")
+    print(f"=========================================\n")
+    
     for event in events:
+        track_id = event.get("track_id", "?")
+        peak_time = event.get("peak_time", "?")
+        
         if event["duration_minutes"] < min_duration_minutes:
+            print(f"  [QUALITY] Track {track_id} @ {peak_time}: REJECTED - duration {event['duration_minutes']:.1f} min < {min_duration_minutes} min")
+            rejection_stats['duration'] += 1
             continue
         if event["num_samples"] < min_samples:
+            print(f"  [QUALITY] Track {track_id} @ {peak_time}: REJECTED - samples {event['num_samples']} < {min_samples}")
+            rejection_stats['samples'] += 1
             continue
         if event["coverage_ratio"] < min_coverage:
+            print(f"  [QUALITY] Track {track_id} @ {peak_time}: REJECTED - coverage {event['coverage_ratio']:.2f} < {min_coverage}")
+            rejection_stats['coverage'] += 1
             continue
         if min_prominence is not None and not math.isnan(min_prominence) and event.get("prominence", 0.0) < min_prominence:
+            print(f"  [QUALITY] Track {track_id} @ {peak_time}: REJECTED - prominence {event.get('prominence', 0.0):.4f} < {min_prominence}")
+            rejection_stats['prominence'] += 1
             continue
         if min_peak_flux is not None and not math.isnan(min_peak_flux) and event.get("peak_sum_flux", 0.0) < min_peak_flux:
+            print(f"  [QUALITY] Track {track_id} @ {peak_time}: REJECTED - peak_flux {event.get('peak_sum_flux', 0.0):.2e} < {min_peak_flux:.2e}")
+            rejection_stats['peak_flux'] += 1
             continue
+        
+        print(f"  [QUALITY] Track {track_id} @ {peak_time}: PASSED - duration={event['duration_minutes']:.1f}min, samples={event['num_samples']}, prominence={event.get('prominence', 0.0):.4f}, peak_flux={event.get('peak_sum_flux', 0.0):.2e}")
         records.append(event)
+    
     df = pd.DataFrame(records)
-    print(f"Quality filter retained {len(df)} individual flare events")
+    
+    print(f"\n=== Quality Filter Summary ===")
+    print(f"  Input events: {len(events)}")
+    print(f"  Rejected - duration too short: {rejection_stats['duration']}")
+    print(f"  Rejected - too few samples: {rejection_stats['samples']}")
+    print(f"  Rejected - low coverage: {rejection_stats['coverage']}")
+    print(f"  Rejected - low prominence: {rejection_stats['prominence']}")
+    print(f"  Rejected - low peak flux: {rejection_stats['peak_flux']}")
+    print(f"  PASSED quality filter: {len(df)}")
+    print(f"==============================\n")
+    
     return df
 
 
+
+
+def compare_flare_magnitude(
+    foxes_flux: float,
+    hek_goes_class: str,
+    tolerance_class_levels: float = 1.0,
+) -> Tuple[bool, str, str]:
+    """
+    Compare FOXES flux to HEK GOES class to determine if magnitudes match.
+    
+    Args:
+        foxes_flux: FOXES peak_sum_flux value
+        hek_goes_class: HEK GOES class string (e.g., "C5.0", "M1.2")
+        tolerance_class_levels: How many class levels difference is acceptable
+                               (1.0 = within same order of magnitude, e.g., C5 vs C8)
+                               
+    Returns:
+        Tuple of (magnitude_matches, foxes_class, hek_class)
+    """
+    # Convert FOXES flux to GOES class
+    foxes_class = flux_to_goes_class(foxes_flux)
+    
+    # Get HEK flux
+    hek_flux = goes_class_to_flux(hek_goes_class)
+    
+    # If either is invalid, can't compare
+    if foxes_class == "N/A" or np.isnan(hek_flux) or hek_flux <= 0:
+        return False, foxes_class, hek_goes_class if hek_goes_class else "N/A"
+    
+    # Get FOXES flux value
+    foxes_flux_val = goes_class_to_flux(foxes_class)
+    if np.isnan(foxes_flux_val) or foxes_flux_val <= 0:
+        return False, foxes_class, hek_goes_class
+    
+    # Compare using log ratio - within tolerance_class_levels orders of magnitude
+    # One GOES class level = factor of 10 (e.g., C1 to M1)
+    # Within same letter class, numbers differ by factor up to 10 (e.g., C1 to C9.9)
+    log_ratio = abs(np.log10(foxes_flux_val) - np.log10(hek_flux))
+    
+    # tolerance_class_levels of 1.0 means within same major class (e.g., both C-class)
+    # tolerance_class_levels of 0.5 means within half a class (e.g., C5 vs C1.5 to C5*3)
+    magnitude_matches = log_ratio <= tolerance_class_levels
+    
+    return magnitude_matches, foxes_class, hek_goes_class
 
 
 def match_events_to_hek_multi_obs(
     events_df: pd.DataFrame,
     hek_df: pd.DataFrame,
     match_window_minutes: float,
+    magnitude_tolerance: float = 1.0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Associate each FOXES event with HEK events from multiple observatories,
     and also return unmatched HEK events.
+    
+    Match status categories:
+    - "matched_time_magnitude": Time AND magnitude match (true detection)
+    - "matched_time_only": Time matches but magnitude differs (possible simultaneous flare separation)
+    - "foxes_only": No HEK event at this time
     
     Args:
         events_df: DataFrame of FOXES-detected events
         hek_df: DataFrame of HEK catalog events
         match_window_minutes: Time tolerance for matching
+        magnitude_tolerance: GOES class levels tolerance for magnitude matching
+                            (1.0 = within same major class, e.g., both C-class)
         
     Returns:
         Tuple of (matched_events_df, hek_only_events_df)
@@ -645,11 +805,19 @@ def match_events_to_hek_multi_obs(
     tolerance = pd.Timedelta(minutes=match_window_minutes)
     matched_entries: List[Optional[str]] = []
     match_status: List[str] = []
+    foxes_goes_class: List[str] = []
+    hek_goes_class_list: List[str] = []
+    magnitude_match_list: List[bool] = []
 
     # Track which HEK entries have been matched
     hek_df["__matched"] = False
+    
+    # Counters for different match types
+    num_time_mag_matched = 0
+    num_time_only_matched = 0
 
     print(f"\nStarting matching with tolerance: ±{match_window_minutes} minutes")
+    print(f"Magnitude tolerance: {magnitude_tolerance} class levels")
     if len(events_df) > 0:
         print(f"Sample FOXES event: {events_df[['start_time', 'peak_time', 'end_time']].iloc[0].to_dict()}")
     if len(hek_df) > 0:
@@ -680,21 +848,15 @@ def match_events_to_hek_multi_obs(
         if overlapping.empty:
             matched_entries.append(pd.NA)
             match_status.append("foxes_only")
+            foxes_goes_class.append(flux_to_goes_class(event.get("peak_sum_flux", 0)))
+            hek_goes_class_list.append(pd.NA)
+            magnitude_match_list.append(False)
             continue
 
         num_matched += 1
-        match_status.append("matched")
         # Mark these HEK entries as matched
         hek_df.loc[overlapping.index, "__matched"] = True
         matched_hek_indices.update(overlapping.index)
-
-        if num_matched <= 3:  # Show details for first 3 matches
-            print(f"\nMatch #{num_matched}: FOXES event at {event_peak}")
-            print(f"  Window: {window_start} to {window_end}")
-            print(f"  Found {len(overlapping)} overlapping HEK events")
-            if len(overlapping) > 0:
-                obs_list = overlapping['obs_observatory'].unique() if 'obs_observatory' in overlapping.columns else ['Unknown']
-                print(f"  Observatories: {list(obs_list)}")
 
         # Group by peak time to find events from different observatories
         event_groups = overlapping.groupby("event_peaktime")
@@ -708,6 +870,8 @@ def match_events_to_hek_multi_obs(
         if peak_distances:
             _, _, best_group = min(peak_distances, key=lambda x: x[0])
             entries = []
+            best_hek_class = None
+            
             for _, hek_event in best_group.iterrows():
                 obs = hek_event.get("obs_observatory", "Unknown")
                 goes_class = hek_event.get("fl_goescls", "")
@@ -716,6 +880,11 @@ def match_events_to_hek_multi_obs(
                 obs = obs.strip() if isinstance(obs, str) else str(obs)
                 goes_class = goes_class.strip() if isinstance(goes_class, str) else str(goes_class)
                 coords = coords.strip() if isinstance(coords, str) else str(coords)
+                
+                # Track the HEK GOES class (prefer GOES/SWPC source)
+                if goes_class and (best_hek_class is None or obs in ['GOES', 'SWPC']):
+                    best_hek_class = goes_class
+                
                 entry_info = {
                     "observatory": obs,
                     "goes_class": goes_class,
@@ -726,12 +895,46 @@ def match_events_to_hek_multi_obs(
                     "end_time": str(hek_event.get("event_endtime", "")).strip()
                 }
                 entries.append(entry_info)
+            
             matched_entries.append(json.dumps(entries))
+            
+            # Compare magnitudes
+            foxes_flux = event.get("peak_sum_flux", 0)
+            mag_matches, foxes_class_str, hek_class_str = compare_flare_magnitude(
+                foxes_flux, best_hek_class or "", magnitude_tolerance
+            )
+            
+            foxes_goes_class.append(foxes_class_str)
+            hek_goes_class_list.append(hek_class_str)
+            magnitude_match_list.append(mag_matches)
+            
+            if mag_matches:
+                match_status.append("matched_time_magnitude")
+                num_time_mag_matched += 1
+            else:
+                match_status.append("matched_time_only")
+                num_time_only_matched += 1
+            
+            if num_matched <= 3:  # Show details for first 3 matches
+                print(f"\nMatch #{num_matched}: FOXES event at {event_peak}")
+                print(f"  FOXES class: {foxes_class_str}, HEK class: {hek_class_str}")
+                print(f"  Magnitude match: {mag_matches}")
+                print(f"  Found {len(overlapping)} overlapping HEK events")
+                if len(overlapping) > 0:
+                    obs_list = overlapping['obs_observatory'].unique() if 'obs_observatory' in overlapping.columns else ['Unknown']
+                    print(f"  Observatories: {list(obs_list)}")
         else:
             matched_entries.append(pd.NA)
+            foxes_goes_class.append(flux_to_goes_class(event.get("peak_sum_flux", 0)))
+            hek_goes_class_list.append(pd.NA)
+            magnitude_match_list.append(False)
+            match_status.append("foxes_only")
 
     events_df["matched_hek_entries"] = matched_entries
     events_df["match_status"] = match_status
+    events_df["foxes_goes_class"] = foxes_goes_class
+    events_df["hek_goes_class"] = hek_goes_class_list
+    events_df["magnitude_match"] = magnitude_match_list
 
     # Get unmatched HEK events (HEK-only events not associated with any FOXES detection)
     unmatched_hek_df = hek_df[~hek_df["__matched"]].copy()
@@ -748,7 +951,8 @@ def match_events_to_hek_multi_obs(
 
     print(f"\n=== Matching Summary ===")
     print(f"Total FOXES events: {len(events_df)}")
-    print(f"  - Matched (FOXES + HEK): {num_matched}")
+    print(f"  - Matched time + magnitude: {num_time_mag_matched}")
+    print(f"  - Matched time only: {num_time_only_matched}")
     print(f"  - FOXES-only (no HEK match): {len(events_df) - num_matched}")
     print(f"Total HEK events: {len(hek_df)}")
     print(f"  - HEK-only (no FOXES match): {len(unmatched_hek_df)}")
@@ -851,6 +1055,7 @@ def build_flare_catalog(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
         filtered_events,
         hek_df,
         match_window_minutes=config['matching']['match_window_minutes'],
+        magnitude_tolerance=config['matching'].get('magnitude_tolerance', 1.0),
     )
     
     # Step 6: Add metadata to FOXES events
@@ -1108,10 +1313,15 @@ def create_sxr_timeseries_plots_from_tracks(
     """
     Create SXR-style timeseries plots using actual track data with optional AIA images.
     
+    Plots are organized into subfolders based on match_status:
+    - matched_time_magnitude/: Events matched by BOTH time and magnitude (true detections)
+    - matched_time_only/: Events matched by time but different magnitude (possible simultaneous flare separation)
+    - foxes_only/: Events detected by FOXES but not in HEK
+    
     Args:
-        catalog_df: DataFrame with flare events
+        catalog_df: DataFrame with flare events (must have match_status column)
         flare_events_df: Original track data from analyzer
-        output_dir: Directory to save plots
+        output_dir: Base directory to save plots
         plot_window_hours: Hours before/after event peak to show
         aia_path: Path to AIA data directory (optional)
         flux_path: Path to flux data directory (optional)
@@ -1122,7 +1332,14 @@ def create_sxr_timeseries_plots_from_tracks(
         return
     
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create subfolders for each match status
+    matched_time_mag_dir = output_dir / "matched_time_magnitude"
+    matched_time_only_dir = output_dir / "matched_time_only"
+    foxes_only_dir = output_dir / "foxes_only"
+    matched_time_mag_dir.mkdir(parents=True, exist_ok=True)
+    matched_time_only_dir.mkdir(parents=True, exist_ok=True)
+    foxes_only_dir.mkdir(parents=True, exist_ok=True)
     
     # Load predictions data if available
     predictions_df = None
@@ -1144,7 +1361,14 @@ def create_sxr_timeseries_plots_from_tracks(
             print(f"Warning: Could not load predictions CSV: {e}")
             predictions_df = None
     
-    print(f"Creating SXR timeseries plots with real data for {len(catalog_df)} events...")
+    # Count events by status
+    time_mag_count = (catalog_df['match_status'] == 'matched_time_magnitude').sum() if 'match_status' in catalog_df.columns else 0
+    time_only_count = (catalog_df['match_status'] == 'matched_time_only').sum() if 'match_status' in catalog_df.columns else 0
+    foxes_only_count = (catalog_df['match_status'] == 'foxes_only').sum() if 'match_status' in catalog_df.columns else len(catalog_df)
+    print(f"Creating SXR timeseries plots for {len(catalog_df)} events...")
+    print(f"  - Matched time + magnitude: {time_mag_count} -> {matched_time_mag_dir}")
+    print(f"  - Matched time only: {time_only_count} -> {matched_time_only_dir}")
+    print(f"  - FOXES-only: {foxes_only_count} -> {foxes_only_dir}")
     
     for idx, event in catalog_df.iterrows():
         try:
@@ -1501,23 +1725,44 @@ def create_sxr_timeseries_plots_from_tracks(
                 if handles:
                     ax_img.legend(loc='upper right', fontsize=8, framealpha=0.8)
             
-            # Title with event info
+            # Determine match status for title and folder
+            match_status = event.get("match_status", "foxes_only")
+            foxes_class = event.get("foxes_goes_class", "N/A")
+            hek_class = event.get("hek_goes_class", "N/A")
+            
+            # Create status label for title
+            if match_status == "matched_time_magnitude":
+                status_label = "Matched (Time + Mag)"
+            elif match_status == "matched_time_only":
+                status_label = "Matched (Time Only)"
+            else:
+                status_label = "FOXES Only"
+            
+            # Title with event info including class comparison
             title_parts = [
-                f"Track {track_id} Event",
+                f"Track {track_id} ({status_label})",
                 f"Peak: {peak_time.strftime('%Y-%m-%d %H:%M')}",
             ]
             
-            if not pd.isna(event.get("matched_goes_class")):
-                title_parts.append(f"NOAA: {event['matched_goes_class']}")
+            # Add class comparison for matched events
+            if match_status in ["matched_time_magnitude", "matched_time_only"]:
+                title_parts.append(f"FOXES: {foxes_class} vs HEK: {hek_class}")
+            elif foxes_class != "N/A":
+                title_parts.append(f"FOXES: {foxes_class}")
             
             fig.suptitle(" | ".join(title_parts), fontsize=14, y=0.95)
             
             # Tight layout
             plt.tight_layout()
             
-            # Save plot
+            # Save plot to appropriate subfolder based on match_status
             filename = f"flare_event_{track_id}_{peak_time.strftime('%Y%m%d_%H%M%S')}.png"
-            filepath = output_dir / filename
+            if match_status == "matched_time_magnitude":
+                filepath = matched_time_mag_dir / filename
+            elif match_status == "matched_time_only":
+                filepath = matched_time_only_dir / filename
+            else:
+                filepath = foxes_only_dir / filename
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
             
@@ -1526,6 +1771,366 @@ def create_sxr_timeseries_plots_from_tracks(
             continue
     
     print(f"Saved timeseries plots to {output_dir}")
+    print(f"  - Matched time + magnitude: {matched_time_mag_dir}")
+    print(f"  - Matched time only: {matched_time_only_dir}")
+    print(f"  - FOXES-only plots: {foxes_only_dir}")
+
+
+def filter_hek_by_foxes_coverage(
+    hek_df: pd.DataFrame,
+    foxes_timestamps: pd.DatetimeIndex,
+    max_gap_minutes: float = 10.0,
+    min_points_required: int = 5,
+    coverage_window_minutes: float = 30.0,
+    min_points_before_peak: int = 3,
+    min_points_after_peak: int = 3,
+) -> pd.DataFrame:
+    """
+    Filter HEK events to only include those where FOXES had sufficient data coverage.
+    
+    This ensures a fair comparison - we only count HEK events as "missed" by FOXES
+    if FOXES actually had enough data during that time period to detect it.
+    
+    NEW: Now requires BALANCED coverage - points both before AND after the peak.
+    This is essential for flare detection which needs to see rise AND decay.
+    
+    Args:
+        hek_df: DataFrame of HEK events
+        foxes_timestamps: DatetimeIndex of all timestamps where FOXES has data
+        max_gap_minutes: Maximum time gap to nearest FOXES point
+        min_points_required: Minimum number of FOXES data points required in the window
+        coverage_window_minutes: Time window around HEK peak to check for FOXES points
+        min_points_before_peak: Minimum points required BEFORE the peak (for rise detection)
+        min_points_after_peak: Minimum points required AFTER the peak (for decay detection)
+        
+    Returns:
+        Filtered DataFrame with only HEK events during adequate FOXES coverage
+    """
+    if hek_df.empty or len(foxes_timestamps) == 0:
+        return hek_df
+    
+    hek_df = hek_df.copy()
+    
+    # Ensure peak time is datetime
+    if "event_peaktime" in hek_df.columns:
+        hek_df["event_peaktime"] = pd.to_datetime(hek_df["event_peaktime"])
+    else:
+        print("Warning: No event_peaktime column in HEK data")
+        return hek_df
+    
+    # Sort FOXES timestamps for efficient searching
+    foxes_timestamps = foxes_timestamps.sort_values()
+    foxes_ts_array = foxes_timestamps.values  # numpy array for faster operations
+    
+    def has_adequate_foxes_coverage(peak_time):
+        """
+        Check if FOXES has adequate BALANCED data coverage around this peak time.
+        
+        Requires:
+        1. At least one FOXES point within max_gap_minutes of the peak
+        2. At least min_points_required FOXES points total within coverage_window_minutes
+        3. At least min_points_before_peak points BEFORE the peak (for rise detection)
+        4. At least min_points_after_peak points AFTER the peak (for decay detection)
+        """
+        if pd.isna(peak_time):
+            return False
+        
+        peak_np = np.datetime64(peak_time)
+        
+        # Find the index where peak_time would be inserted
+        idx = np.searchsorted(foxes_ts_array, peak_np)
+        
+        # Check 1: Is there at least one point within max_gap_minutes?
+        has_nearby_point = False
+        if idx > 0:
+            time_diff = abs(peak_np - foxes_ts_array[idx - 1])
+            if time_diff <= np.timedelta64(int(max_gap_minutes * 60), 's'):
+                has_nearby_point = True
+        if idx < len(foxes_ts_array):
+            time_diff = abs(peak_np - foxes_ts_array[idx])
+            if time_diff <= np.timedelta64(int(max_gap_minutes * 60), 's'):
+                has_nearby_point = True
+        
+        if not has_nearby_point:
+            return False
+        
+        # Define time windows
+        window_start = peak_np - np.timedelta64(int(coverage_window_minutes * 60), 's')
+        window_end = peak_np + np.timedelta64(int(coverage_window_minutes * 60), 's')
+        
+        # Find indices of points within the window
+        start_idx = np.searchsorted(foxes_ts_array, window_start)
+        end_idx = np.searchsorted(foxes_ts_array, window_end)
+        peak_idx = np.searchsorted(foxes_ts_array, peak_np)
+        
+        # Check 2: Total points in window
+        points_in_window = end_idx - start_idx
+        if points_in_window < min_points_required:
+            return False
+        
+        # Check 3: Points BEFORE peak (for rise detection)
+        points_before = peak_idx - start_idx
+        if points_before < min_points_before_peak:
+            return False
+        
+        # Check 4: Points AFTER peak (for decay detection)
+        points_after = end_idx - peak_idx
+        if points_after < min_points_after_peak:
+            return False
+        
+        return True
+    
+    # Apply the coverage filter
+    coverage_mask = hek_df["event_peaktime"].apply(has_adequate_foxes_coverage)
+    filtered_df = hek_df[coverage_mask].copy()
+    
+    return filtered_df
+
+
+def create_hek_only_plots(
+    hek_only_df: pd.DataFrame,
+    output_dir: Path,
+    plot_window_hours: float = 6.0,
+    predictions_csv: Optional[str] = None,
+    coverage_gap_minutes: float = 10.0,
+    min_coverage_points: int = 5,
+    coverage_window_minutes: float = 30.0,
+    min_points_before_peak: int = 3,
+    min_points_after_peak: int = 3,
+) -> None:
+    """
+    Create timeseries plots for HEK-only events (events in HEK but not detected by FOXES).
+    
+    IMPORTANT: Only plots HEK events that occurred during times when FOXES had 
+    SUFFICIENT and BALANCED data coverage. This ensures a fair comparison - we only 
+    show events FOXES "missed" if it had adequate data to detect them.
+    
+    Coverage requirements:
+    1. At least one FOXES data point within coverage_gap_minutes of the HEK peak
+    2. At least min_coverage_points FOXES data points total within ±coverage_window_minutes
+    3. At least min_points_before_peak points BEFORE the peak (to see rise)
+    4. At least min_points_after_peak points AFTER the peak (to see decay)
+    
+    These plots show the GOES ground truth and FOXES predictions (if available) along with
+    HEK event markers to visualize what FOXES might have missed.
+    
+    Args:
+        hek_only_df: DataFrame of HEK events not matched to FOXES detections
+        output_dir: Directory to save plots (will create 'hek_only' subfolder)
+        plot_window_hours: Hours before/after event peak to show
+        predictions_csv: Path to predictions CSV with ground truth and predictions
+        coverage_gap_minutes: Max gap in minutes to nearest FOXES point
+        min_coverage_points: Minimum FOXES data points required in coverage window
+        coverage_window_minutes: Time window (±minutes) to check for FOXES data density
+        min_points_before_peak: Minimum points required BEFORE peak (for rise detection)
+        min_points_after_peak: Minimum points required AFTER peak (for decay detection)
+    """
+    if hek_only_df.empty:
+        print("No HEK-only events to plot")
+        return
+    
+    output_dir = Path(output_dir)
+    hek_only_dir = output_dir / "hek_only"
+    hek_only_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load predictions data if available
+    predictions_df = None
+    foxes_timestamps = None
+    if predictions_csv and Path(predictions_csv).exists():
+        try:
+            print(f"Loading predictions data from {predictions_csv}...")
+            predictions_df = pd.read_csv(predictions_csv)
+            
+            # Ensure datetime column
+            if 'datetime' in predictions_df.columns:
+                predictions_df['datetime'] = pd.to_datetime(predictions_df['datetime'])
+            elif 'timestamp' in predictions_df.columns:
+                predictions_df['datetime'] = pd.to_datetime(predictions_df['timestamp'])
+                predictions_df['timestamp'] = pd.to_datetime(predictions_df['timestamp'])
+                
+            print(f"Loaded predictions data: {len(predictions_df)} samples")
+            
+            # Extract FOXES coverage timestamps
+            if 'timestamp' in predictions_df.columns:
+                foxes_timestamps = pd.DatetimeIndex(predictions_df['timestamp'])
+            elif 'datetime' in predictions_df.columns:
+                foxes_timestamps = pd.DatetimeIndex(predictions_df['datetime'])
+                
+            if foxes_timestamps is not None:
+                print(f"FOXES data coverage: {foxes_timestamps.min()} to {foxes_timestamps.max()}")
+            
+        except Exception as e:
+            print(f"Warning: Could not load predictions CSV: {e}")
+            predictions_df = None
+    
+    # Ensure HEK time columns are datetime
+    hek_only_df = hek_only_df.copy()
+    for col in ["event_starttime", "event_endtime", "event_peaktime"]:
+        if col in hek_only_df.columns:
+            hek_only_df[col] = pd.to_datetime(hek_only_df[col])
+    
+    original_count = len(hek_only_df)
+    
+    # Filter HEK events to only those during adequate FOXES coverage
+    if foxes_timestamps is not None and len(foxes_timestamps) > 0:
+        print(f"\nFiltering HEK-only events to those with adequate BALANCED FOXES data coverage...")
+        print(f"  Requirements:")
+        print(f"    - At least one FOXES point within {coverage_gap_minutes} minutes of HEK peak")
+        print(f"    - At least {min_coverage_points} FOXES points total within ±{coverage_window_minutes} minutes")
+        print(f"    - At least {min_points_before_peak} points BEFORE peak (rise detection)")
+        print(f"    - At least {min_points_after_peak} points AFTER peak (decay detection)")
+        
+        hek_only_df = filter_hek_by_foxes_coverage(
+            hek_only_df, 
+            foxes_timestamps, 
+            max_gap_minutes=coverage_gap_minutes,
+            min_points_required=min_coverage_points,
+            coverage_window_minutes=coverage_window_minutes,
+            min_points_before_peak=min_points_before_peak,
+            min_points_after_peak=min_points_after_peak,
+        )
+        filtered_count = len(hek_only_df)
+        print(f"  Original HEK-only events: {original_count}")
+        print(f"  Events with adequate BALANCED coverage: {filtered_count}")
+        print(f"  Events with insufficient/unbalanced coverage (excluded): {original_count - filtered_count}")
+        
+        if hek_only_df.empty:
+            print("No HEK-only events remain after filtering by FOXES coverage")
+            return
+    else:
+        print("Warning: No FOXES timestamps available - cannot filter by coverage")
+        print("  Showing ALL HEK-only events (may include times without FOXES data)")
+    
+    # Group HEK events by peak time to avoid duplicate plots for same event from different observatories
+    # Use a 5-minute window to group same events
+    hek_only_df = hek_only_df.sort_values("event_peaktime")
+    
+    print(f"\nCreating HEK-only plots for {len(hek_only_df)} HEK events with FOXES coverage...")
+    print(f"  -> Saving to {hek_only_dir}")
+    
+    # Track which peak times we've already plotted (within 5 min tolerance)
+    plotted_peaks = []
+    plots_created = 0
+    
+    for idx, hek_event in hek_only_df.iterrows():
+        try:
+            peak_time = hek_event.get("event_peaktime")
+            if pd.isna(peak_time):
+                continue
+            
+            # Check if we've already plotted an event within 5 minutes of this one
+            already_plotted = False
+            for prev_peak in plotted_peaks:
+                if abs((peak_time - prev_peak).total_seconds()) < 300:  # 5 minutes
+                    already_plotted = True
+                    break
+            
+            if already_plotted:
+                continue
+            
+            plotted_peaks.append(peak_time)
+            
+            # Get event info
+            start_time = hek_event.get("event_starttime", peak_time - pd.Timedelta(minutes=30))
+            end_time = hek_event.get("event_endtime", peak_time + pd.Timedelta(minutes=30))
+            obs = hek_event.get("obs_observatory", "Unknown")
+            goes_class = hek_event.get("fl_goescls", hek_event.get("goes_class", ""))
+            coords = hek_event.get("hpc_coord", "")
+            ar_num = hek_event.get("ar_noaanum", "")
+            
+            # Create figure
+            fig, ax = plt.subplots(figsize=(12, 6))
+            
+            # Define plot window
+            window_start = peak_time - pd.Timedelta(hours=plot_window_hours/2)
+            window_end = peak_time + pd.Timedelta(hours=plot_window_hours/2)
+            
+            has_data = False
+            
+            # Plot ground truth and predictions if available
+            if predictions_df is not None:
+                # Filter predictions to the time window
+                preds_in_window = predictions_df[
+                    (predictions_df["timestamp"] >= window_start) & 
+                    (predictions_df["timestamp"] <= window_end)
+                ].copy()
+                
+                if not preds_in_window.empty:
+                    has_data = True
+                    
+                    # Plot ground truth GOES X-ray flux
+                    if 'groundtruth' in preds_in_window.columns:
+                        ax.plot(preds_in_window["timestamp"], preds_in_window['groundtruth'], 
+                                'k-', linewidth=1.5, alpha=0.8, label='GOES Ground Truth')
+                    
+                    # Plot FOXES prediction
+                    if 'predictions' in preds_in_window.columns:
+                        ax.plot(preds_in_window["timestamp"], preds_in_window['predictions'], 
+                                'r--', linewidth=1.5, alpha=0.8, label='FOXES Prediction')
+            
+            # Mark HEK event
+            ax.axvline(peak_time, color='purple', linestyle=':', linewidth=2, label=f'{obs} Peak')
+            
+            # Shade HEK event region
+            if not pd.isna(start_time) and not pd.isna(end_time):
+                ax.axvspan(start_time, end_time, alpha=0.15, color='purple', label='HEK Event Duration')
+            
+            # Add GOES class annotation
+            if goes_class:
+                y_pos = ax.get_ylim()[1] * 0.9 if has_data else 0.9
+                ax.annotate(f'{goes_class}', (peak_time, y_pos),
+                           xytext=(0, -10), textcoords='offset points',
+                           ha='center', va='top', fontsize=12,
+                           color='purple', weight='bold',
+                           bbox=dict(boxstyle='round,pad=0.3', 
+                                    facecolor='white', alpha=0.9, edgecolor='purple'))
+            
+            # Set plot window
+            ax.set_xlim(window_start, window_end)
+            
+            # Formatting
+            if has_data:
+                ax.set_yscale('log')
+            ax.set_ylabel('Flux', fontsize=12)
+            ax.set_xlabel('Time (UTC)', fontsize=12)
+            
+            # Format x-axis
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            
+            # Legend and grid
+            ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+            ax.grid(True, alpha=0.3)
+            
+            # Title
+            title_parts = [
+                "HEK Only (Not detected by FOXES)",
+                f"Peak: {peak_time.strftime('%Y-%m-%d %H:%M')}",
+            ]
+            if goes_class:
+                title_parts.append(f"Class: {goes_class}")
+            if obs:
+                title_parts.append(f"Source: {obs}")
+            
+            fig.suptitle(" | ".join(title_parts), fontsize=14, y=0.95)
+            
+            # Tight layout
+            plt.tight_layout()
+            
+            # Save plot
+            filename = f"hek_only_{peak_time.strftime('%Y%m%d_%H%M%S')}_{obs}.png"
+            filepath = hek_only_dir / filename
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            plots_created += 1
+            
+        except Exception as e:
+            print(f"Error creating HEK-only plot for event {idx}: {e}")
+            continue
+    
+    print(f"Created {plots_created} HEK-only plots in {hek_only_dir}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1545,33 +2150,73 @@ def main() -> None:
     
     catalog_df, hek_only_df, flare_events_df, analyzer = build_flare_catalog(config)
     
-    # Save catalog outputs
+    # Create timestamped output directory
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = Path(config['paths']['output_csv'])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    base_output_dir = output_path.parent
+    output_dir = base_output_dir / f"run_{run_timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save FOXES events (matched + foxes_only)
-    catalog_df.to_csv(output_path, index=False)
-    print(f"\n=== Output Summary ===")
-    print(f"Wrote FOXES events catalog with {len(catalog_df)} rows to {output_path}")
+    print(f"\n=== Output Directory ===")
+    print(f"Created timestamped output folder: {output_dir}")
     
-    # Count by match status
-    if 'match_status' in catalog_df.columns:
-        matched_count = (catalog_df['match_status'] == 'matched').sum()
-        foxes_only_count = (catalog_df['match_status'] == 'foxes_only').sum()
-        print(f"  - Matched events (FOXES + HEK): {matched_count}")
-        print(f"  - FOXES-only events (no HEK match): {foxes_only_count}")
+    print(f"\n=== Saving CSV Catalogs ===")
     
-    # Save HEK-only events to separate file
-    if not hek_only_df.empty:
-        hek_only_path = output_path.parent / f"{output_path.stem}_hek_only.csv"
-        hek_only_df.to_csv(hek_only_path, index=False)
-        print(f"Wrote HEK-only events with {len(hek_only_df)} rows to {hek_only_path}")
+    # Split catalog by match status
+    matched_time_mag_df = catalog_df[catalog_df['match_status'] == 'matched_time_magnitude'] if 'match_status' in catalog_df.columns else pd.DataFrame()
+    matched_time_only_df = catalog_df[catalog_df['match_status'] == 'matched_time_only'] if 'match_status' in catalog_df.columns else pd.DataFrame()
+    foxes_only_events_df = catalog_df[catalog_df['match_status'] == 'foxes_only'] if 'match_status' in catalog_df.columns else catalog_df
+    
+    # 1. Save matched time + magnitude events (true detections)
+    matched_time_mag_path = output_dir / "flare_events_matched_time_magnitude.csv"
+    if not matched_time_mag_df.empty:
+        matched_time_mag_df.to_csv(matched_time_mag_path, index=False)
+        print(f"  [1] Matched time + magnitude: {len(matched_time_mag_df)} events -> {matched_time_mag_path}")
     else:
-        print("No HEK-only events (all HEK events matched to FOXES detections)")
+        print(f"  [1] Matched time + magnitude: 0 events (no file created)")
+    
+    # 2. Save matched time only events (possible simultaneous flare separation)
+    matched_time_only_path = output_dir / "flare_events_matched_time_only.csv"
+    if not matched_time_only_df.empty:
+        matched_time_only_df.to_csv(matched_time_only_path, index=False)
+        print(f"  [2] Matched time only (diff magnitude): {len(matched_time_only_df)} events -> {matched_time_only_path}")
+    else:
+        print(f"  [2] Matched time only (diff magnitude): 0 events (no file created)")
+    
+    # 3. Save FOXES-only events (detected by FOXES but not in HEK)
+    foxes_only_path = output_dir / "flare_events_foxes_only.csv"
+    if not foxes_only_events_df.empty:
+        foxes_only_events_df.to_csv(foxes_only_path, index=False)
+        print(f"  [3] FOXES-only (no HEK match): {len(foxes_only_events_df)} events -> {foxes_only_path}")
+    else:
+        print(f"  [3] FOXES-only (no HEK match): 0 events (no file created)")
+    
+    # 4. Save HEK-only events (in HEK but not detected by FOXES)
+    hek_only_path = output_dir / "flare_events_hek_only.csv"
+    if not hek_only_df.empty:
+        hek_only_df.to_csv(hek_only_path, index=False)
+        print(f"  [4] HEK-only (FOXES missed): {len(hek_only_df)} events -> {hek_only_path}")
+    else:
+        print(f"  [4] HEK-only (FOXES missed): 0 events (no file created)")
+    
+    # 5. Also save combined FOXES catalog (for backward compatibility)
+    combined_path = output_dir / "flare_events_all_foxes.csv"
+    if not catalog_df.empty:
+        catalog_df.to_csv(combined_path, index=False)
+        print(f"  [*] Combined FOXES catalog: {len(catalog_df)} events -> {combined_path}")
+    
+    # Summary
+    print(f"\n=== Event Summary ===")
+    print(f"  Total FOXES detections: {len(catalog_df)}")
+    print(f"    - Matched time + magnitude: {len(matched_time_mag_df)}")
+    print(f"    - Matched time only: {len(matched_time_only_df)}")
+    print(f"    - FOXES-only: {len(foxes_only_events_df)}")
+    print(f"  Total HEK-only (missed by FOXES): {len(hek_only_df)}")
     
     # Create SXR plots if requested
     if config['plotting']['create_sxr_plots']:
-        plots_dir = Path(config['paths']['sxr_plots_dir']) if config['paths']['sxr_plots_dir'] else output_path.parent / "sxr_plots"
+        # Use plots subfolder within the timestamped output directory
+        plots_dir = output_dir / "plots"
         
         # Get paths from analyzer config or config overrides
         aia_path = Path(config['paths']['aia_path']) if config['paths']['aia_path'] else (
@@ -1586,6 +2231,11 @@ def main() -> None:
             analyzer.predictions_csv if hasattr(analyzer, 'predictions_csv') and analyzer.predictions_csv else None
         )
         
+        print(f"\n=== Creating Plots ===")
+        print(f"Output directory: {plots_dir}")
+        print(f"  Subfolders: matched_time_magnitude/, matched_time_only/, foxes_only/, hek_only/")
+        
+        # Create plots for FOXES events (matched + foxes_only)
         create_sxr_timeseries_plots_from_tracks(
             catalog_df,
             flare_events_df,
@@ -1595,6 +2245,24 @@ def main() -> None:
             flux_path=flux_path,
             predictions_csv=predictions_csv,
         )
+        
+        # Create plots for HEK-only events
+        if not hek_only_df.empty:
+            # Get HEK coverage config (with defaults for backward compatibility)
+            hek_cov = config.get('hek_coverage', {})
+            create_hek_only_plots(
+                hek_only_df,
+                plots_dir,
+                plot_window_hours=config['plotting']['plot_window_hours'],
+                predictions_csv=predictions_csv,
+                coverage_gap_minutes=hek_cov.get('max_gap_minutes', 10.0),
+                min_coverage_points=hek_cov.get('min_points_total', 5),
+                coverage_window_minutes=hek_cov.get('coverage_window_minutes', 30.0),
+                min_points_before_peak=hek_cov.get('min_points_before_peak', 3),
+                min_points_after_peak=hek_cov.get('min_points_after_peak', 3),
+            )
+        else:
+            print("No HEK-only events to plot")
 
 
 if __name__ == "__main__":  # pragma: no cover

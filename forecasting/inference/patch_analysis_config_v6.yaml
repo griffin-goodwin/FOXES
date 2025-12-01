@@ -17,43 +17,45 @@ input_size: 512
 analysis:
   # Time period for analysis
   time_period:
-    start_time: "2012-01-01T00:00:00"
-    end_time: "2012-04-30T23:59:59"
+    start_time: "2012-02-01T00:00:00"
+    end_time: "2012-02-09T23:59:59"
   
-  # Flare detection parameters - DBSCAN based
   flare_detection:
     
     # Threshold for filtering patches before clustering (median + std_multiplier * std)
-    threshold_std_multiplier: 3
-    peak_neighborhood_size: 15          # Neighborhood size for finding local maxima (3 = 3x3 window)
-    peak_assignment_max_distance: 5   # Maximum distance (patches) to assign patch to peak
-    flux_decrease_strictness: 0.5      # Fraction of path points that must show flux decrease (0-1)
-                                       # Lower = more lenient, higher = stricter monotonicity requirement
+    threshold_std_multiplier: 3        # ORIGINAL - stable detection
+    peak_neighborhood_size: 15         # ORIGINAL
+    peak_assignment_max_distance: 5    # ORIGINAL
+    flux_decrease_strictness: 0.5      # ORIGINAL
     
     # Region filtering
-    min_flux_threshold: 0.0000001       # Minimum sum flux for a region to be accepted (set to null to disable)
+    min_flux_threshold: 0.0000001      # ORIGINAL
     
     # Temporal smoothing (applied to detected region flux values and sizes)
-    flux_smoothing_window: 1            # Window size for flux value and size smoothing
+    flux_smoothing_window: 3           # Moderate smoothing (original was 1)
     
-    flare_distance_relax_factor: 2.5    # Multiplies max_tracking_distance for flaring tracks to keep labels through merges
-    show_bright_patch_markers: true     # Draw a star at the max-flux patch per region
+    flare_distance_relax_factor: 4.5   # ORIGINAL
+    show_bright_patch_markers: true
+    
+    # Tracking continuity parameters (ONLY CHANGES FROM ORIGINAL)
+    max_time_gap_minutes: 180          # INCREASED: Bridge 3-hour gaps (was 60)
+    min_track_detections: 1            # Keep requiring 2+ detections
     
     # Simultaneous flare detection
     simultaneous_flare_threshold: 0.000001
-    sequence_window_hours: 1.0  # Time window for clustering groups into flare sequences
+    sequence_window_hours: 1.0
   
   # Output configuration
   output:
-    output_dir: "${base_data_dir}/patch_analysis_output_v6"
+    output_dir: "${base_data_dir}/patch_analysis_output_test"
     
     # Movie generation
     create_contour_movie: false
-    create_simultaneous_flare_movies: true
-    create_contour_movies_for_sequences: true  # Create contour movies for simultaneous flare sequences
-    create_flux_heatmap_movies_for_sequences: false  # Create flux heatmap movies for simultaneous flare sequences
+    create_simultaneous_flare_movies: false
+    create_contour_movies_for_sequences: false
+    create_flux_heatmap_movies_for_sequences: false
     simultaneous_window_hours: 1
     movie_fps: 15
     movie_interval_seconds: 12
     show_sxr_timeseries: true
-    max_tracking_distance: 15  # Maximum distance for tracking regions across frames
+    max_tracking_distance: 20  # Slightly increased from 15 for better tracking
