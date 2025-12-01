@@ -5,7 +5,7 @@
 paths:
   config: "patch_analysis_config_v6.yaml"  # Path to patch analysis config
   output_csv: "/data/FOXES_Data/flare_catalog_v6_with_hek.csv"  # Output catalog CSV
-  hek_catalog: null  # Pre-downloaded HEK catalog (optional)
+  hek_catalog: '/data/FOXES_Data/hek_catalog_2012-01-01_2012-04-30.csv'  # Pre-downloaded HEK catalog (optional)
   sxr_plots_dir: "/data/FOXES_Data/sxr_plots_with_hek"  # Directory for SXR plots
   # Optional overrides (leave null to use values from patch analysis config)
   flux_path: null
@@ -14,24 +14,34 @@ paths:
 
 # Time Range (for HEK fetching if hek_catalog not provided)
 time_range:
-  start_time: "2012-01-01T00:00:00"
-  end_time: "2012-04-30T23:59:59"
+  start_time: "2012-02-01T00:00:00"
+  end_time: "2012-02-09T23:59:59"
   auto_fetch_hek: true  # Set to true to fetch HEK data automatically
 
 # Flare Detection Parameters
 detection:
   min_goes_class: "B1.0"  # Minimum GOES class for catalog entries
   cadence_seconds: 60  # Expected cadence of predictions
-  max_gap_minutes: 60.0  # Maximum allowed gap between samples within a sequence
-  min_duration_minutes: 2  # Minimum sequence duration
-  min_samples: 4  # Minimum number of frames in a sequence
+  max_gap_minutes: 60  # Maximum allowed gap between samples within a sequence
+  min_duration_minutes: 5  # Minimum sequence duration
+  min_samples: 2  # Minimum number of frames in a sequence (lowered from 5 to catch short events)
   min_coverage: 0.0  # Minimum cadence coverage ratio
-  min_prominence: 0.1  # Minimum peak prominence relative to baseline
+  min_prominence: null  # Disabled - prominence is unreliable when data starts mid-flare
   min_peak_sum_flux: 0.0000001  # Minimum peak sum_flux for a valid sequence
 
 # Matching Parameters
 matching:
-  match_window_minutes: 10  # Time window for matching sequences to HEK events
+  match_window_minutes: 5  # Time window for matching sequences to HEK events
+  magnitude_tolerance: 1.0  # GOES class levels tolerance for magnitude matching (1.0 = same major class)
+
+# HEK-Only Coverage Requirements (for fair comparison)
+# Only show HEK events as "missed" if FOXES had adequate data to detect them
+hek_coverage:
+  max_gap_minutes: 10.0  # Max gap to nearest FOXES point
+  min_points_total: 5  # Minimum total FOXES points within coverage window
+  coverage_window_minutes: 30.0  # Time window (±minutes) around HEK peak
+  min_points_before_peak: 6  # Minimum points BEFORE peak (to see rise)
+  min_points_after_peak: 6  # Minimum points AFTER peak (to see decay)
 
 # Plotting Parameters
 plotting:
