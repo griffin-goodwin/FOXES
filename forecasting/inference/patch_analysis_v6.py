@@ -245,7 +245,9 @@ class FluxContributionAnalyzer:
         
         # Track active tracks (those updated recently) for optimization
         active_tracks = set()
-        max_time_gap = 60 * 60  # 60 minutes in seconds
+        # Get max time gap from config (default 120 minutes for better continuity)
+        max_time_gap_minutes = self.flare_config.get('max_time_gap_minutes', 120)
+        max_time_gap = max_time_gap_minutes * 60  # Convert to seconds
         flare_priority_flux = self.flare_config.get(
             'flare_priority_flux',
             self.flare_config.get(
@@ -413,10 +415,16 @@ class FluxContributionAnalyzer:
                         active_tracks.add(next_track_id)
                         next_track_id += 1
         
-        # Filter out tracks with only one region (no temporal continuity)
-        region_tracks = {k: v for k, v in region_tracks.items() if len(v) > 1}
+        # Filter out tracks with too few detections
+        # Default to 1 to keep single-detection tracks (short/impulsive flares)
+        min_track_detections = self.flare_config.get('min_track_detections', 1)
+        original_track_count = len(region_tracks)
+        region_tracks = {k: v for k, v in region_tracks.items() if len(v) >= min_track_detections}
+        filtered_count = original_track_count - len(region_tracks)
         
         print(f"Found {len(region_tracks)} region tracks across {len(timestamps)} timestamps")
+        if filtered_count > 0:
+            print(f"  (filtered out {filtered_count} tracks with fewer than {min_track_detections} detections)")
         
         # Apply temporal smoothing to flux values
         smoothing_window = self.flare_config.get('flux_smoothing_window', 3)
