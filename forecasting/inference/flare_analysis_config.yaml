@@ -14,15 +14,15 @@ paths:
   flux_path: "/data/FOXES_Data/batch_results/vit/flux"
   aia_path: "/data/FOXES_Data/AIA"
   predictions_csv: "/data/FOXES_Data/batch_results/vit/vit_predictions_all.csv"
-  hek_catalog: '/data/FOXES_Data/hek_catalog_2012-04-15_2012-04-20.csv' # null to auto-fetch
+  hek_catalog: '/data/FOXES_Data/hek_catalog_2023-07-01_2023-07-31.csv' # null to auto-fetch
   output_dir: "/data/FOXES_Data"
 
 # -----------------------------------------------------------------------------
 # Time Range
 # -----------------------------------------------------------------------------
 time_range:
-  start: "2012-04-15T00:00:00"
-  end: "2012-04-20T23:59:59"
+  start: "2023-07-01T00:00:00"
+  end: "2023-07-02T23:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -38,8 +38,8 @@ detection:
   # Peak clustering parameters
   threshold_std_multiplier: 5.0   # Higher = fewer false positives
   peak_neighborhood_size: 20      # Local max window size (patches)
-  peak_assignment_max_distance: 10 # Max patch-to-peak distance
-  flux_decrease_strictness: 0.2   # Flux monotonicity requirement (0-1)
+  peak_assignment_max_distance: 5 # Max patch-to-peak distance
+  flux_decrease_strictness: 0.5   # Flux monotonicity requirement (0-1)
   
   # HEK matching
   hek_match_window_minutes: 5.0
@@ -49,11 +49,18 @@ detection:
 # -----------------------------------------------------------------------------
 # Controls how flare peaks are identified within tracked regions
 peak_detection:
-  height_multiplier: 5       # Peak must be this multiple of baseline
-  baseline_quantile: 0.1         # Percentile for baseline (lower = more sensitive)
+  height_multiplier: 1      # Peak must be this multiple of baseline
+  baseline_window: 60        # Rolling window size for adaptive baseline (number of points)
   min_peak_separation_minutes: 15 # Minimum time between peaks
   validation_window: 6       # Number of points to check on each side of peak for validation
   validation_min_lower: 2    # Minimum number of lower points required on each side
+  
+  # DBSCAN-based region clustering (optional alternative to peak-based assignment)
+  use_dbscan_regions: false  # Use DBSCAN for region clustering instead of peak assignment
+  dbscan_eps: 3.0  # DBSCAN epsilon parameter (distance threshold)
+  dbscan_min_samples: 3  # DBSCAN minimum samples per cluster
+  dbscan_use_peaks: true  # Use find_flux_peaks to guide DBSCAN clustering
+  dbscan_peak_weight: .5  # Weight for peak proximity feature (0 = ignore peaks)
 
 # -----------------------------------------------------------------------------
 # Region Tracking
@@ -92,8 +99,25 @@ hek_coverage:
   min_points_around_peak: 3       # Min points required BEFORE and AFTER peak
 
 # -----------------------------------------------------------------------------
+# Simultaneous Flare Detection
+# -----------------------------------------------------------------------------
+simultaneous_detection:
+  enabled: true  # Enable detection of simultaneous flares
+  threshold: 5e-6  # Flux threshold for simultaneous flare detection
+  sequence_window_hours: 1.0  # Time window for detecting flare sequences
+
+# -----------------------------------------------------------------------------
 # Output Options
 # -----------------------------------------------------------------------------
 output:
-  create_plots: true
+  create_plots: false
   plot_window_hours: 2.0
+
+# -----------------------------------------------------------------------------
+# Movie Generation
+# -----------------------------------------------------------------------------
+movie:
+  create_movie: true  # Create movie visualization
+  fps: 30.0  # Frames per second for movie
+  frame_interval_minutes: 2.5  # Time between frames (minutes)
+  num_workers: 32  # Number of parallel workers for frame generation
