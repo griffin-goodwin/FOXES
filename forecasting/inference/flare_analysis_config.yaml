@@ -22,7 +22,7 @@ paths:
 # -----------------------------------------------------------------------------
 time_range:
   start: "2023-07-01T00:00:00"
-  end: "2023-07-02T23:59:59"
+  end: "2023-07-01T23:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -35,11 +35,18 @@ detection:
   # Flux threshold for region detection
   min_flux_threshold: 0.0000001  # 1e-7
   
-  # Peak clustering parameters
-  threshold_std_multiplier: 5.0   # Higher = fewer false positives
-  peak_neighborhood_size: 20      # Local max window size (patches)
-  peak_assignment_max_distance: 5 # Max patch-to-peak distance
-  flux_decrease_strictness: 0.5   # Flux monotonicity requirement (0-1)
+  # Peak/region detection parameters
+  threshold_std_multiplier: 1.5   # Higher = fewer false positives
+  peak_neighborhood_size: 5      # Local max window size (patches)
+  
+  # Spatial smoothing (reduces noise, stabilizes region boundaries)
+  spatial_smoothing_sigma: 0    # Gaussian sigma for smoothing (0 = disabled)
+  
+  # Hysteresis thresholding (prevents flickering at threshold boundary)
+  hysteresis_low_ratio: 0.7       # Low threshold = high * ratio (for region growth)
+  
+  # Minimum region size (removes tiny noisy regions)
+  region_min_pixels: 4            # Minimum patches per region
   
   # HEK matching
   hek_match_window_minutes: 5.0
@@ -54,13 +61,6 @@ peak_detection:
   min_peak_separation_minutes: 15 # Minimum time between peaks
   validation_window: 6       # Number of points to check on each side of peak for validation
   validation_min_lower: 2    # Minimum number of lower points required on each side
-  
-  # DBSCAN-based region clustering (optional alternative to peak-based assignment)
-  use_dbscan_regions: false  # Use DBSCAN for region clustering instead of peak assignment
-  dbscan_eps: 3.0  # DBSCAN epsilon parameter (distance threshold)
-  dbscan_min_samples: 3  # DBSCAN minimum samples per cluster
-  dbscan_use_peaks: true  # Use find_flux_peaks to guide DBSCAN clustering
-  dbscan_peak_weight: .5  # Weight for peak proximity feature (0 = ignore peaks)
 
 # -----------------------------------------------------------------------------
 # Region Tracking
@@ -69,7 +69,13 @@ tracking:
   max_tracking_distance: 25       # Max pixel distance between frames
   max_time_gap_minutes: 120.0     # Max gap to bridge (2 hours)
   flare_distance_relax_factor: 4.5  # Distance multiplier for flaring regions
-  flux_smoothing_window: 1        # Temporal smoothing window
+  
+  # Similarity constraints (prevents track jumping between unrelated regions)
+  max_flux_ratio: 3.0             # Max flux change ratio between frames (e.g. 3x)
+  max_size_ratio: 2.0             # Max size change ratio between frames (e.g. 2x)
+  
+  # Temporal smoothing (exponential moving average)
+  flux_smoothing_alpha: 0.3       # EMA alpha (0-1, higher = more responsive to changes)
 
 # -----------------------------------------------------------------------------
 # Event Quality Filters
@@ -118,6 +124,9 @@ output:
 # -----------------------------------------------------------------------------
 movie:
   create_movie: true  # Create movie visualization
-  fps: 30.0  # Frames per second for movie
+  fps: 15.0  # Frames per second for movie
   frame_interval_minutes: 2.5  # Time between frames (minutes)
-  num_workers: 32  # Number of parallel workers for frame generation
+  num_workers: 64  # Number of parallel workers for frame generation
+  dpi: 75                    # DPI for frames (lower = faster, 75 is good for video)
+  frame_format: "jpg"         # "jpg" (faster) or "png" (higher quality, slower)
+  jpeg_quality: 90            # JPEG quality 1-100 (90 is good balance)
