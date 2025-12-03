@@ -21,6 +21,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -42,14 +43,9 @@ import pandas as pd
 import yaml
 from matplotlib import rcParams
 from scipy import ndimage as nd
-from scipy.ndimage import maximum_filter
+from scipy.ndimage import maximum_filter, gaussian_filter, watershed_ift
 from scipy.signal import find_peaks
 from tqdm import tqdm
-
-try:
-    from sklearn.cluster import DBSCAN
-except Exception:
-    DBSCAN = None
 
 warnings.filterwarnings('ignore')
 
@@ -88,8 +84,6 @@ class FlareAnalysisConfig:
     min_flux_threshold: float = 1e-7
     threshold_std_multiplier: float = 3.0
     peak_neighborhood_size: int = 15
-    peak_assignment_max_distance: int = 5
-    flux_decrease_strictness: float = 0.5
     hek_match_window_minutes: float = 5.0
     simultaneous_flare_threshold: float = 5e-6
     sequence_window_hours: float = 1.0
@@ -107,6 +101,9 @@ class FlareAnalysisConfig:
     movie_fps: float = 2.0
     movie_frame_interval_minutes: float = 1.0
     movie_num_workers: int = 4  # Number of parallel workers for frame generation
+    movie_dpi: float = 75.0  # DPI for movie frames (lower = faster, 75 is good for video)
+    movie_frame_format: str = 'jpg'  # 'jpg' (faster) or 'png' (higher quality, slower)
+    movie_jpeg_quality: int = 90  # JPEG quality 1-100 (90 is good balance)
     
     # HEK coverage filtering (for HEK-only events)
     hek_coverage_window_minutes: float = 30.0
@@ -120,12 +117,21 @@ class FlareAnalysisConfig:
     peak_validation_window: int = 5  # Number of points to check on each side of peak
     peak_validation_min_lower: int = 1  # Minimum number of lower points required on each side
     
-    # DBSCAN-based region clustering (optional)
-    use_dbscan_regions: bool = False
-    dbscan_eps: float = 3.0
-    dbscan_min_samples: int = 3
-    dbscan_use_peaks: bool = True  # Use find_flux_peaks to guide clustering
-    dbscan_peak_weight: float = 1.0  # Weight for peak proximity feature (0 = ignore peaks)
+    # Spatial smoothing (reduces noise, stabilizes region boundaries)
+    spatial_smoothing_sigma: float = 1.0  # Gaussian sigma (0 = disabled)
+    
+    # Hysteresis thresholding (prevents flickering at threshold boundary)
+    hysteresis_low_ratio: float = 0.7  # Low threshold = high * ratio
+    
+    # Minimum region size
+    region_min_pixels: int = 4  # Minimum patches per region
+    
+    # Tracking similarity constraints (prevents track jumping)
+    max_flux_ratio: float = 3.0  # Max flux change ratio between frames
+    max_size_ratio: float = 2.0  # Max size change ratio between frames
+    
+    # Temporal smoothing (exponential moving average)
+    flux_smoothing_alpha: float = 0.3  # EMA alpha (0-1, higher = more responsive)
     
     # Internal defaults (rarely need changing)
     cadence_seconds: float = 60.0
@@ -134,7 +140,6 @@ class FlareAnalysisConfig:
     min_samples: int = 2
     max_tracking_distance: int = 20
     max_time_gap_minutes: float = 180.0
-    flux_smoothing_window: int = 3
     flare_distance_relax_factor: float = 4.5
     
     @classmethod
@@ -208,16 +213,7 @@ class FlareAnalysisConfig:
                 flat['peak_validation_window'] = peak_det['validation_window']
             if 'validation_min_lower' in peak_det:
                 flat['peak_validation_min_lower'] = peak_det['validation_min_lower']
-            if 'use_dbscan_regions' in peak_det:
-                flat['use_dbscan_regions'] = peak_det['use_dbscan_regions']
-            if 'dbscan_eps' in peak_det:
-                flat['dbscan_eps'] = peak_det['dbscan_eps']
-            if 'dbscan_min_samples' in peak_det:
-                flat['dbscan_min_samples'] = peak_det['dbscan_min_samples']
-            if 'dbscan_use_peaks' in peak_det:
-                flat['dbscan_use_peaks'] = peak_det['dbscan_use_peaks']
-            if 'dbscan_peak_weight' in peak_det:
-                flat['dbscan_peak_weight'] = peak_det['dbscan_peak_weight']
+
         
         # Simultaneous flare detection (optional)
         if 'simultaneous_detection' in data:
@@ -245,6 +241,12 @@ class FlareAnalysisConfig:
                 flat['movie_frame_interval_minutes'] = movie_data['frame_interval_minutes']
             if 'num_workers' in movie_data:
                 flat['movie_num_workers'] = movie_data['num_workers']
+            if 'dpi' in movie_data:
+                flat['movie_dpi'] = movie_data['dpi']
+            if 'frame_format' in movie_data:
+                flat['movie_frame_format'] = movie_data['frame_format']
+            if 'jpeg_quality' in movie_data:
+                flat['movie_jpeg_quality'] = movie_data['jpeg_quality']
         
         # Filter to only valid fields
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
@@ -399,262 +401,140 @@ class FluxContributionAnalyzer:
         peak_fluxes = [flux_contrib[y, x] for y, x in peak_coords]
         return peak_coords, peak_fluxes
     
-    def _check_flux_decrease(self, flux_contrib: np.ndarray, peak_coord: Tuple, 
-                             patch_coord: Tuple, strictness: float = 0.7) -> bool:
-        """Check if flux generally decreases from peak to patch."""
-        peak_y, peak_x = peak_coord
-        patch_y, patch_x = patch_coord
-        
-        n_samples = int(max(abs(peak_y - patch_y), abs(peak_x - patch_x))) + 1
-        if n_samples <= 1:
-            return True
-        
-        y_samples = np.linspace(peak_y, patch_y, n_samples).astype(int)
-        x_samples = np.linspace(peak_x, patch_x, n_samples).astype(int)
-        y_samples = np.clip(y_samples, 0, flux_contrib.shape[0] - 1)
-        x_samples = np.clip(x_samples, 0, flux_contrib.shape[1] - 1)
-        
-        flux_values = flux_contrib[y_samples, x_samples]
-        
-        decreasing_count = 0
-        for i in range(len(flux_values) - 1):
-            if flux_values[i+1] <= flux_values[i] / 0.9:
-                decreasing_count += 1
-        
-        return decreasing_count / max(len(flux_values) - 1, 1) >= strictness
-    
-    def _assign_patches_to_peaks(self, patch_coords: List, patch_fluxes: List,
-                                  peak_coords: List, peak_fluxes: List,
-                                  flux_contrib: np.ndarray, max_distance: int) -> np.ndarray:
-        """Assign patches to peaks based on proximity and flux monotonicity."""
-        if len(peak_coords) == 0:
-            return np.full(len(patch_coords), -1)
-        
-        cluster_labels = np.full(len(patch_coords), -1)
-        peak_coords_arr = np.array(peak_coords)
-        peak_fluxes_arr = np.array(peak_fluxes)
-        
-        for i, (py, px) in enumerate(patch_coords):
-            patch_flux = patch_fluxes[i]
-            distances = np.sqrt(np.sum((peak_coords_arr - np.array([py, px]))**2, axis=1))
-            nearby_peaks = distances <= max_distance
-            
-            if not np.any(nearby_peaks):
-                continue
-            
-            valid_peaks_mask = nearby_peaks & (peak_fluxes_arr > patch_flux)
-            if not np.any(valid_peaks_mask):
-                valid_peaks_mask = nearby_peaks
-            
-            valid_distances = np.where(valid_peaks_mask, distances, np.inf)
-            closest_peak_idx = np.argmin(valid_distances)
-            
-            if valid_distances[closest_peak_idx] != np.inf:
-                peak_y, peak_x = peak_coords_arr[closest_peak_idx]
-                if self._check_flux_decrease(flux_contrib, (peak_y, peak_x), (py, px),
-                                            self.config.flux_decrease_strictness):
-                    cluster_labels[i] = closest_peak_idx
-        
-        return cluster_labels
-    
     def _detect_regions_with_peak_clustering(
         self,
         flux_contrib: np.ndarray,
         timestamp: str,
         pred_data: pd.Series,
     ) -> List[Dict]:
-        """Detect regions using either peak-based assignment or DBSCAN clustering."""
+        """Detect regions using watershed segmentation for guaranteed non-overlapping regions.
+        
+        Watershed "floods" from peak markers and creates boundaries where regions meet,
+        ensuring each pixel belongs to exactly one region.
+        """
         threshold_std = self.config.threshold_std_multiplier
         min_flux = self.config.min_flux_threshold
         peak_neighborhood = self.config.peak_neighborhood_size
-        max_assign_dist = self.config.peak_assignment_max_distance
         
-        # Filter patches using median + std threshold
+        # 1. SPATIAL SMOOTHING: Apply Gaussian filter to reduce noise
+        sigma = getattr(self.config, 'spatial_smoothing_sigma', 1.0)
+        if sigma > 0:
+            flux_contrib = gaussian_filter(flux_contrib, sigma=sigma)
+        
+        # Calculate threshold from (possibly smoothed) flux
         flux_values = flux_contrib.flatten()
         positive_flux = flux_values[flux_values > 0]
         if len(positive_flux) == 0:
             return []
         
         log_flux = np.log(positive_flux)
-        threshold = np.exp(np.median(log_flux) + threshold_std * np.std(log_flux))
+        high_threshold = np.exp(np.median(log_flux) + threshold_std * np.std(log_flux))
         
-        significant_mask = flux_contrib > threshold
-        significant_patches = np.where(significant_mask)
+        # 2. HYSTERESIS THRESHOLDING: Use two thresholds to prevent flickering
+        low_ratio = getattr(self.config, 'hysteresis_low_ratio', 0.7)
+        low_threshold = high_threshold * low_ratio
         
-        if len(significant_patches[0]) == 0:
+        # Create seed mask (definite regions) and grow mask (possible regions)
+        seed_mask = flux_contrib > high_threshold
+        grow_mask = flux_contrib > low_threshold
+        
+        # Grow seeds into surrounding grow_mask regions (hysteresis)
+        significant_mask = nd.binary_dilation(seed_mask, iterations=-1, mask=grow_mask)
+
+        # Morphologically clean the mask
+        structure = np.ones((3, 3), dtype=bool)
+        clean_mask = nd.binary_opening(significant_mask, structure=structure)
+        clean_mask = nd.binary_closing(clean_mask, structure=structure)
+        clean_mask = nd.binary_fill_holes(clean_mask)
+
+        # 3. MINIMUM REGION SIZE: Remove tiny regions (likely noise)
+        labeled, num = nd.label(clean_mask)
+        if num == 0:
             return []
         
-        patch_coords = list(zip(significant_patches[0], significant_patches[1]))
-        patch_fluxes = [flux_contrib[y, x] for y, x in patch_coords]
-        
-        # ------------------------------------------------------------------#
-        # Option 1: DBSCAN-based clustering (if enabled and available)
-        # ------------------------------------------------------------------#
-        if getattr(self.config, "use_dbscan_regions", False):
-            if DBSCAN is None:
-                print(
-                    "Warning: use_dbscan_regions is True but scikit-learn "
-                    "is not available; falling back to peak-based clustering."
-                )
-            else:
-                # Base spatial coordinates (patch grid) - keep as integers for indexing
-                y_idx = significant_patches[0].astype(int)
-                x_idx = significant_patches[1].astype(int)
-                patch_coords_spatial = np.column_stack([y_idx, x_idx])  # Keep original integer coords
-                
-                # Build feature array for DBSCAN (may include peak feature)
-                dbscan_features = patch_coords_spatial.copy().astype(float)
+        min_pixels = getattr(self.config, 'region_min_pixels', 4)
+        sizes = np.bincount(labeled.ravel())
+        sizes[0] = 0  # Background
+        keep_labels = np.where(sizes >= min_pixels)[0]
+        clean_mask = np.isin(labeled, keep_labels)
 
-                # Optionally use flux peaks to guide clustering
-                use_peaks = getattr(self.config, "dbscan_use_peaks", True)
-                peak_weight = float(getattr(self.config, "dbscan_peak_weight", 1.0))
-                
-                if use_peaks and peak_weight > 0.0:
-                    # Find flux peaks using the same method as peak-based clustering
-                    peak_coords, peak_fluxes = self._find_flux_peaks(
-                        flux_contrib, threshold, neighborhood_size=peak_neighborhood
-                    )
-                    
-                    if len(peak_coords) > 0:
-                        # For each patch, compute distance to nearest peak
-                        peak_coords_arr = np.array(peak_coords)
-                        
-                        # Compute distance from each patch to each peak
-                        distances_to_peaks = []
-                        for patch_y, patch_x in patch_coords_spatial:
-                            patch_point = np.array([patch_y, patch_x])
-                            dists = np.sqrt(np.sum((peak_coords_arr - patch_point)**2, axis=1))
-                            min_dist = np.min(dists)
-                            distances_to_peaks.append(min_dist)
-                        
-                        distances_to_peaks = np.array(distances_to_peaks)
-                        
-                        # Normalize distances (0 = at peak, higher = farther)
-                        # Use max distance or a reasonable scale (e.g., dbscan_eps * 2)
-                        max_dist = max(np.max(distances_to_peaks), float(getattr(self.config, "dbscan_eps", 3.0)) * 2)
-                        if max_dist > 0:
-                            normalized_peak_dist = distances_to_peaks / max_dist
-                        else:
-                            normalized_peak_dist = np.zeros_like(distances_to_peaks)
-                        
-                        # Add peak proximity as a feature dimension (weighted)
-                        peak_feature = peak_weight * normalized_peak_dist
-                        dbscan_features = np.column_stack([dbscan_features, peak_feature])
-                
-                eps = float(getattr(self.config, "dbscan_eps", 3.0))
-                min_samples = int(getattr(self.config, "dbscan_min_samples", 3))
-                
-                db = DBSCAN(eps=eps, min_samples=min_samples)
-                labels = db.fit_predict(dbscan_features)
-                
-                regions: List[Dict] = []
-                structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
-                
-                unique_labels = sorted(set(labels))
-                for cluster_id in unique_labels:
-                    if cluster_id == -1:
-                        # Treat noise as non-region
-                        continue
-                    
-                    cluster_mask = labels == cluster_id
-                    # Use original integer coordinates for indexing, not the extended feature array
-                    cluster_y = patch_coords_spatial[cluster_mask, 0].astype(int)
-                    cluster_x = patch_coords_spatial[cluster_mask, 1].astype(int)
-                    
-                    if cluster_y.size == 0:
-                        continue
-                    
-                    region_mask = np.zeros_like(flux_contrib, dtype=bool)
-                    region_mask[cluster_y, cluster_x] = True
-                    
-                    # Optional: keep morphological closing for smoothness
-                    region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
-                    coords_mask = np.where(region_mask)
-                    if len(coords_mask[0]) == 0:
-                        continue
-                    
-                    region_flux_values = flux_contrib[region_mask]
-                    sum_flux = float(np.sum(region_flux_values))
-                    max_flux = float(np.max(region_flux_values))
-                    region_size = int(region_flux_values.size)
-                    
-                    if min_flux is not None and sum_flux < min_flux:
-                        continue
-                    
-                    centroid_y = float(np.mean(coords_mask[0]))
-                    centroid_x = float(np.mean(coords_mask[1]))
-                    img_y = centroid_y * self.patch_size + self.patch_size // 2
-                    img_x = centroid_x * self.patch_size + self.patch_size // 2
-                    
-                    brightest_idx = int(np.argmax(region_flux_values))
-                    bright_patch_y = int(coords_mask[0][brightest_idx])
-                    bright_patch_x = int(coords_mask[1][brightest_idx])
-                    
-                    regions.append(
-                        {
-                            "id": len(regions) + 1,
-                            "size": region_size,
-                            "sum_flux": sum_flux,
-                            "max_flux": max_flux,
-                            "centroid_patch_y": centroid_y,
-                            "centroid_patch_x": centroid_x,
-                            "centroid_img_y": img_y,
-                            "centroid_img_x": img_x,
-                            "mask": region_mask,
-                            "prediction": sum_flux,
-                            "groundtruth": pred_data.get("groundtruth", None),
-                            "bright_patch_y": bright_patch_y,
-                            "bright_patch_x": bright_patch_x,
-                            # Define the "peak" as the brightest patch in the region
-                            "peak_y": bright_patch_y,
-                            "peak_x": bright_patch_x,
-                            "peak_flux": max_flux,
-                        }
-                    )
-                
-                return regions
+        if not np.any(clean_mask):
+            return []
+
+        # ------------------------------------------------------------------#
+        # WATERSHED SEGMENTATION: Guarantees non-overlapping regions
+        # ------------------------------------------------------------------#
         
-        # ------------------------------------------------------------------#
-        # Option 2: Original peak-based assignment (default)
-        # ------------------------------------------------------------------#
-        # Find peaks
+        # Find peaks as watershed markers
         peak_coords, peak_fluxes = self._find_flux_peaks(
-            flux_contrib, threshold, neighborhood_size=peak_neighborhood
+            flux_contrib, high_threshold, neighborhood_size=peak_neighborhood
         )
         
+        # If no peaks found, use the brightest pixel in clean_mask
         if len(peak_coords) == 0:
-            max_idx = int(np.argmax(patch_fluxes))
-            peak_coords = [patch_coords[max_idx]]
-            peak_fluxes = [patch_fluxes[max_idx]]
+            mask_coords = np.where(clean_mask)
+            if len(mask_coords[0]) == 0:
+                return []
+            flux_in_mask = flux_contrib[clean_mask]
+            max_idx = int(np.argmax(flux_in_mask))
+            peak_coords = [(mask_coords[0][max_idx], mask_coords[1][max_idx])]
+            peak_fluxes = [flux_in_mask[max_idx]]
         
-        # Assign patches to peaks
-        cluster_labels = self._assign_patches_to_peaks(
-            patch_coords,
-            patch_fluxes,
-            peak_coords,
-            peak_fluxes,
-            flux_contrib,
-            max_distance=max_assign_dist,
-        )
+        # Filter peaks to only those within clean_mask
+        valid_peaks = []
+        valid_peak_fluxes = []
+        for (py, px), pf in zip(peak_coords, peak_fluxes):
+            if clean_mask[py, px]:
+                valid_peaks.append((py, px))
+                valid_peak_fluxes.append(pf)
         
-        # Create regions
+        if len(valid_peaks) == 0:
+            # Fallback: use brightest pixel in mask
+            mask_coords = np.where(clean_mask)
+            flux_in_mask = flux_contrib[clean_mask]
+            max_idx = int(np.argmax(flux_in_mask))
+            valid_peaks = [(mask_coords[0][max_idx], mask_coords[1][max_idx])]
+            valid_peak_fluxes = [flux_in_mask[max_idx]]
+        
+        peak_coords = valid_peaks
+        peak_fluxes = valid_peak_fluxes
+        
+        # Create marker image for watershed (1-indexed, 0 = no marker)
+        markers = np.zeros_like(flux_contrib, dtype=np.int32)
+        for i, (py, px) in enumerate(peak_coords):
+            markers[py, px] = i + 1  # 1-indexed
+        
+        # Create elevation map for watershed (inverted flux so peaks become valleys)
+        # watershed_ift requires uint8 or uint16 input
+        flux_for_watershed = flux_contrib.copy()
+        flux_for_watershed[~clean_mask] = 0  # Zero outside mask
+        
+        # Invert and scale to uint16 range (0-65535)
+        # Higher flux = lower elevation (valleys attract water)
+        max_val = flux_for_watershed.max()
+        if max_val > 0:
+            # Scale to 0-65000 range, leaving room for barrier value
+            elevation = ((1.0 - flux_for_watershed / max_val) * 65000).astype(np.uint16)
+        else:
+            elevation = np.zeros_like(flux_contrib, dtype=np.uint16)
+        
+        # Set elevation to max outside mask to block watershed
+        elevation[~clean_mask] = 65535
+        
+        # Watershed segmentation - floods from markers, stops at boundaries
+        labels = watershed_ift(elevation, markers)
+        
+        # Clear labels outside clean_mask
+        labels[~clean_mask] = 0
+        
+        # ------------------------------------------------------------------#
+        # Create regions from watershed labels (guaranteed non-overlapping)
+        # ------------------------------------------------------------------#
         regions = []
-        structure_8 = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
         
-        for cluster_id in range(len(peak_coords)):
-            cluster_mask = cluster_labels == cluster_id
-            if not np.any(cluster_mask):
-                continue
+        for label_id in range(1, len(peak_coords) + 1):
+            region_mask = labels == label_id
             
-            cluster_patch_coords = [
-                patch_coords[i] for i in range(len(patch_coords)) if cluster_mask[i]
-            ]
-            
-            region_mask = np.zeros_like(flux_contrib, dtype=bool)
-            for cy, cx in cluster_patch_coords:
-                region_mask[cy, cx] = True
-            
-            region_mask = nd.binary_closing(region_mask, structure=structure_8, iterations=2)
             coords = np.where(region_mask)
             if len(coords[0]) == 0:
                 continue
@@ -675,28 +555,30 @@ class FluxContributionAnalyzer:
             bright_patch_y = int(coords[0][brightest_idx])
             bright_patch_x = int(coords[1][brightest_idx])
             
-            regions.append(
-                {
-                    "id": len(regions) + 1,
-                    "size": region_size,
-                    "sum_flux": sum_flux,
-                    "max_flux": max_flux,
-                    "centroid_patch_y": centroid_y,
-                    "centroid_patch_x": centroid_x,
-                    "centroid_img_y": img_y,
-                    "centroid_img_x": img_x,
-                    "mask": region_mask,
-                    "prediction": sum_flux,
-                    "groundtruth": pred_data.get("groundtruth", None),
-                    "bright_patch_y": bright_patch_y,
-                    "bright_patch_x": bright_patch_x,
-                    "peak_y": peak_coords[cluster_id][0],
-                    "peak_x": peak_coords[cluster_id][1],
-                    "peak_flux": peak_fluxes[cluster_id],
-                }
-            )
+            # Get peak coordinates for this region
+            peak_y, peak_x = peak_coords[label_id - 1]  # 0-indexed
+            peak_flux = peak_fluxes[label_id - 1]
+            
+            regions.append({
+                "id": len(regions) + 1,
+                "size": region_size,
+                "sum_flux": sum_flux,
+                "max_flux": max_flux,
+                "centroid_patch_y": centroid_y,
+                "centroid_patch_x": centroid_x,
+                "centroid_img_y": img_y,
+                "centroid_img_x": img_x,
+                "mask": region_mask,
+                "prediction": sum_flux,
+                "groundtruth": pred_data.get("groundtruth", None),
+                "bright_patch_y": bright_patch_y,
+                "bright_patch_x": bright_patch_x,
+                "peak_y": peak_y,
+                "peak_x": peak_x,
+                "peak_flux": peak_flux,
+            })
         
-        return regions
+        return regions  # Watershed guarantees non-overlapping regions
     
     def _detect_regions_worker(self, timestamp: str) -> Tuple[str, Optional[List]]:
         """Worker function for parallel region detection."""
@@ -716,31 +598,50 @@ class FluxContributionAnalyzer:
             print(f"Error detecting regions for {timestamp}: {e}")
             return (timestamp, None)
     
-    def _apply_temporal_smoothing(self, region_tracks: Dict, window_size: int) -> Dict:
-        """Apply temporal smoothing to region flux values."""
-        if window_size <= 1:
+    def _apply_temporal_smoothing(self, region_tracks: Dict, alpha: float) -> Dict:
+        """Apply exponential moving average (EMA) smoothing to region flux values.
+        
+        EMA is more responsive than rolling mean and better at following genuine
+        flux evolution while dampening noise.
+        
+        Args:
+            region_tracks: Dictionary of track_id -> [(timestamp, region_dict), ...]
+            alpha: EMA smoothing factor (0-1). Higher = more responsive to changes.
+                   0 = no smoothing, 1 = no memory (use raw values).
+        
+        Returns:
+            region_tracks with smoothed sum_flux and size values.
+        """
+        if alpha <= 0 or alpha >= 1:
             return region_tracks
         
-        print(f"Applying temporal smoothing with window size {window_size}...")
+        print(f"Applying exponential smoothing with alpha={alpha}...")
         
         for track_id, track_history in region_tracks.items():
-            flux_values = [r['sum_flux'] for t, r in track_history]
-            sizes = [r.get('size', 0) for t, r in track_history]
+            if len(track_history) < 2:
+                continue
             
-            smoothed_flux = pd.Series(flux_values).rolling(
-                window=window_size, center=True, min_periods=1
-            ).mean().tolist()
-            
-            smoothed_sizes = pd.Series(sizes).rolling(
-                window=window_size, center=True, min_periods=1
-            ).mean().tolist()
+            # Initialize EMA with first value
+            ema_flux = track_history[0][1]['sum_flux']
+            ema_size = float(track_history[0][1].get('size', 0))
             
             for i, (t, r) in enumerate(track_history):
+                # Save original values
                 r['sum_flux_original'] = r['sum_flux']
                 r['size_original'] = r.get('size', 0)
-                r['sum_flux'] = smoothed_flux[i]
-                r['size'] = int(round(smoothed_sizes[i]))
-                r['prediction'] = smoothed_flux[i]
+                
+                if i == 0:
+                    # First point: no smoothing yet
+                    r['prediction'] = r['sum_flux']
+                    continue
+                
+                # EMA: new_value = alpha * current + (1 - alpha) * previous_ema
+                ema_flux = alpha * r['sum_flux'] + (1 - alpha) * ema_flux
+                ema_size = alpha * float(r.get('size', 0)) + (1 - alpha) * ema_size
+                
+                r['sum_flux'] = ema_flux
+                r['size'] = int(round(ema_size))
+                r['prediction'] = ema_flux
         
         return region_tracks
     
@@ -772,6 +673,10 @@ class FluxContributionAnalyzer:
         # Track regions across time
         print("Phase 2/2: Tracking regions across timestamps...")
         
+        # Similarity constraints (prevents track jumping between unrelated regions)
+        max_flux_ratio = getattr(self.config, 'max_flux_ratio', 3.0)
+        max_size_ratio = getattr(self.config, 'max_size_ratio', 2.0)
+        
         region_tracks = {}
         next_track_id = 1
         active_tracks = set()
@@ -789,16 +694,16 @@ class FluxContributionAnalyzer:
                 region_copy = region.copy()
                 current_flux = region_copy.get('sum_flux', 0.0)
                 current_mask = region_copy.get('mask')
-                current_size = region_copy.get('size', 0)
+                current_size = region_copy.get('size', 1)
                 
                 region_copy['is_flaring'] = bool(
                     flare_priority_flux is not None and current_flux >= flare_priority_flux
                 )
                 
                 best_track_id = None
-                best_distance = float('inf')
+                best_score = float('inf')
                 
-                # Find matching track
+                # Find matching track using combined distance + similarity score
                 for track_id in active_tracks:
                     track_history = region_tracks[track_id]
                     last_timestamp, last_region = track_history[-1]
@@ -809,19 +714,33 @@ class FluxContributionAnalyzer:
                         (region_copy['centroid_img_y'] - last_region['centroid_img_y'])**2
                     )
                     
-                    last_flux = last_region.get('sum_flux', 0.0)
+                    last_flux = last_region.get('sum_flux', 1e-10)
+                    last_size = last_region.get('size', 1)
                     last_is_flaring = bool(
                         flare_priority_flux is not None and last_flux >= flare_priority_flux
                     )
                     
+                    # FLUX SIMILARITY: Check flux ratio constraint
+                    flux_ratio = max(current_flux, last_flux) / max(min(current_flux, last_flux), 1e-10)
+                    if flux_ratio > max_flux_ratio:
+                        continue  # Too different in flux, skip this track
+                    
+                    # SIZE SIMILARITY: Check size ratio constraint
+                    size_ratio = max(current_size, last_size) / max(min(current_size, last_size), 1)
+                    if size_ratio > max_size_ratio:
+                        continue  # Too different in size, skip this track
+                    
+                    # Combined score: distance + weighted similarity penalties
+                    score = distance + 0.1 * flux_ratio + 0.1 * size_ratio
+                    
                     # Check distance threshold
                     if distance < max_distance:
-                        if distance < best_distance:
-                            best_distance = distance
+                        if score < best_score:
+                            best_score = score
                             best_track_id = track_id
                     elif (region_copy['is_flaring'] or last_is_flaring) and distance < max_relaxed_distance:
-                        if distance < best_distance:
-                            best_distance = distance
+                        if score < best_score:
+                            best_score = score
                             best_track_id = track_id
                 
                 if best_track_id is not None:
@@ -844,8 +763,10 @@ class FluxContributionAnalyzer:
         print(f"Found {len(region_tracks)} region tracks across {len(timestamps)} timestamps")
         
         # Apply smoothing
-        if self.config.flux_smoothing_window > 1:
-            region_tracks = self._apply_temporal_smoothing(region_tracks, self.config.flux_smoothing_window)
+        # Apply EMA smoothing if alpha is set (0 < alpha < 1)
+        alpha = getattr(self.config, 'flux_smoothing_alpha', 0.3)
+        if 0 < alpha < 1:
+            region_tracks = self._apply_temporal_smoothing(region_tracks, alpha)
         
         return region_tracks
     
@@ -883,7 +804,18 @@ class FluxContributionAnalyzer:
                     'track_id': track_id
                 })
         
-        self.flare_events_df = pd.DataFrame(flare_events)
+        if flare_events:
+            self.flare_events_df = pd.DataFrame(flare_events)
+        else:
+            # Create empty DataFrame with required columns
+            self.flare_events_df = pd.DataFrame(columns=[
+                'timestamp', 'datetime', 'prediction', 'groundtruth',
+                'region_size', 'max_flux', 'mean_flux', 'sum_flux',
+                'centroid_patch_y', 'centroid_patch_x',
+                'centroid_img_y', 'centroid_img_x',
+                'bright_patch_y', 'bright_patch_x', 'track_id'
+            ])
+        
         print(f"Detected {len(flare_events)} potential flare events from {len(region_tracks)} tracked regions")
         return self.flare_events_df
 
@@ -1401,6 +1333,15 @@ def split_track_sequences(track_df: pd.DataFrame, max_gap_minutes: float) -> Lis
 def build_flare_events(flare_events_df: pd.DataFrame, config: FlareAnalysisConfig) -> List[Dict]:
     """Detect individual flare events within each track."""
     all_events = []
+    
+    # Check if flare_events_df is empty or missing required columns
+    if flare_events_df.empty:
+        print("Warning: flare_events_df is empty, no flare events to process")
+        return all_events
+    
+    if 'track_id' not in flare_events_df.columns:
+        print(f"Warning: flare_events_df missing 'track_id' column. Available columns: {flare_events_df.columns.tolist()}")
+        return all_events
     
     for track_id, track_df in flare_events_df.groupby("track_id"):
         track_df = track_df.sort_values("datetime")
@@ -2303,31 +2244,75 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         ax_aia.set_xlabel('X (pixels)', fontsize=10)
         ax_aia.set_ylabel('Y (pixels)', fontsize=10)
         
-        # Draw AR contours from flux contribution map
+        # Draw AR contours from flux contribution map using WATERSHED (non-overlapping)
         flux_contrib = None
-        threshold = None
+        watershed_labels = None
         if flux_path:
             flux_contrib = _load_flux_contributions_standalone(flux_path, timestamp, config)
             if flux_contrib is not None:
-                # Calculate threshold for contours (similar to region detection)
-                flux_values = flux_contrib.flatten()
+                # Apply same preprocessing as detection
+                sigma = getattr(config, 'spatial_smoothing_sigma', 1.0)
+                if sigma > 0:
+                    flux_smoothed = gaussian_filter(flux_contrib, sigma=sigma)
+                else:
+                    flux_smoothed = flux_contrib
+                
+                # Calculate threshold for contours (same as region detection)
+                flux_values = flux_smoothed.flatten()
                 positive_flux = flux_values[flux_values > 0]
                 if len(positive_flux) > 0:
                     log_flux = np.log(positive_flux)
                     median_log = np.median(log_flux)
                     std_log = np.std(log_flux)
-                    threshold = np.exp(median_log + config.threshold_std_multiplier * std_log)
+                    high_threshold = np.exp(median_log + config.threshold_std_multiplier * std_log)
                     
-                    # Create contour mask for all regions - BRIGHT cyan
-                    contour_mask = flux_contrib > threshold
+                    # Hysteresis thresholding
+                    low_ratio = getattr(config, 'hysteresis_low_ratio', 0.7)
+                    low_threshold = high_threshold * low_ratio
                     
-                    # Draw base contours in bright cyan (more visible)
-                    try:
-                        cs = ax_aia.contour(contour_mask.astype(float), levels=[0.5], colors='cyan', 
-                                           linewidths=2.0, alpha=0.8, extent=[0, 512, 0, 512])
-                        ax_aia.plot([], [], color='cyan', linewidth=2.0, alpha=0.8, label='AR Contours')
-                    except Exception:
-                        pass
+                    seed_mask = flux_smoothed > high_threshold
+                    grow_mask = flux_smoothed > low_threshold
+                    significant_mask = nd.binary_dilation(seed_mask, iterations=-1, mask=grow_mask)
+                    
+                    # Morphological cleanup
+                    structure = np.ones((3, 3), dtype=bool)
+                    clean_mask = nd.binary_opening(significant_mask, structure=structure)
+                    clean_mask = nd.binary_closing(clean_mask, structure=structure)
+                    clean_mask = nd.binary_fill_holes(clean_mask)
+                    
+                    # Find peaks for watershed
+                    peak_neighborhood = getattr(config, 'peak_neighborhood_size', 5)
+                    local_max = maximum_filter(flux_smoothed, size=peak_neighborhood) == flux_smoothed
+                    peak_mask = local_max & (flux_smoothed > high_threshold)
+                    peak_coords = np.where(peak_mask & clean_mask)
+                    
+                    if len(peak_coords[0]) > 0:
+                        # Create watershed markers
+                        markers = np.zeros_like(flux_smoothed, dtype=np.int32)
+                        for i, (py, px) in enumerate(zip(peak_coords[0], peak_coords[1])):
+                            markers[py, px] = i + 1
+                        
+                        # Watershed segmentation
+                        max_val = flux_smoothed.max()
+                        if max_val > 0:
+                            elevation = ((1.0 - flux_smoothed / max_val) * 65000).astype(np.uint16)
+                        else:
+                            elevation = np.zeros_like(flux_smoothed, dtype=np.uint16)
+                        elevation[~clean_mask] = 65535
+                        
+                        watershed_labels = watershed_ift(elevation, markers)
+                        watershed_labels[~clean_mask] = 0
+                        
+                        # Draw contours for each watershed region in cyan
+                        for label_id in range(1, markers.max() + 1):
+                            region_mask = watershed_labels == label_id
+                            if np.any(region_mask):
+                                try:
+                                    ax_aia.contour(region_mask.astype(float), levels=[0.5], colors='cyan',
+                                                  linewidths=1.5, alpha=0.6, extent=[0, 512, 0, 512])
+                                except Exception:
+                                    pass
+                        ax_aia.plot([], [], color='cyan', linewidth=1.5, alpha=0.6, label='AR Contours')
         
         # ========== FOXES Track Locations ==========
         # Show ALL FOXES track locations - find nearest data point to current timestamp for each track
@@ -2386,22 +2371,25 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             
             foxes_class = flux_to_goes_class(current_flux)
             
-            # Draw highlighted contour around this track's region
-            if flux_contrib is not None and threshold is not None:
+            # Draw highlighted contour around this track's region using watershed labels
+            if watershed_labels is not None:
                 grid_size = config.grid_size if hasattr(config, 'grid_size') else [64, 64]
                 input_size = config.input_size if hasattr(config, 'input_size') else 512
                 patch_y = int(cy * grid_size[0] / input_size)
                 patch_x = int(cx * grid_size[1] / input_size)
                 
-                y_coords, x_coords = np.ogrid[:flux_contrib.shape[0], :flux_contrib.shape[1]]
-                dist_from_center = np.sqrt((y_coords - patch_y)**2 + (x_coords - patch_x)**2)
-                region_radius = 10
-                region_mask = (dist_from_center <= region_radius) & (flux_contrib > threshold)
+                # Clamp to valid range
+                patch_y = max(0, min(patch_y, watershed_labels.shape[0] - 1))
+                patch_x = max(0, min(patch_x, watershed_labels.shape[1] - 1))
                 
-                if np.any(region_mask):
+                # Find which watershed region contains this track's centroid
+                region_label = watershed_labels[patch_y, patch_x]
+                
+                if region_label > 0:
+                    region_mask = watershed_labels == region_label
                     try:
                         # Thick contour for active flares, thinner for others
-                        lw = 4.0 if is_active_flare else 2.0
+                        lw = 4.0 if is_active_flare else 2.5
                         ax_aia.contour(region_mask.astype(float), levels=[0.5], colors=track_color, 
                                       linewidths=lw, alpha=0.9, extent=[0, 512, 0, 512])
                     except Exception:
@@ -2426,6 +2414,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         
         # ========== HEK Flare Locations (from HEK catalog) ==========
         # Show HEK events that are currently active (between start and end time)
+        # This includes both matched HEK events and HEK-only events (missed by FOXES)
         for idx, hek_event in active_hek_flares.iterrows():
             obs = hek_event.get('obs_observatory', 'Unknown')
             if pd.isna(obs):
@@ -2436,6 +2425,9 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             if pd.isna(goes_class):
                 goes_class = ''
             goes_class = str(goes_class).strip()
+            
+            # Check if this is a HEK-only event (not matched to FOXES)
+            is_hek_only = hek_event.get('match_status', '') == 'hek_only'
             
             # Get HEK coordinates
             hpc_x = hek_event.get('hpc_x', hek_event.get('event_coord1'))
@@ -2456,15 +2448,31 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                     if label:
                         plotted_obs.add(obs)
                     
-                    # Large, visible marker
-                    ax_aia.scatter(hek_x, hek_y, marker=style['marker'],
-                                 color=style['color'], s=250,
-                                 edgecolors='white', linewidths=2.5,
-                                 label=label, alpha=1.0, zorder=16)
+                    # Visual distinction for HEK-only events: thicker edge and slightly different alpha
+                    edge_width = 3.5 if is_hek_only else 2.5
+                    marker_alpha = 0.85 if is_hek_only else 1.0
+                    marker_style = style['marker']
                     
-                    # Add class label
+                    # Large, visible marker
+                    ax_aia.scatter(hek_x, hek_y, marker=marker_style,
+                                 color=style['color'], s=250,
+                                 edgecolors='white', linewidths=edge_width,
+                                 label=label, alpha=marker_alpha, zorder=16)
+                    
+                    # Add a dashed outer ring for HEK-only events to make them more distinct
+                    if is_hek_only:
+                        circle = plt.Circle((hek_x, hek_y), 15, fill=False,
+                                           edgecolor=style['color'], linewidth=2.5,
+                                           linestyle='--', alpha=0.8, zorder=15)
+                        ax_aia.add_patch(circle)
+                    
+                    # Add class label (with "HEK-only" indicator if applicable)
+                    label_text = f'{obs}: {goes_class}'
+                    if is_hek_only:
+                        label_text += ' (HEK-only)'
+                    
                     if goes_class:
-                        ax_aia.annotate(f'{obs}: {goes_class}', (hek_x, hek_y),
+                        ax_aia.annotate(label_text, (hek_x, hek_y),
                                       xytext=(12, -18), textcoords='offset points',
                                       fontsize=10, color='white', weight='bold',
                                       bbox=dict(boxstyle='round,pad=0.3', 
@@ -2531,8 +2539,20 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         plt.tight_layout()
         
         # Save frame with unique counter
-        frame_path = frames_dir / f"frame_{frame_idx:06d}.png"
-        plt.savefig(frame_path, dpi=100)
+        # Use configurable format and DPI for faster encoding
+        frame_format = getattr(config, 'movie_frame_format', 'jpg').lower()
+        frame_dpi = getattr(config, 'movie_dpi', 75.0)
+        jpeg_quality = getattr(config, 'movie_jpeg_quality', 90)
+        
+        if frame_format == 'jpg' or frame_format == 'jpeg':
+            frame_path = frames_dir / f"frame_{frame_idx:06d}.jpg"
+            # JPEG is much faster than PNG and good enough for video
+            # Save as JPEG (matplotlib handles quality internally)
+            plt.savefig(frame_path, dpi=frame_dpi, format='jpg')
+        else:
+            frame_path = frames_dir / f"frame_{frame_idx:06d}.png"
+            plt.savefig(frame_path, dpi=frame_dpi, format='png')
+        
         plt.close()
         
         return str(frame_path)
@@ -2736,10 +2756,11 @@ def create_flare_movie(catalog_df: pd.DataFrame, flare_events_df: pd.DataFrame,
         # Use ffmpeg directly via subprocess - much faster than imageio for image sequences
         # This uses ffmpeg's native image sequence input which is highly optimized
         try:
-            # Create a pattern for frame filenames (they should be frame_000000.png, frame_000001.png, etc.)
+            # Create a pattern for frame filenames (they should be frame_000000.jpg/png, frame_000001.jpg/png, etc.)
             # Get the first frame to determine the pattern
             first_frame = frame_paths[0]
-            frame_pattern = str(first_frame.parent / "frame_%06d.png")
+            frame_ext = first_frame.suffix.lower()  # .jpg or .png
+            frame_pattern = str(first_frame.parent / f"frame_%06d{frame_ext}")
             
             # Use ffmpeg directly - much faster for image sequences
             ffmpeg_cmd = [
@@ -3032,6 +3053,15 @@ def build_flare_catalog(config: FlareAnalysisConfig) -> Tuple[pd.DataFrame, pd.D
     # Step 1: Detect tracked regions
     print("\n=== Step 1: Detecting and tracking regions ===")
     flare_events_df = analyzer.detect_flare_events()
+    
+    # Ensure flare_events_df is a valid DataFrame with required columns
+    if flare_events_df is None:
+        flare_events_df = pd.DataFrame()
+    if flare_events_df.empty:
+        print("Warning: No flare events detected. Creating empty DataFrame with required columns.")
+        flare_events_df = pd.DataFrame(columns=['track_id', 'timestamp', 'datetime', 'sum_flux', 
+                                                'centroid_img_x', 'centroid_img_y', 'centroid_patch_x', 
+                                                'centroid_patch_y', 'region_size', 'max_flux'])
 
     # Detect simultaneous flares from region-level events (optional)
     if config.enable_simultaneous_flares:
@@ -3207,6 +3237,30 @@ def main() -> None:
         print(f"\n=== Creating Movie ===")
         # Re-initialize analyzer for movie generation (needed for loading flux/AIA data)
         analyzer = FluxContributionAnalyzer(config)
+        
+        # Combine full HEK catalog with HEK-only events to ensure all are shown
+        # (hek_df already contains all events, but hek_only_df has match_status='hek_only' marked)
+        # We'll use hek_df for the movie, which includes all events
+        movie_hek_df = hek_df.copy() if hek_df is not None and not hek_df.empty else pd.DataFrame()
+        
+        # If we have HEK-only events, ensure they're in the movie dataframe
+        # (they should already be in hek_df, but let's make sure by merging)
+        if not hek_only_filtered.empty and not movie_hek_df.empty:
+            # Mark HEK-only events in the movie dataframe for potential visual distinction
+            if 'match_status' not in movie_hek_df.columns:
+                movie_hek_df['match_status'] = 'matched'  # Default
+            # Update match_status for HEK-only events
+            for idx, hek_only_event in hek_only_filtered.iterrows():
+                # Find matching event in movie_hek_df by peak time
+                peak_time = hek_only_event.get('event_peaktime')
+                if pd.notna(peak_time):
+                    mask = movie_hek_df['event_peaktime'] == peak_time
+                    if mask.any():
+                        movie_hek_df.loc[mask, 'match_status'] = 'hek_only'
+        
+        print(f"Movie will include {len(movie_hek_df)} HEK events "
+              f"({len(hek_only_filtered)} HEK-only, {len(movie_hek_df) - len(hek_only_filtered)} matched)")
+        
         movie_path = create_flare_movie(
             catalog_df,
             flare_events_df,
@@ -3214,7 +3268,7 @@ def main() -> None:
             config,
             predictions_csv=config.predictions_csv,
             analyzer=analyzer,
-            hek_df=hek_df,
+            hek_df=movie_hek_df,
             fps=getattr(config, 'movie_fps', 2.0),
             frame_interval_minutes=getattr(config, 'movie_frame_interval_minutes', 1.0),
             num_workers=getattr(config, 'movie_num_workers', 4),
@@ -3224,6 +3278,20 @@ def main() -> None:
     
     print(f"\n=== Analysis Complete ===")
     print(f"Results saved to: {output_dir}")
+    
+    # Prompt user to delete this run's output directory
+    try:
+        response = input(f"\nDelete this run's output directory? ({output_dir}) [y/N]: ").strip().lower()
+        if response in ('y', 'yes'):
+            print(f"Deleting run directory: {output_dir}")
+            shutil.rmtree(output_dir)
+            print("Run directory deleted.")
+        else:
+            print("Keeping run directory.")
+    except KeyboardInterrupt:
+        print("\nCancelled. Keeping run directory.")
+    except Exception as e:
+        print(f"Warning: Failed to delete run directory {output_dir}: {e}")
 
 
 if __name__ == "__main__":
