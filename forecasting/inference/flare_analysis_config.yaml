@@ -22,7 +22,7 @@ paths:
 # -----------------------------------------------------------------------------
 time_range:
   start: "2023-07-01T00:00:00"
-  end: "2023-07-01T23:59:59"
+  end: "2023-07-01T12:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -33,20 +33,19 @@ detection:
   min_goes_class: "B1.0"
   
   # Flux threshold for region detection
-  min_flux_threshold: 0.0000001  # 1e-7
+  min_flux_threshold: 0.000000001  # 1e-10
   
   # Peak/region detection parameters
-  threshold_std_multiplier: 1.5   # Higher = fewer false positives
-  peak_neighborhood_size: 5      # Local max window size (patches)
+  threshold_std_multiplier: 2.0   # For initial flux mask (higher = stricter)
+  peak_neighborhood_size: 15      # Local max window size (patches)
   
   # Spatial smoothing (reduces noise, stabilizes region boundaries)
-  spatial_smoothing_sigma: 0    # Gaussian sigma for smoothing (0 = disabled)
+  spatial_smoothing_sigma: 1.0    # Gaussian sigma for smoothing (0 = disabled)
   
-  # Hysteresis thresholding (prevents flickering at threshold boundary)
-  hysteresis_low_ratio: 0.7       # Low threshold = high * ratio (for region growth)
-  
-  # Minimum region size (removes tiny noisy regions)
-  region_min_pixels: 4            # Minimum patches per region
+  # Radial expansion from peaks (regions grow outward until flux drops)
+  radial_expansion_threshold_percentile: 10  # Percentile of flux values for growth cutoff (0-100)
+
+
   
   # HEK matching
   hek_match_window_minutes: 5.0
@@ -56,26 +55,23 @@ detection:
 # -----------------------------------------------------------------------------
 # Controls how flare peaks are identified within tracked regions
 peak_detection:
-  height_multiplier: 1      # Peak must be this multiple of baseline
-  baseline_window: 60        # Rolling window size for adaptive baseline (number of points)
+  height_multiplier: 1.1      # Peak must be this multiple of baseline
+  baseline_window: 20        # Rolling window size for adaptive baseline (number of points)
   min_peak_separation_minutes: 15 # Minimum time between peaks
-  validation_window: 6       # Number of points to check on each side of peak for validation
-  validation_min_lower: 2    # Minimum number of lower points required on each side
+  validation_window: 10       # Number of points to check on each side of peak for validation
+  validation_min_lower: 4   # Minimum number of lower points required on each side
 
 # -----------------------------------------------------------------------------
 # Region Tracking
 # -----------------------------------------------------------------------------
 tracking:
-  max_tracking_distance: 25       # Max pixel distance between frames
-  max_time_gap_minutes: 120.0     # Max gap to bridge (2 hours)
+  max_tracking_distance: 10       # Max pixel distance between frames
+  max_time_gap_minutes: 30.0     # Max gap to bridge (2 hours)
   flare_distance_relax_factor: 4.5  # Distance multiplier for flaring regions
   
-  # Similarity constraints (prevents track jumping between unrelated regions)
-  max_flux_ratio: 3.0             # Max flux change ratio between frames (e.g. 3x)
-  max_size_ratio: 2.0             # Max size change ratio between frames (e.g. 2x)
   
   # Temporal smoothing (exponential moving average)
-  flux_smoothing_alpha: 0.3       # EMA alpha (0-1, higher = more responsive to changes)
+  flux_smoothing_alpha: 1       # EMA alpha (0-1, higher = more responsive to changes)
 
 # -----------------------------------------------------------------------------
 # Event Quality Filters
@@ -129,4 +125,3 @@ movie:
   num_workers: 64  # Number of parallel workers for frame generation
   dpi: 75                    # DPI for frames (lower = faster, 75 is good for video)
   frame_format: "jpg"         # "jpg" (faster) or "png" (higher quality, slower)
-  jpeg_quality: 90            # JPEG quality 1-100 (90 is good balance)
