@@ -21,8 +21,8 @@ paths:
 # Time Range
 # -----------------------------------------------------------------------------
 time_range:
-  start: "2023-07-01T00:00:00"
-  end: "2023-07-01T12:59:59"
+  start: "2023-07-21T00:00:00"
+  end: "2023-07-31T12:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -36,14 +36,14 @@ detection:
   min_flux_threshold: 0.000000001  # 1e-10
   
   # Peak/region detection parameters
-  threshold_std_multiplier: 2.0   # For initial flux mask (higher = stricter)
+  threshold_std_multiplier: 5.0   # For initial flux mask (higher = stricter)
   peak_neighborhood_size: 15      # Local max window size (patches)
   
   # Spatial smoothing (reduces noise, stabilizes region boundaries)
-  spatial_smoothing_sigma: 1.0    # Gaussian sigma for smoothing (0 = disabled)
+  spatial_smoothing_sigma: .5    # Gaussian sigma for smoothing (0 = disabled)
   
   # Radial expansion from peaks (regions grow outward until flux drops)
-  radial_expansion_threshold_percentile: 10  # Percentile of flux values for growth cutoff (0-100)
+  radial_expansion_threshold_percentile: 20  # Percentile of flux values for growth cutoff (0-100)
 
 
   
@@ -55,11 +55,11 @@ detection:
 # -----------------------------------------------------------------------------
 # Controls how flare peaks are identified within tracked regions
 peak_detection:
-  height_multiplier: 1.1      # Peak must be this multiple of baseline
+  height_multiplier: 4      # Peak must be this multiple of baseline
   baseline_window: 20        # Rolling window size for adaptive baseline (number of points)
   min_peak_separation_minutes: 15 # Minimum time between peaks
   validation_window: 10       # Number of points to check on each side of peak for validation
-  validation_min_lower: 4   # Minimum number of lower points required on each side
+  validation_min_lower: 2   # Minimum number of lower points required on each side
 
 # -----------------------------------------------------------------------------
 # Region Tracking
