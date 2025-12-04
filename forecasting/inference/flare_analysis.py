@@ -43,7 +43,7 @@ import pandas as pd
 import yaml
 from matplotlib import rcParams
 from scipy import ndimage as nd
-from scipy.ndimage import maximum_filter, gaussian_filter
+from scipy.ndimage import maximum_filter, gaussian_filter, uniform_filter
 from heapq import heappush, heappop
 from scipy.signal import find_peaks
 from tqdm import tqdm
@@ -114,6 +114,7 @@ class FlareAnalysisConfig:
     # Peak detection parameters (within tracks)
     peak_height_multiplier: float = 1.2
     peak_baseline_window: int = 30  # Rolling window size for adaptive baseline (number of points)
+    peak_baseline_quantile: float = 0.1  # Quantile for baseline (0.1 = 10th percentile, lower = stricter)
     min_peak_separation_minutes: float = 15.0
     peak_validation_window: int = 5  # Number of points to check on each side of peak
     peak_validation_min_lower: int = 1  # Minimum number of lower points required on each side
@@ -123,6 +124,18 @@ class FlareAnalysisConfig:
     
     # Radial expansion from peaks
     radial_expansion_threshold_percentile: float = 30.0  # Percentile for growth cutoff (0-100)
+    
+    # Peak prominence (stabilizes peaks across time, prevents merge/split instability)
+    peak_prominence_ratio: float = 1.2  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
+    
+    # Minimum peak separation (prevents single AR from splitting into multiple regions)
+    min_peak_distance: int = 10  # Minimum patches between peaks; closer peaks merge (0 = disabled)
+    
+    # Multi-scale peak detection (handles ARs of different sizes)
+    multiscale_peak_detection: bool = True  # Enable multi-scale detection
+    peak_neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25)  # Kernel sizes in patches
+    peak_min_scale_agreement: int = 2  # Peak must appear at this many scales to be kept
+    peak_scale_tolerance: int = 2  # Patches tolerance for matching peaks across scales
     
     # Minimum region size
     region_min_pixels: int = 4  # Minimum patches per region
@@ -171,7 +184,11 @@ class FlareAnalysisConfig:
         # Detection section
         if 'detection' in data:
             for k, v in data['detection'].items():
-                flat[k] = v
+                # Convert lists to tuples for tuple-typed config fields
+                if k == 'peak_neighborhood_sizes' and isinstance(v, list):
+                    flat[k] = tuple(v)
+                else:
+                    flat[k] = v
         
         # Tracking section
         if 'tracking' in data:
@@ -208,6 +225,8 @@ class FlareAnalysisConfig:
                 flat['peak_height_multiplier'] = peak_det['height_multiplier']
             if 'baseline_window' in peak_det:
                 flat['peak_baseline_window'] = peak_det['baseline_window']
+            if 'baseline_quantile' in peak_det:
+                flat['peak_baseline_quantile'] = peak_det['baseline_quantile']
             if 'min_peak_separation_minutes' in peak_det:
                 flat['min_peak_separation_minutes'] = peak_det['min_peak_separation_minutes']
             if 'validation_window' in peak_det:
@@ -399,11 +418,18 @@ class FluxContributionAnalyzer:
                     continue
         return None
     
-    def _find_flux_peaks(self, flux_contrib: np.ndarray, 
-                         neighborhood_size: int = 10) -> Tuple[List, List]:
-        """Identify local maxima in the flux contribution map.
+    def _find_flux_peaks_single_scale(self, flux_contrib: np.ndarray, 
+                                       neighborhood_size: int = 10,
+                                       prominence_ratio: float = 1.0) -> Tuple[List, List]:
+        """Identify local maxima at a single scale.
         
-        Excludes zeros and NaNs from being counted as maxima.
+        Args:
+            flux_contrib: 2D array of flux contribution values
+            neighborhood_size: Size of neighborhood for local maximum detection
+            prominence_ratio: Peak must be this multiple of neighborhood mean to be kept.
+        
+        Returns:
+            Tuple of (peak_coords, peak_fluxes)
         """
         # Exclude 0s and nans from being counted as maxima
         flux_is_valid = (np.isfinite(flux_contrib)) & (flux_contrib > 0)
@@ -412,10 +438,205 @@ class FluxContributionAnalyzer:
         valid_flux = np.where(flux_is_valid, flux_contrib, -np.inf)
         local_max = (maximum_filter(valid_flux, size=neighborhood_size) == valid_flux) & flux_is_valid
         
+        # Apply prominence filter: peak must be significantly higher than neighborhood mean
+        if prominence_ratio > 1.0:
+            # Use 0 for invalid pixels in mean calculation (they won't contribute)
+            flux_for_mean = np.where(flux_is_valid, flux_contrib, 0)
+            # uniform_filter gives sum/N^2, so we need to correct for valid pixel count
+            neighborhood_sum = uniform_filter(flux_for_mean, size=neighborhood_size)
+            valid_fraction = uniform_filter(flux_is_valid.astype(float), size=neighborhood_size)
+            # Avoid division by zero
+            valid_fraction = np.maximum(valid_fraction, 1e-10)
+            # True mean = (sum/N^2) / (count/N^2) = sum/count
+            neighborhood_mean = neighborhood_sum / valid_fraction
+            
+            # Peak must exceed neighborhood mean by prominence_ratio
+            prominence_mask = flux_contrib >= (neighborhood_mean * prominence_ratio)
+            local_max = local_max & prominence_mask
+        
         peak_coords = np.where(local_max)
         peak_coords = list(zip(peak_coords[0], peak_coords[1]))
         peak_fluxes = [flux_contrib[y, x] for y, x in peak_coords]
+        
         return peak_coords, peak_fluxes
+    
+    def _find_flux_peaks_multiscale(self, flux_contrib: np.ndarray,
+                                     neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25),
+                                     min_scale_agreement: int = 2,
+                                     scale_tolerance: int = 2,
+                                     prominence_ratio: float = 1.0) -> Tuple[List, List]:
+        """Find peaks that are stable across multiple scales.
+        
+        This handles ARs of different sizes by detecting at multiple kernel sizes
+        and only keeping peaks that appear consistently across scales.
+        
+        Note: All distances are in PATCHES (on the 64x64 grid), not image pixels.
+        
+        Args:
+            flux_contrib: 2D array of flux contribution values (64x64 patch grid)
+            neighborhood_sizes: Tuple of kernel sizes to test (in patches)
+            min_scale_agreement: Peak must appear at this many scales to be kept
+            scale_tolerance: Patches tolerance for matching peaks across scales
+            prominence_ratio: Peak must be this multiple of neighborhood mean
+            
+        Returns:
+            Tuple of (peak_coords, peak_fluxes) for stable peaks only
+        """
+        from collections import defaultdict
+        
+        if len(neighborhood_sizes) < 2:
+            # Fall back to single scale if only one size provided
+            return self._find_flux_peaks_single_scale(
+                flux_contrib, neighborhood_sizes[0], prominence_ratio
+            )
+        
+        # Detect peaks at each scale
+        all_peaks_by_scale = {}
+        for size in neighborhood_sizes:
+            coords, fluxes = self._find_flux_peaks_single_scale(
+                flux_contrib, neighborhood_size=size, prominence_ratio=prominence_ratio
+            )
+            all_peaks_by_scale[size] = list(zip(coords, fluxes))
+        
+        # Track peak occurrences across scales
+        # Each entry: canonical_coord -> {count, best_flux, best_coord}
+        peak_registry = {}
+        
+        for size, peaks in all_peaks_by_scale.items():
+            for (y, x), flux_val in peaks:
+                # Check if this peak matches any existing registered peak
+                matched_key = None
+                for (py, px) in list(peak_registry.keys()):
+                    if abs(y - py) <= scale_tolerance and abs(x - px) <= scale_tolerance:
+                        matched_key = (py, px)
+                        break
+                
+                if matched_key is not None:
+                    # Update existing entry
+                    entry = peak_registry[matched_key]
+                    entry['count'] += 1
+                    # Keep track of the location with highest flux
+                    if flux_val > entry['best_flux']:
+                        entry['best_flux'] = flux_val
+                        entry['best_coord'] = (y, x)
+                else:
+                    # Register new peak
+                    peak_registry[(y, x)] = {
+                        'count': 1,
+                        'best_flux': flux_val,
+                        'best_coord': (y, x)
+                    }
+        
+        # Keep only peaks that appear at enough scales
+        stable_peaks = []
+        for canonical, entry in peak_registry.items():
+            if entry['count'] >= min_scale_agreement:
+                stable_peaks.append((entry['best_coord'], entry['best_flux']))
+        
+        if not stable_peaks:
+            return [], []
+        
+        # Sort by flux for consistent ordering
+        stable_peaks.sort(key=lambda x: x[1], reverse=True)
+        
+        peak_coords = [p[0] for p in stable_peaks]
+        peak_fluxes = [p[1] for p in stable_peaks]
+        
+        return peak_coords, peak_fluxes
+    
+    def _find_flux_peaks(self, flux_contrib: np.ndarray, 
+                         neighborhood_size: int = 10,
+                         prominence_ratio: float = 1.0,
+                         min_peak_distance: int = 0,
+                         use_multiscale: bool = False,
+                         neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25),
+                         min_scale_agreement: int = 2,
+                         scale_tolerance: int = 2) -> Tuple[List, List]:
+        """Identify local maxima in the flux contribution map.
+        
+        Can use either single-scale or multi-scale detection based on config.
+        Note: All distances are in PATCHES (on the 64x64 grid), not image pixels.
+        
+        Args:
+            flux_contrib: 2D array of flux contribution values (64x64 patch grid)
+            neighborhood_size: Size of neighborhood for single-scale detection (patches)
+            prominence_ratio: Peak must be this multiple of neighborhood mean to be kept.
+            min_peak_distance: Minimum distance between peaks in patches (0 = disabled)
+            use_multiscale: If True, use multi-scale detection
+            neighborhood_sizes: Kernel sizes for multi-scale detection (patches)
+            min_scale_agreement: Scales a peak must appear at (multi-scale only)
+            scale_tolerance: Patch tolerance for matching across scales
+            
+        Returns:
+            Tuple of (peak_coords, peak_fluxes)
+        """
+        if use_multiscale:
+            peak_coords, peak_fluxes = self._find_flux_peaks_multiscale(
+                flux_contrib,
+                neighborhood_sizes=neighborhood_sizes,
+                min_scale_agreement=min_scale_agreement,
+                scale_tolerance=scale_tolerance,
+                prominence_ratio=prominence_ratio
+            )
+        else:
+            peak_coords, peak_fluxes = self._find_flux_peaks_single_scale(
+                flux_contrib,
+                neighborhood_size=neighborhood_size,
+                prominence_ratio=prominence_ratio
+            )
+        
+        # Apply minimum peak separation: merge peaks that are too close together
+        if min_peak_distance > 0 and len(peak_coords) > 1:
+            peak_coords, peak_fluxes = self._merge_close_peaks(
+                peak_coords, peak_fluxes, min_peak_distance
+            )
+        
+        return peak_coords, peak_fluxes
+    
+    def _merge_close_peaks(self, peak_coords: List[Tuple[int, int]], 
+                           peak_fluxes: List[float],
+                           min_distance: int) -> Tuple[List, List]:
+        """Merge peaks that are too close together, keeping the stronger one.
+        
+        This prevents a single physical AR from being split into multiple regions
+        due to having multiple local maxima within the same structure.
+        
+        Args:
+            peak_coords: List of (y, x) coordinates
+            peak_fluxes: List of flux values at each peak
+            min_distance: Minimum allowed distance between peaks
+            
+        Returns:
+            Filtered (peak_coords, peak_fluxes) with close peaks merged
+        """
+        if len(peak_coords) <= 1:
+            return peak_coords, peak_fluxes
+        
+        # Sort peaks by flux (strongest first)
+        sorted_indices = np.argsort(peak_fluxes)[::-1]
+        
+        kept_indices = []
+        for i in sorted_indices:
+            coord_i = peak_coords[i]
+            
+            # Check if this peak is too close to any already-kept peak
+            too_close = False
+            for j in kept_indices:
+                coord_j = peak_coords[j]
+                distance = np.sqrt((coord_i[0] - coord_j[0])**2 + (coord_i[1] - coord_j[1])**2)
+                if distance < min_distance:
+                    too_close = True
+                    break
+            
+            if not too_close:
+                kept_indices.append(i)
+        
+        # Return filtered peaks (maintaining original order for consistency)
+        kept_indices = sorted(kept_indices)
+        filtered_coords = [peak_coords[i] for i in kept_indices]
+        filtered_fluxes = [peak_fluxes[i] for i in kept_indices]
+        
+        return filtered_coords, filtered_fluxes
     
     def _detect_regions_with_peak_clustering(
         self,
@@ -456,8 +677,24 @@ class FluxContributionAnalyzer:
             flux_masked = gaussian_filter(flux_masked, sigma=sigma)
         
         # Find peaks in the masked/smoothed flux
+        prominence_ratio = getattr(self.config, 'peak_prominence_ratio', 1.0)
+        min_peak_distance = getattr(self.config, 'min_peak_distance', 0)
+        
+        # Multi-scale peak detection settings
+        use_multiscale = getattr(self.config, 'multiscale_peak_detection', False)
+        neighborhood_sizes = getattr(self.config, 'peak_neighborhood_sizes', (10, 15, 20, 25))
+        min_scale_agreement = getattr(self.config, 'peak_min_scale_agreement', 2)
+        scale_tolerance = getattr(self.config, 'peak_scale_tolerance', 2)
+        
         peak_coords, peak_fluxes = self._find_flux_peaks(
-            flux_masked, neighborhood_size=peak_neighborhood
+            flux_masked, 
+            neighborhood_size=peak_neighborhood, 
+            prominence_ratio=prominence_ratio, 
+            min_peak_distance=min_peak_distance,
+            use_multiscale=use_multiscale,
+            neighborhood_sizes=neighborhood_sizes,
+            min_scale_agreement=min_scale_agreement,
+            scale_tolerance=scale_tolerance
         )
         
         if len(peak_coords) == 0:
@@ -1117,6 +1354,7 @@ def merge_close_peaks(flux_series: pd.Series, peaks: np.ndarray,
 def detect_flare_events_in_track(track_df: pd.DataFrame,
                                   height_multiplier: float = 1.2,
                                   baseline_window: int = 30,
+                                  baseline_quantile: float = 0.1,
                                   min_peak_separation_minutes: float = 15.0,
                                   min_flux_threshold: float = 1e-7,
                                   validation_window: int = 5,
@@ -1127,6 +1365,7 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         track_df: DataFrame with track data
         height_multiplier: Peak must be this multiple of baseline
         baseline_window: Rolling window size for adaptive baseline (number of points)
+        baseline_quantile: Quantile for baseline calculation (0.1 = 10th percentile)
         min_peak_separation_minutes: Minimum time between peaks
         min_flux_threshold: Absolute flux threshold for peaks
         validation_window: Number of points to check on each side of peak for validation
@@ -1134,45 +1373,57 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
     """
     
     track_df = track_df.sort_values("datetime").reset_index(drop=True)
-    flux_series = track_df["sum_flux"]
+    
+    # Work in log10 space for better peak identification across flux magnitudes
+    # This makes multiplicative changes additive, improving peak detection
+    raw_flux = track_df["sum_flux"].clip(lower=1e-12)  # Avoid log(0)
+    flux_series = np.log10(raw_flux)
     track_id = int(track_df["track_id"].iloc[0]) if "track_id" in track_df.columns else -1
+    
+    # Convert threshold to log space
+    log_min_threshold = np.log10(max(min_flux_threshold, 1e-12))
+    # In log space, multiplication becomes addition: log(x*m) = log(x) + log(m)
+    log_height_offset = np.log10(height_multiplier)
     
     print(f"\n{'='*60}")
     print(f"PEAK DETECTION DEBUG - Track ID: {track_id}")
     print(f"{'='*60}")
     print(f"Track length: {len(track_df)} points")
     print(f"Time range: {track_df['datetime'].iloc[0]} to {track_df['datetime'].iloc[-1]}")
-    print(f"Flux range: {flux_series.min():.2e} to {flux_series.max():.2e}")
-    print(f"Flux median: {flux_series.median():.2e}")
-    print(f"Parameters: height_multiplier={height_multiplier}, baseline_window={baseline_window}, "
-          f"min_flux_threshold={min_flux_threshold:.2e}")
+    print(f"Log10 flux range: {flux_series.min():.2f} to {flux_series.max():.2f}")
+    print(f"Log10 flux median: {flux_series.median():.2f}")
+    print(f"Parameters: height_multiplier={height_multiplier} (log offset={log_height_offset:.3f}), "
+          f"baseline_window={baseline_window}, min_flux_threshold={min_flux_threshold:.2e} (log={log_min_threshold:.2f})")
     
-    # Use adaptive rolling median baseline instead of fixed quantile
+    # Use adaptive rolling minimum baseline
     # This adapts to local flux levels over time
+    # Baseline quantile captures quiet level while ignoring outlier dips
+    # e.g., 0.1 = 10th percentile, 0.2 = 20th percentile
+    
     if len(flux_series) > baseline_window:
-        # Calculate rolling median baseline
-        rolling_baseline = flux_series.rolling(window=baseline_window, center=True, min_periods=1).min()
+        # Calculate rolling quantile baseline in log space
+        # Using low quantile captures the "quiet" level while being robust to outlier dips
+        rolling_baseline = flux_series.rolling(window=baseline_window, center=True, min_periods=1).quantile(baseline_quantile)
         # For edges, use the nearest valid value
         rolling_baseline = rolling_baseline.bfill().ffill()
-        print(f"Baseline: Rolling median (window={baseline_window})")
+        print(f"Baseline: Rolling {int(baseline_quantile*100)}th percentile (window={baseline_window})")
     else:
-        # For short tracks, use a simple median
-        rolling_baseline = pd.Series([flux_series.min()] * len(flux_series), index=flux_series.index)
-        print(f"Baseline: Simple median (track too short for rolling window)")
+        # For short tracks, use simple quantile
+        rolling_baseline = pd.Series([flux_series.quantile(baseline_quantile)] * len(flux_series), index=flux_series.index)
+        print(f"Baseline: Simple {int(baseline_quantile*100)}th percentile (track too short for rolling window)")
     
-    print(f"Baseline range: {rolling_baseline.min():.2e} to {rolling_baseline.max():.2e}")
-    print(f"Baseline median: {rolling_baseline.median():.2e}")
+    print(f"Log10 baseline range: {rolling_baseline.min():.2f} to {rolling_baseline.max():.2f}")
+    print(f"Log10 baseline median: {rolling_baseline.median():.2f}")
     
-    # Calculate adaptive height threshold: peak must exceed local baseline * height_multiplier
-    # This creates a dynamic threshold that adapts to the local flux level
-    height_threshold = rolling_baseline * height_multiplier
+    # In log space: peak must exceed baseline + log(height_multiplier)
+    # This is equivalent to: linear_peak > linear_baseline * height_multiplier
+    height_threshold = rolling_baseline + log_height_offset
     
-    # Ensure each point's threshold is at least the minimum absolute threshold
-    # This prevents the threshold from being too low during quiet periods
-    height_threshold = height_threshold.clip(lower=min_flux_threshold)
+    # Ensure threshold is at least the minimum (in log space)
+    height_threshold = height_threshold.clip(lower=log_min_threshold)
     
-    print(f"Height threshold range: {height_threshold.min():.2e} to {height_threshold.max():.2e}")
-    print(f"Height threshold median: {height_threshold.median():.2e}")
+    print(f"Log10 height threshold range: {height_threshold.min():.2f} to {height_threshold.max():.2f}")
+    print(f"Log10 height threshold median: {height_threshold.median():.2f}")
     print(f"Points above threshold: {(flux_series > height_threshold).sum()} / {len(flux_series)}")
     
     # Use dynamic height threshold array for find_peaks
@@ -1185,9 +1436,11 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
     
     print(f"Initial peaks detected: {len(peaks)}")
     if len(peaks) > 0:
-        peak_fluxes = flux_series.iloc[peaks].values
+        peak_log_fluxes = flux_series.iloc[peaks].values
+        peak_linear_fluxes = 10**peak_log_fluxes
         peak_times = track_df.iloc[peaks]["datetime"].values
-        print(f"  Peak fluxes: {peak_fluxes}")
+        print(f"  Peak log10 fluxes: {peak_log_fluxes}")
+        print(f"  Peak linear fluxes: {[f'{x:.2e}' for x in peak_linear_fluxes]}")
         print(f"  Peak times: {peak_times}")
     
     
@@ -1226,7 +1479,7 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         after_ok = is_at_end or after_lower >= validation_min_lower
         
         status = "VALID" if (before_ok and after_ok) else "REJECTED"
-        print(f"  Peak at {peak_time} (idx={peak_idx}, flux={peak_flux:.2e}): "
+        print(f"  Peak at {peak_time} (idx={peak_idx}, log_flux={peak_flux:.2f}, linear={10**peak_flux:.2e}): "
               f"before_lower={before_lower}/{check_window}, after_lower={after_lower}/{check_window}, "
               f"at_start={is_at_start}, at_end={is_at_end} -> {status}")
         
@@ -1249,24 +1502,24 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         peak_time = track_df.iloc[peak_idx]["datetime"]
         peak_flux = flux_series.iloc[peak_idx]
         
-        # Find start using adaptive baseline at that point
+        # Find start using adaptive baseline at that point (in log space: add offset instead of multiply)
         start_idx = peak_idx
         at_data_start = False
         for i in range(peak_idx - 1, -1, -1):
-            local_baseline = rolling_baseline.iloc[i] * height_multiplier
-            if flux_series.iloc[i] < local_baseline:
+            local_threshold = rolling_baseline.iloc[i] + log_height_offset
+            if flux_series.iloc[i] < local_threshold:
                 start_idx = i + 1
                 break
         else:
             start_idx = 0
             at_data_start = True
         
-        # Find end using adaptive baseline at that point
+        # Find end using adaptive baseline at that point (in log space: add offset instead of multiply)
         end_idx = peak_idx
         at_data_end = False
         for i in range(peak_idx + 1, len(flux_series)):
-            local_baseline = rolling_baseline.iloc[i] * height_multiplier
-            if flux_series.iloc[i] < local_baseline:
+            local_threshold = rolling_baseline.iloc[i] + log_height_offset
+            if flux_series.iloc[i] < local_threshold:
                 end_idx = i - 1
                 break
         else:
@@ -1285,8 +1538,14 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         duration_minutes = (end_time - start_time).total_seconds() / 60.0
                 
         peak_row = track_df.iloc[peak_idx]
+        
+        # Convert back to linear space for output
+        # peak_flux is in log10 space, need to convert back
+        peak_flux_linear = 10**peak_flux
         median_flux = event_df["sum_flux"].median()
-        prominence = (peak_flux - median_flux) / max(median_flux, 1e-8)
+        
+        # Prominence: how much the peak exceeds the median (in linear space)
+        prominence = (peak_flux_linear - median_flux) / max(median_flux, 1e-10)
         
         flare_event = {
             "track_id": int(track_df["track_id"].iloc[0]),
@@ -1295,7 +1554,7 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
             "peak_time": peak_time,
             "duration_minutes": duration_minutes,
             "num_samples": len(event_df),
-            "peak_sum_flux": peak_flux,
+            "peak_sum_flux": peak_flux_linear,  # Store linear flux
             "peak_max_flux": peak_row.get("max_flux", np.nan),
             "peak_region_size": peak_row.get("region_size", np.nan),
             "median_sum_flux": median_flux,
@@ -1307,7 +1566,7 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         }
         
         print(f"  Event {len(flare_events)+1}: {start_time} to {end_time} "
-              f"(duration={duration_minutes:.1f} min, peak={peak_flux:.2e}, "
+              f"(duration={duration_minutes:.1f} min, peak={peak_flux_linear:.2e}, "
               f"prominence={prominence:.2f}, samples={len(event_df)})")
         
         flare_events.append(flare_event)
@@ -1368,6 +1627,7 @@ def build_flare_events(flare_events_df: pd.DataFrame, config: FlareAnalysisConfi
                 seq_df,
                 height_multiplier=config.peak_height_multiplier,
                 baseline_window=config.peak_baseline_window,
+                baseline_quantile=getattr(config, 'peak_baseline_quantile', 0.1),
                 min_peak_separation_minutes=config.min_peak_separation_minutes,
                 min_flux_threshold=config.min_flux_threshold,
                 validation_window=config.peak_validation_window,
