@@ -1151,13 +1151,13 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
     # This adapts to local flux levels over time
     if len(flux_series) > baseline_window:
         # Calculate rolling median baseline
-        rolling_baseline = flux_series.rolling(window=baseline_window, center=True, min_periods=1).median()
+        rolling_baseline = flux_series.rolling(window=baseline_window, center=True, min_periods=1).min()
         # For edges, use the nearest valid value
         rolling_baseline = rolling_baseline.bfill().ffill()
         print(f"Baseline: Rolling median (window={baseline_window})")
     else:
         # For short tracks, use a simple median
-        rolling_baseline = pd.Series([flux_series.median()] * len(flux_series), index=flux_series.index)
+        rolling_baseline = pd.Series([flux_series.min()] * len(flux_series), index=flux_series.index)
         print(f"Baseline: Simple median (track too short for rolling window)")
     
     print(f"Baseline range: {rolling_baseline.min():.2e} to {rolling_baseline.max():.2e}")
