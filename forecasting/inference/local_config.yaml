@@ -21,8 +21,8 @@ paths:
 # Time Range
 # -----------------------------------------------------------------------------
 time_range:
-  start: "2023-07-10T00:00:00"
-  end: "2023-07-10T12:59:59"
+  start: "2023-07-11T03:00:00"
+  end: "2023-07-11T04:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -36,8 +36,8 @@ detection:
   min_flux_threshold: 0.000000001  # 1e-10
   
   # Peak/region detection parameters
-  threshold_std_multiplier: 5   # For initial flux mask (higher = stricter)
-  peak_neighborhood_size: 20      # Local max window size (patches)
+  threshold_std_multiplier: 4  # For initial flux mask (higher = stricter)
+  
   
   # Spatial smoothing (reduces noise, stabilizes region boundaries)
   spatial_smoothing_sigma: 1    # Gaussian sigma for smoothing (0 = disabled)
@@ -46,14 +46,15 @@ detection:
   radial_expansion_threshold_percentile: 50  # Percentile of flux values for growth cutoff (0-100)
   
   # Peak stability filters
-  peak_prominence_ratio: 1.2  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
-  min_peak_distance: 6  # Minimum patches between peaks; closer peaks merge (0 = disabled)
+  peak_prominence_ratio: 1  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
+  min_peak_distance: 0  # Minimum patches between peaks; closer peaks merge (0 = disabled)
   
   # Multi-scale peak detection (handles ARs of different sizes)
   # Note: All sizes are in PATCHES on the 64x64 grid, not image pixels
+  peak_neighborhood_size: null      # Local max window size (patches)
   multiscale_peak_detection: true  # Enable multi-scale detection
   peak_neighborhood_sizes: [4, 8, 12, 16, 20]  # Kernel sizes in patches
-  peak_min_scale_agreement: 3  # Peak must appear at this many scales to be kept
+  peak_min_scale_agreement: 4  # Peak must appear at this many scales to be kept
   peak_scale_tolerance: 2  # Patch tolerance for matching peaks across scales
   
   # HEK matching
@@ -65,11 +66,12 @@ detection:
 # Controls how flare peaks are identified within tracked regions
 peak_detection:
   height_multiplier: 1.5      # Peak must be this multiple of baseline
-  baseline_window: 60        # Rolling window size for adaptive baseline (number of points)
-  baseline_quantile: 0.05    # Quantile for baseline (0.1 = 10th percentile, lower = stricter)
+  baseline_window: 30        # Rolling window size for adaptive baseline (number of points)
+  baseline_quantile: 0.1    # Quantile for baseline (0.1 = 10th percentile, lower = stricter)
   min_peak_separation_minutes: 15 # Minimum time between peaks
-  validation_window: 6       # Number of points to check on each side of peak for validation
-  validation_min_lower: 2   # Minimum number of lower points required on each side
+  validation_window: 10       # Number of points to check on each side of peak for validation
+  validation_min_lower_before: 5   # Minimum lower points required BEFORE peak (rise phase)
+  validation_min_lower_after: 5    # Minimum lower points required AFTER peak (decay phase)
 
 # -----------------------------------------------------------------------------
 # Region Tracking
@@ -81,7 +83,7 @@ tracking:
   
   
   # Temporal smoothing (exponential moving average)
-  flux_smoothing_alpha: 1       # EMA alpha (0-1, higher = more responsive to changes)
+  flux_smoothing_alpha: 1      # EMA alpha (0-1, higher = more responsive to changes)
 
 # -----------------------------------------------------------------------------
 # Event Quality Filters
