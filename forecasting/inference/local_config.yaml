@@ -1,0 +1,137 @@
+# =============================================================================
+# Flare Analysis Configuration
+# =============================================================================
+# Unified config for FOXES flare detection, tracking, and HEK catalog matching
+#
+# Usage: python flare_analysis.py --config flare_analysis_config.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Data Paths
+# -----------------------------------------------------------------------------
+paths:
+  data_dir: "/Volumes/T9/FOXES_Data"
+  flux_path: "/Volumes/T9/FOXES_Data/batch_results/vit/flux"
+  aia_path: "/Volumes/T9/FOXES_Data/AIA"
+  predictions_csv: "/Volumes/T9/FOXES_Data/batch_results/vit/vit_predictions_all.csv"
+  hek_catalog: null # null to auto-fetch
+  output_dir: "/Volumes/T9/FOXES_Data"
+
+# -----------------------------------------------------------------------------
+# Time Range
+# -----------------------------------------------------------------------------
+time_range:
+  start: "2023-07-10T00:00:00"
+  end: "2023-07-10T12:59:59"
+  auto_fetch_hek: true
+
+# -----------------------------------------------------------------------------
+# Detection Parameters
+# -----------------------------------------------------------------------------
+detection:
+  # Minimum GOES class for catalog (filters weak events)
+  min_goes_class: "B1.0"
+  
+  # Flux threshold for region detection
+  min_flux_threshold: 0.000000001  # 1e-10
+  
+  # Peak/region detection parameters
+  threshold_std_multiplier: 5   # For initial flux mask (higher = stricter)
+  peak_neighborhood_size: 20      # Local max window size (patches)
+  
+  # Spatial smoothing (reduces noise, stabilizes region boundaries)
+  spatial_smoothing_sigma: 1    # Gaussian sigma for smoothing (0 = disabled)
+  
+  # Radial expansion from peaks (regions grow outward until flux drops)
+  radial_expansion_threshold_percentile: 50  # Percentile of flux values for growth cutoff (0-100)
+  
+  # Peak stability filters
+  peak_prominence_ratio: 1.2  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
+  min_peak_distance: 6  # Minimum patches between peaks; closer peaks merge (0 = disabled)
+  
+  # Multi-scale peak detection (handles ARs of different sizes)
+  # Note: All sizes are in PATCHES on the 64x64 grid, not image pixels
+  multiscale_peak_detection: true  # Enable multi-scale detection
+  peak_neighborhood_sizes: [4, 8, 12, 16, 20]  # Kernel sizes in patches
+  peak_min_scale_agreement: 3  # Peak must appear at this many scales to be kept
+  peak_scale_tolerance: 2  # Patch tolerance for matching peaks across scales
+  
+  # HEK matching
+  hek_match_window_minutes: 5.0
+
+# -----------------------------------------------------------------------------
+# Peak Detection (within tracks)
+# -----------------------------------------------------------------------------
+# Controls how flare peaks are identified within tracked regions
+peak_detection:
+  height_multiplier: 1.5      # Peak must be this multiple of baseline
+  baseline_window: 60        # Rolling window size for adaptive baseline (number of points)
+  baseline_quantile: 0.05    # Quantile for baseline (0.1 = 10th percentile, lower = stricter)
+  min_peak_separation_minutes: 15 # Minimum time between peaks
+  validation_window: 6       # Number of points to check on each side of peak for validation
+  validation_min_lower: 2   # Minimum number of lower points required on each side
+
+# -----------------------------------------------------------------------------
+# Region Tracking
+# -----------------------------------------------------------------------------
+tracking:
+  max_tracking_distance: 10       # Max pixel distance between frames
+  max_time_gap_minutes: 30.0     # Max gap to bridge (2 hours)
+  flare_distance_relax_factor: 4.5  # Distance multiplier for flaring regions
+  
+  
+  # Temporal smoothing (exponential moving average)
+  flux_smoothing_alpha: 1       # EMA alpha (0-1, higher = more responsive to changes)
+
+# -----------------------------------------------------------------------------
+# Event Quality Filters
+# -----------------------------------------------------------------------------
+quality:
+  cadence_seconds: 60.0           # Expected data cadence
+  max_gap_minutes: 30.0           # Max gap within a sequence
+  min_duration_minutes: 5.0       # Minimum event duration
+  min_samples: 6                  # Minimum frames in event
+
+# -----------------------------------------------------------------------------
+# Grid / Patch Parameters
+# -----------------------------------------------------------------------------
+grid:
+  grid_size: [64, 64]
+  patch_size: 8
+  input_size: 512
+
+# -----------------------------------------------------------------------------
+# HEK-Only Event Filtering
+# -----------------------------------------------------------------------------
+# Controls which HEK events (not matched to FOXES) are reported/plotted
+# Only events with adequate FOXES data coverage are included
+hek_coverage:
+  coverage_window_minutes: 30.0   # Time window (±minutes) around HEK peak
+  max_gap_minutes: 10.0           # Max gap to nearest FOXES data point
+  min_points_around_peak: 3       # Min points required BEFORE and AFTER peak
+
+# -----------------------------------------------------------------------------
+# Simultaneous Flare Detection
+# -----------------------------------------------------------------------------
+simultaneous_detection:
+  enabled: true  # Enable detection of simultaneous flares
+  threshold: 5e-6  # Flux threshold for simultaneous flare detection
+  sequence_window_hours: 1.0  # Time window for detecting flare sequences
+
+# -----------------------------------------------------------------------------
+# Output Options
+# -----------------------------------------------------------------------------
+output:
+  create_plots: false
+  plot_window_hours: 2.0
+
+# -----------------------------------------------------------------------------
+# Movie Generation
+# -----------------------------------------------------------------------------
+movie:
+  create_movie: true  # Create movie visualization
+  fps: 30.0  # Frames per second for movie
+  frame_interval_minutes: 1  # Time between frames (minutes)
+  num_workers: 20  # Number of parallel workers for frame generation
+  dpi: 100                    # DPI for frames (lower = faster, 75 is good for video)
+  frame_format: "png"         # "jpg" (faster) or "png" (higher quality, slower)
