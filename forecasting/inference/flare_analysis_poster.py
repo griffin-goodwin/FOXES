@@ -131,27 +131,19 @@ class FlareAnalysisConfig:
     # Radial expansion from peaks
     radial_expansion_threshold_percentile: float = 30.0  # Percentile for growth cutoff (0-100)
     
-    # Peak prominence (stabilizes peaks across time, prevents merge/split instability)
-    peak_prominence_ratio: float = 1.2  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
     
     # Minimum peak separation (prevents single AR from splitting into multiple regions)
     min_peak_distance: int = 10  # Minimum patches between peaks; closer peaks merge (0 = disabled)
     
     # Multi-scale peak detection (handles ARs of different sizes)
-    multiscale_peak_detection: bool = True  # Enable multi-scale detection
     peak_neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25)  # Kernel sizes in patches
     peak_min_scale_agreement: int = 2  # Peak must appear at this many scales to be kept
     peak_scale_tolerance: int = 2  # Patches tolerance for matching peaks across scales
     
-    # Minimum region size
-    region_min_pixels: int = 4  # Minimum patches per region
-    
-    # Tracking similarity constraints (prevents track jumping)
-    max_flux_ratio: float = 3.0  # Max flux change ratio between frames
-    max_size_ratio: float = 2.0  # Max size change ratio between frames
-    
-    # Temporal smoothing (exponential moving average)
-    flux_smoothing_alpha: float = 0.3  # EMA alpha (0-1, higher = more responsive)
+    # Tracking weights (for similarity scoring)
+    flux_ratio_weight: float = 0.1  # Weight for flux similarity in tracking score
+    size_ratio_weight: float = 0.1  # Weight for size similarity in tracking score
+    distance_weight: float = 1.0    # Weight for spatial distance in tracking score
     
     # Internal defaults (rarely need changing)
     cadence_seconds: float = 60.0
@@ -159,8 +151,6 @@ class FlareAnalysisConfig:
     min_duration_minutes: float = 5.0
     min_samples: int = 2
     max_tracking_distance: int = 20
-    max_time_gap_minutes: float = 180.0
-    flare_distance_relax_factor: float = 4.5
     
     @classmethod
     def from_yaml(cls, path: str) -> "FlareAnalysisConfig":
@@ -431,8 +421,7 @@ class FluxContributionAnalyzer:
         return None
     
     def _find_flux_peaks_single_scale(self, flux_contrib: np.ndarray, 
-                                       neighborhood_size: int = 10,
-                                       prominence_ratio: float = 1.0) -> Tuple[List, List]:
+                                       neighborhood_size: int = 10) -> Tuple[List, List]:
         """Identify local maxima at a single scale.
         
         Args:
@@ -450,22 +439,6 @@ class FluxContributionAnalyzer:
         valid_flux = np.where(flux_is_valid, flux_contrib, -np.inf)
         local_max = (maximum_filter(valid_flux, size=neighborhood_size) == valid_flux) & flux_is_valid
         
-        # Apply prominence filter: peak must be significantly higher than neighborhood mean
-        if prominence_ratio > 1.0:
-            # Use 0 for invalid pixels in mean calculation (they won't contribute)
-            flux_for_mean = np.where(flux_is_valid, flux_contrib, 0)
-            # uniform_filter gives sum/N^2, so we need to correct for valid pixel count
-            neighborhood_sum = uniform_filter(flux_for_mean, size=neighborhood_size)
-            valid_fraction = uniform_filter(flux_is_valid.astype(float), size=neighborhood_size)
-            # Avoid division by zero
-            valid_fraction = np.maximum(valid_fraction, 1e-10)
-            # True mean = (sum/N^2) / (count/N^2) = sum/count
-            neighborhood_mean = neighborhood_sum / valid_fraction
-            
-            # Peak must exceed neighborhood mean by prominence_ratio
-            prominence_mask = flux_contrib >= (neighborhood_mean * prominence_ratio)
-            local_max = local_max & prominence_mask
-        
         peak_coords = np.where(local_max)
         peak_coords = list(zip(peak_coords[0], peak_coords[1]))
         peak_fluxes = [flux_contrib[y, x] for y, x in peak_coords]
@@ -475,8 +448,7 @@ class FluxContributionAnalyzer:
     def _find_flux_peaks_multiscale(self, flux_contrib: np.ndarray,
                                      neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25),
                                      min_scale_agreement: int = 2,
-                                     scale_tolerance: int = 2,
-                                     prominence_ratio: float = 1.0) -> Tuple[List, List]:
+                                     scale_tolerance: int = 2, min_peak_distance: int = 0) -> Tuple[List, List]:
         """Find peaks that are stable across multiple scales.
         
         This handles ARs of different sizes by detecting at multiple kernel sizes
@@ -496,17 +468,11 @@ class FluxContributionAnalyzer:
         """
         from collections import defaultdict
         
-        if len(neighborhood_sizes) < 2:
-            # Fall back to single scale if only one size provided
-            return self._find_flux_peaks_single_scale(
-                flux_contrib, neighborhood_sizes[0], prominence_ratio
-            )
-        
         # Detect peaks at each scale
         all_peaks_by_scale = {}
         for size in neighborhood_sizes:
             coords, fluxes = self._find_flux_peaks_single_scale(
-                flux_contrib, neighborhood_size=size, prominence_ratio=prominence_ratio
+                flux_contrib, neighborhood_size=size
             )
             all_peaks_by_scale[size] = list(zip(coords, fluxes))
         
@@ -541,7 +507,7 @@ class FluxContributionAnalyzer:
         
         # Keep only peaks that appear at enough scales
         stable_peaks = []
-        for canonical, entry in peak_registry.items():
+        for _, entry in peak_registry.items():
             if entry['count'] >= min_scale_agreement:
                 stable_peaks.append((entry['best_coord'], entry['best_flux']))
         
@@ -553,51 +519,8 @@ class FluxContributionAnalyzer:
         
         peak_coords = [p[0] for p in stable_peaks]
         peak_fluxes = [p[1] for p in stable_peaks]
-        
-        return peak_coords, peak_fluxes
-    
-    def _find_flux_peaks(self, flux_contrib: np.ndarray, 
-                         neighborhood_size: int = 10,
-                         prominence_ratio: float = 1.0,
-                         min_peak_distance: int = 0,
-                         use_multiscale: bool = False,
-                         neighborhood_sizes: Tuple[int, ...] = (10, 15, 20, 25),
-                         min_scale_agreement: int = 2,
-                         scale_tolerance: int = 2) -> Tuple[List, List]:
-        """Identify local maxima in the flux contribution map.
-        
-        Can use either single-scale or multi-scale detection based on config.
-        Note: All distances are in PATCHES (on the 64x64 grid), not image pixels.
-        
-        Args:
-            flux_contrib: 2D array of flux contribution values (64x64 patch grid)
-            neighborhood_size: Size of neighborhood for single-scale detection (patches)
-            prominence_ratio: Peak must be this multiple of neighborhood mean to be kept.
-            min_peak_distance: Minimum distance between peaks in patches (0 = disabled)
-            use_multiscale: If True, use multi-scale detection
-            neighborhood_sizes: Kernel sizes for multi-scale detection (patches)
-            min_scale_agreement: Scales a peak must appear at (multi-scale only)
-            scale_tolerance: Patch tolerance for matching across scales
-            
-        Returns:
-            Tuple of (peak_coords, peak_fluxes)
-        """
-        if use_multiscale:
-            peak_coords, peak_fluxes = self._find_flux_peaks_multiscale(
-                flux_contrib,
-                neighborhood_sizes=neighborhood_sizes,
-                min_scale_agreement=min_scale_agreement,
-                scale_tolerance=scale_tolerance,
-                prominence_ratio=prominence_ratio
-            )
-        else:
-            peak_coords, peak_fluxes = self._find_flux_peaks_single_scale(
-                flux_contrib,
-                neighborhood_size=neighborhood_size,
-                prominence_ratio=prominence_ratio
-            )
-        
-        # Apply minimum peak separation: merge peaks that are too close together
+
+                # Apply minimum peak separation: merge peaks that are too close together
         if min_peak_distance > 0 and len(peak_coords) > 1:
             peak_coords, peak_fluxes = self._merge_close_peaks(
                 peak_coords, peak_fluxes, min_peak_distance
@@ -653,7 +576,6 @@ class FluxContributionAnalyzer:
     def _detect_regions_with_peak_clustering(
         self,
         flux_contrib: np.ndarray,
-        timestamp: str,
         pred_data: pd.Series,
     ) -> Tuple[List[Dict], Optional[np.ndarray]]:
         """Detect regions using radial growth from peaks.
@@ -689,21 +611,16 @@ class FluxContributionAnalyzer:
             flux_masked = gaussian_filter(flux_masked, sigma=sigma)
         
         # Find peaks in the masked/smoothed flux
-        prominence_ratio = getattr(self.config, 'peak_prominence_ratio', 1.0)
         min_peak_distance = getattr(self.config, 'min_peak_distance', 0)
         
         # Multi-scale peak detection settings
-        use_multiscale = getattr(self.config, 'multiscale_peak_detection', False)
         neighborhood_sizes = getattr(self.config, 'peak_neighborhood_sizes', (10, 15, 20, 25))
         min_scale_agreement = getattr(self.config, 'peak_min_scale_agreement', 2)
         scale_tolerance = getattr(self.config, 'peak_scale_tolerance', 2)
         
-        peak_coords, peak_fluxes = self._find_flux_peaks(
+        peak_coords, peak_fluxes = self._find_flux_peaks_multiscale(
             flux_masked, 
-            neighborhood_size=peak_neighborhood, 
-            prominence_ratio=prominence_ratio, 
             min_peak_distance=min_peak_distance,
-            use_multiscale=use_multiscale,
             neighborhood_sizes=neighborhood_sizes,
             min_scale_agreement=min_scale_agreement,
             scale_tolerance=scale_tolerance
@@ -732,6 +649,7 @@ class FluxContributionAnalyzer:
         for peak_idx, ((peak_y, peak_x), peak_flux_value) in enumerate(zip(peak_coords, peak_fluxes)):
             label_id = peak_idx + 1
             labels[peak_y, peak_x] = label_id
+            #(distance_from_peak, counter, y, x, label_id, peak_y, peak_x)
             heappush(pq, (0.0, counter, peak_y, peak_x, label_id, peak_y, peak_x))
             counter += 1
         
@@ -770,7 +688,6 @@ class FluxContributionAnalyzer:
         # Create regions from radial growth labels (guaranteed non-overlapping)
         # ------------------------------------------------------------------#
         regions = []
-        min_pixels = getattr(self.config, 'region_min_pixels', 4)
         
         for label_id in range(1, len(peak_coords) + 1):
             region_mask = labels == label_id
@@ -780,10 +697,6 @@ class FluxContributionAnalyzer:
                 continue
             
             region_size = len(coords[0])
-            
-            # Skip tiny regions
-            if region_size < min_pixels:
-                continue
             
             region_flux_values = flux_masked[region_mask]
             sum_flux = np.sum(region_flux_values)
@@ -848,7 +761,7 @@ class FluxContributionAnalyzer:
                 return (timestamp, None, None)
             pred_data = pred_data.iloc[0]
             
-            regions, labels = self._detect_regions_with_peak_clustering(flux_contrib, timestamp, pred_data)
+            regions, labels = self._detect_regions_with_peak_clustering(flux_contrib, pred_data)
             
             # Return labels for caching in main process (avoid disk I/O)
             # Convert to int16 to save memory
@@ -859,61 +772,10 @@ class FluxContributionAnalyzer:
             print(f"Error detecting regions for {timestamp}: {e}")
             return (timestamp, None, None)
     
-    def _apply_temporal_smoothing(self, region_tracks: Dict, alpha: float) -> Dict:
-        """Apply exponential moving average (EMA) smoothing to region flux values.
-        
-        EMA is more responsive than rolling mean and better at following genuine
-        flux evolution while dampening noise.
-        
-        Args:
-            region_tracks: Dictionary of track_id -> [(timestamp, region_dict), ...]
-            alpha: EMA smoothing factor (0-1). Higher = more responsive to changes.
-                   0 = no smoothing, 1 = no memory (use raw values).
-        
-        Returns:
-            region_tracks with smoothed sum_flux and size values.
-        """
-        if alpha <= 0 or alpha >= 1:
-            return region_tracks
-        
-        print(f"Applying exponential smoothing with alpha={alpha}...")
-        
-        for track_id, track_history in region_tracks.items():
-            if len(track_history) < 2:
-                continue
-            
-            # Initialize EMA with first value
-            ema_flux = track_history[0][1]['sum_flux']
-            ema_size = float(track_history[0][1].get('size', 0))
-            
-            for i, (t, r) in enumerate(track_history):
-                # Save original values
-                r['sum_flux_original'] = r['sum_flux']
-                r['size_original'] = r.get('size', 0)
-                
-                if i == 0:
-                    # First point: no smoothing yet
-                    r['prediction'] = r['sum_flux']
-                    continue
-                
-                # EMA: new_value = alpha * current + (1 - alpha) * previous_ema
-                ema_flux = alpha * r['sum_flux'] + (1 - alpha) * ema_flux
-                ema_size = alpha * float(r.get('size', 0)) + (1 - alpha) * ema_size
-                
-                r['sum_flux'] = ema_flux
-                r['size'] = int(round(ema_size))
-                r['prediction'] = ema_flux
-        
-        return region_tracks
     
     def track_regions_over_time(self, timestamps: List[str]) -> Dict:
         """Track regions across time using spatial proximity and temporal continuity."""
-        max_distance = self.config.max_tracking_distance
-        flare_relax = self.config.flare_distance_relax_factor
-        flare_priority_flux = self.config.min_flux_threshold
-        
-        max_relaxed_distance = max_distance * flare_relax
-        
+        max_distance = self.config.max_tracking_distance        
         print("Tracking regions across time...")
         print(f"Phase 1/2: Detecting regions at each timestamp (parallel)...")
         
@@ -943,9 +805,7 @@ class FluxContributionAnalyzer:
         active_tracks = set()
         
         for i, timestamp in tqdm(enumerate(timestamps), desc="Tracking regions", 
-                                  unit="timestamp", total=len(timestamps)):
-            current_time = pd.to_datetime(timestamp)
-            
+                                  unit="timestamp", total=len(timestamps)):            
             if timestamp not in all_regions:
                 continue
             
@@ -956,17 +816,13 @@ class FluxContributionAnalyzer:
                 current_flux = region_copy.get('sum_flux', 0.0)
                 current_size = region_copy.get('size', 1)
                 
-                region_copy['is_flaring'] = bool(
-                    flare_priority_flux is not None and current_flux >= flare_priority_flux
-                )
-                
                 best_track_id = None
                 best_score = float('inf')
                 
                 # Find matching track using combined distance + similarity score
                 for track_id in active_tracks:
                     track_history = region_tracks[track_id]
-                    last_timestamp, last_region = track_history[-1]
+                    _, last_region = track_history[-1]
                     
                     # Calculate distance
                     distance = np.sqrt(
@@ -976,9 +832,6 @@ class FluxContributionAnalyzer:
                     
                     last_flux = last_region.get('sum_flux', 1e-10)
                     last_size = last_region.get('size', 1)
-                    last_is_flaring = bool(
-                        flare_priority_flux is not None and last_flux >= flare_priority_flux
-                    )
                     
                     # FLUX SIMILARITY: Check flux ratio constraint
                     flux_ratio = max(current_flux, last_flux) / max(min(current_flux, last_flux), 1e-10)
@@ -987,16 +840,14 @@ class FluxContributionAnalyzer:
                     # SIZE SIMILARITY: Check size ratio constraint
                     size_ratio = max(current_size, last_size) / max(min(current_size, last_size), 1)
 
-                    
+                    flux_weight = getattr(self.config, 'flux_ratio_weight', 0.1)
+                    size_weight = getattr(self.config, 'size_ratio_weight', 0.1)
+                    distance_weight = getattr(self.config, 'distance_weight', 1.0)
                     # Combined score: distance + weighted similarity penalties
-                    score = distance + 0.1 * flux_ratio + 0.1 * size_ratio
+                    score = distance_weight * distance + flux_weight * flux_ratio + size_weight * size_ratio
                     
                     # Check distance threshold
                     if distance < max_distance:
-                        if score < best_score:
-                            best_score = score
-                            best_track_id = track_id
-                    elif (region_copy['is_flaring'] or last_is_flaring) and distance < max_relaxed_distance:
                         if score < best_score:
                             best_score = score
                             best_track_id = track_id
@@ -1020,20 +871,15 @@ class FluxContributionAnalyzer:
         
         print(f"Found {len(region_tracks)} region tracks across {len(timestamps)} timestamps")
         
-        # Apply smoothing
-        # Apply EMA smoothing if alpha is set (0 < alpha < 1)
-        alpha = getattr(self.config, 'flux_smoothing_alpha', 0.3)
-        if 0 < alpha < 1:
-            region_tracks = self._apply_temporal_smoothing(region_tracks, alpha)
-        
+
         return region_tracks
     
-    def detect_flare_events(self, timestamps: Optional[List[str]] = None) -> pd.DataFrame:
+    def record_individual_timestamps(self, timestamps: Optional[List[str]] = None) -> pd.DataFrame:
         """Detect potential flare events based on tracked regions."""
         if timestamps is None:
             timestamps = self.predictions_df['timestamp'].tolist()
         
-        print("Detecting flare events using tracked regions...")
+        print("Recording timestamps using tracked regions...")
         region_tracks = self.track_regions_over_time(timestamps)
         
         flare_events = []
@@ -1078,164 +924,8 @@ class FluxContributionAnalyzer:
                 'peak_img_y', 'peak_img_x', 'region_label', 'track_id'
             ])
         
-        print(f"Detected {len(flare_events)} potential flare events from {len(region_tracks)} tracked regions")
+        print(f"Detected {len(flare_events)} timestamps {len(region_tracks)} tracked regions")
         return self.flare_events_df
-
-    def detect_simultaneous_flares(
-        self,
-        threshold: Optional[float] = None,
-        sequence_window_hours: Optional[float] = None,
-    ) -> pd.DataFrame:
-        """
-        Detect simultaneous flaring events - multiple distinct regions within the same
-        flux prediction where each region has a sum of flux above the threshold.
-        Groups are then clustered into flare sequences if they occur within
-        ±sequence_window_hours of each other.
-
-        Args:
-            threshold: Sum of flux threshold for considering a region as a flare.
-                       Defaults to config.simultaneous_flare_threshold.
-            sequence_window_hours: Time window in hours for clustering groups into
-                                   sequences. Defaults to config.sequence_window_hours.
-
-        Returns:
-            DataFrame with simultaneous flare events, including group_id and sequence_id.
-        """
-        if self.flare_events_df is None or len(self.flare_events_df) == 0:
-            print("Please run detect_flare_events() first")
-            return pd.DataFrame()
-
-        if threshold is None:
-            threshold = getattr(self.config, "simultaneous_flare_threshold", 5e-6)
-        if sequence_window_hours is None:
-            sequence_window_hours = getattr(self.config, "sequence_window_hours", 1.0)
-
-        # Filter regions by sum_flux threshold
-        high_flux_regions = self.flare_events_df[
-            self.flare_events_df["sum_flux"] >= float(threshold)
-        ].copy()
-
-        if len(high_flux_regions) == 0:
-            print(f"No regions found with sum_flux above threshold {threshold}")
-            return pd.DataFrame()
-
-        # Step 1: Group regions by timestamp to find simultaneous flares
-        print("Step 1/3: Grouping regions by timestamp for simultaneous flares...")
-        simultaneous_groups: List[pd.DataFrame] = []
-        unique_timestamps = high_flux_regions["timestamp"].unique()
-        for timestamp in tqdm(unique_timestamps, desc="Grouping timestamps", unit="timestamp"):
-            group = high_flux_regions[high_flux_regions["timestamp"] == timestamp]
-            # Multiple distinct regions at the same timestamp
-            if len(group) >= 2:
-                simultaneous_groups.append(group)
-
-        if len(simultaneous_groups) == 0:
-            print("No simultaneous flare events detected")
-            return pd.DataFrame()
-
-        # Step 2: Cluster groups into sequences based on temporal proximity
-        print(f"Step 2/3: Clustering {len(simultaneous_groups)} groups into sequences...")
-        sequence_clusters: List[List[int]] = []
-        used_group_indices: set[int] = set()
-
-        for group_idx, group in tqdm(
-            list(enumerate(simultaneous_groups)),
-            desc="Clustering groups",
-            total=len(simultaneous_groups),
-            unit="group",
-        ):
-            if group_idx in used_group_indices:
-                continue
-
-            # Start a new sequence with this group
-            sequence_groups = [group_idx]
-            used_group_indices.add(group_idx)
-
-            # Find all groups within sequence_window_hours of any group in this sequence
-            changed = True
-            while changed:
-                changed = False
-                for other_idx, other_group in enumerate(simultaneous_groups):
-                    if other_idx in used_group_indices:
-                        continue
-
-                    other_datetime = pd.to_datetime(other_group["datetime"].iloc[0])
-
-                    # Check if this group is within sequence_window_hours of
-                    # any group in the sequence
-                    for seq_group_idx in sequence_groups:
-                        seq_group = simultaneous_groups[seq_group_idx]
-                        seq_datetime = pd.to_datetime(seq_group["datetime"].iloc[0])
-                        time_diff_hours = abs(
-                            (other_datetime - seq_datetime).total_seconds() / 3600.0
-                        )
-
-                        if time_diff_hours <= float(sequence_window_hours):
-                            sequence_groups.append(other_idx)
-                            used_group_indices.add(other_idx)
-                            changed = True
-                            break
-
-            sequence_clusters.append(sequence_groups)
-
-        # Step 3: Create results DataFrame with both group_id and sequence_id
-        print(
-            f"Step 3/3: Creating results DataFrame from "
-            f"{len(sequence_clusters)} simultaneous flare sequences..."
-        )
-        simultaneous_events: List[Dict[str, Any]] = []
-        for sequence_id, sequence_group_indices in tqdm(
-            list(enumerate(sequence_clusters)),
-            desc="Building simultaneous flare DataFrame",
-            total=len(sequence_clusters),
-            unit="sequence",
-        ):
-            for group_idx in sequence_group_indices:
-                group = simultaneous_groups[group_idx]
-                for _, event in group.iterrows():
-                    simultaneous_events.append(
-                        {
-                            "sequence_id": sequence_id,
-                            "group_id": group_idx,  # Original group ID (same timestamp)
-                            "timestamp": event["timestamp"],
-                            "datetime": event["datetime"],
-                            "prediction": event.get("prediction"),
-                            "groundtruth": event.get("groundtruth"),
-                            "region_size": event.get("region_size"),
-                            "max_flux": event.get("max_flux"),
-                            "sum_flux": event.get("sum_flux"),
-                            "centroid_img_y": event.get("centroid_img_y"),
-                            "centroid_img_x": event.get("centroid_img_x"),
-                            "bright_patch_y": event.get("bright_patch_y"),
-                            "bright_patch_x": event.get("bright_patch_x"),
-                            "track_id": event.get("track_id"),
-                            "group_size": len(group),
-                            "sequence_size": len(sequence_group_indices),
-                        }
-                    )
-
-        simultaneous_df = pd.DataFrame(simultaneous_events)
-
-        if len(simultaneous_df) > 0:
-            print(f"Detected {len(simultaneous_groups)} timestamps with simultaneous flares")
-            print(
-                f"Clustered into {len(sequence_clusters)} flare sequences "
-                f"(within ±{sequence_window_hours} hours)"
-            )
-            print(f"Total simultaneous events: {len(simultaneous_df)}")
-
-            # Brief summary by sequence
-            for sequence_id in sorted(simultaneous_df["sequence_id"].unique()):
-                sequence_events = simultaneous_df[simultaneous_df["sequence_id"] == sequence_id]
-                timestamps = sorted(sequence_events["datetime"].unique())
-                print(f"\nSimultaneous Flare Sequence {sequence_id}:")
-                print(f"  Number of groups: {sequence_events['sequence_size'].iloc[0]}")
-                print(f"  Time span: {timestamps[0]} to {timestamps[-1]}")
-                print(f"  Total events: {len(sequence_events)}")
-
-        self.simultaneous_flares_df = simultaneous_df
-        return simultaneous_df
-
 
 # =============================================================================
 # HEK Catalog Utilities
@@ -1288,14 +978,14 @@ def fetch_hek_flares(start_time: str, end_time: str,
     return df
 
 
-def normalize_hek_catalog(df: pd.DataFrame, min_flux: float) -> pd.DataFrame:
+def process_hek_catalog_entries(df: pd.DataFrame, min_flux: float) -> pd.DataFrame:
     """Clean and filter HEK catalog entries."""
     if df is None or df.empty:
         return pd.DataFrame()
     
     df = df.copy()
     
-    # Normalize time columns
+    # process time columns
     for col in ["event_starttime", "event_peaktime", "event_endtime"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col])
@@ -1363,7 +1053,7 @@ def merge_close_peaks(flux_series: pd.Series, peaks: np.ndarray,
     return np.array(filtered_peaks)
 
 
-def detect_flare_events_in_track(track_df: pd.DataFrame,
+def record_individual_flares(track_df: pd.DataFrame,
                                   height_multiplier: float = 1.2,
                                   baseline_window: int = 30,
                                   baseline_quantile: float = 0.1,
@@ -1414,23 +1104,20 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
     # Baseline quantile captures quiet level while ignoring outlier dips
     # e.g., 0.1 = 10th percentile, 0.2 = 20th percentile
     
-    if len(flux_series) > baseline_window:
-        # Calculate rolling quantile baseline in log space
-        # Using low quantile captures the "quiet" level while being robust to outlier dips
-        rolling_baseline = flux_series.rolling(window=baseline_window, center=False, min_periods=1).quantile(baseline_quantile)
-        # For edges, use the nearest valid value
-        #rolling_baseline = rolling_baseline.bfill().ffill()
-        print(f"Baseline: Rolling {int(baseline_quantile*100)}th percentile (window={baseline_window})")
-    else:
-        # For short tracks, use simple quantile
-        rolling_baseline = pd.Series([flux_series.quantile(baseline_quantile)] * len(flux_series), index=flux_series.index)
-        print(f"Baseline: Simple {int(baseline_quantile*100)}th percentile (track too short for rolling window)")
+
+    # Calculate rolling quantile baseline in log space
+    # Using low quantile captures the "quiet" level while being robust to outlier dips
+    rolling_baseline = flux_series.rolling(window=baseline_window, center=False, min_periods=1).quantile(baseline_quantile)
+    # For edges, use the nearest valid value
+    rolling_baseline = rolling_baseline.bfill().ffill()
+    print(f"Baseline: Rolling {int(baseline_quantile*100)}th percentile (window={baseline_window})")
+
     
     print(f"Log10 baseline range: {rolling_baseline.min():.2f} to {rolling_baseline.max():.2f}")
     print(f"Log10 baseline median: {rolling_baseline.median():.2f}")
     
     # In log space: peak must exceed baseline + log(height_multiplier)
-    # This is equivalent to: linear_peak > linear_baseline * height_multiplier
+    # This is equivalent to: > linear_baseline * height_multiplier
     height_threshold = rolling_baseline + log_height_offset
     
     # Ensure threshold is at least the minimum (in log space)
@@ -1518,7 +1205,6 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
         
         # Find start using adaptive baseline at that point (in log space: add offset instead of multiply)
         start_idx = peak_idx
-        at_data_start = False
         for i in range(peak_idx - 1, -1, -1):
             local_threshold = rolling_baseline.iloc[i] + log_height_offset
             #local_threshold = rolling_baseline.iloc[i]
@@ -1527,11 +1213,9 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
                 break
         else:
             start_idx = 0
-            at_data_start = True
         
         # Find end using adaptive baseline at that point (in log space: add offset instead of multiply)
         end_idx = peak_idx
-        at_data_end = False
         for i in range(peak_idx + 1, len(flux_series)):
             local_threshold = rolling_baseline.iloc[i] + log_height_offset
             #local_threshold = rolling_baseline.iloc[i]
@@ -1540,7 +1224,6 @@ def detect_flare_events_in_track(track_df: pd.DataFrame,
                 break
         else:
             end_idx = len(track_df) - 1
-            at_data_end = True
         
         start_idx = max(0, start_idx)
         end_idx = min(len(track_df) - 1, end_idx)
@@ -1642,7 +1325,7 @@ def build_flare_events(flare_events_df: pd.DataFrame, config: FlareAnalysisConfi
             if len(seq_df) < 2:
                 continue
             
-            events = detect_flare_events_in_track(
+            events = record_individual_flares(
                 seq_df,
                 height_multiplier=config.peak_height_multiplier,
                 baseline_window=config.peak_baseline_window,
@@ -1671,28 +1354,6 @@ def build_flare_events(flare_events_df: pd.DataFrame, config: FlareAnalysisConfi
     return all_events
 
 
-def filter_flare_events(events: List[Dict], config: FlareAnalysisConfig) -> pd.DataFrame:
-    """Apply quality gates to individual flare events."""
-    # Hardcoded quality thresholds (rarely need changing)
-    min_coverage = 0.0
-    min_prominence = None  # Disabled
-    min_peak_flux = config.min_flux_threshold
-    
-    records = []
-    for event in events:
-        if event["duration_minutes"] < config.min_duration_minutes:
-            continue
-        if event["num_samples"] < config.min_samples:
-            continue
-        if event["coverage_ratio"] < min_coverage:
-            continue
-        if min_peak_flux is not None and event.get("peak_sum_flux", 0.0) < min_peak_flux:
-            continue
-        records.append(event)
-    
-    print(f"Filtered to {len(records)} events after quality checks")
-    return pd.DataFrame(records)
-
 
 # =============================================================================
 # HEK Matching
@@ -1720,13 +1381,9 @@ def match_events_to_hek(events_df: pd.DataFrame, hek_df: pd.DataFrame,
                         magnitude_tolerance: float = 1.0) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Associate FOXES events with HEK events."""
     if events_df.empty and (hek_df is None or hek_df.empty):
-        events_df["matched_hek_entries"] = pd.NA
-        events_df["match_status"] = "foxes_only"
         return events_df, pd.DataFrame()
     
     if events_df.empty:
-        events_df["matched_hek_entries"] = pd.NA
-        events_df["match_status"] = "foxes_only"
         return events_df, hek_df.copy() if hek_df is not None else pd.DataFrame()
     
     if hek_df is None or hek_df.empty:
@@ -1966,7 +1623,6 @@ def get_solar_radius_arcsec(obs_date) -> float:
         # Use astropy's solar radius constant, which is the mean solar radius in meters
         # Get solar radius in arcseconds at given distance (using sunpy.util or astropy, if available)
         import astropy.constants as const
-        solar_radius_rsun = const.R_sun.to(u.AU).value  # Solar radius in AU
         rsun_arcsec = (const.R_sun / (distance * u.AU)).to(u.arcsec, equivalencies=u.dimensionless_angles()).value
         return rsun_arcsec
     except Exception:
@@ -2054,327 +1710,6 @@ def load_aia_image_at_time(aia_path: Path, timestamp: str) -> Optional[np.ndarra
 # =============================================================================
 # Plotting
 # =============================================================================
-
-def create_sxr_plots(catalog_df: pd.DataFrame, flare_events_df: pd.DataFrame,
-                     output_dir: Path, config: FlareAnalysisConfig,
-                     predictions_csv: Optional[str] = None) -> None:
-    """Create SXR-style timeseries plots with AIA images for detected flare events."""
-    # Setup font before creating any plots
-    setup_barlow_font()
-    
-    if catalog_df.empty:
-        print("No flare events to plot")
-        return
-    
-    output_dir = Path(output_dir)
-    aia_path = Path(config.aia_path) if config.aia_path else None
-    
-    # Create subfolders
-    matched_dir = output_dir / "matched_time_magnitude"
-    time_only_dir = output_dir / "matched_time_only"
-    foxes_only_dir = output_dir / "foxes_only"
-    for d in [matched_dir, time_only_dir, foxes_only_dir]:
-        d.mkdir(parents=True, exist_ok=True)
-    
-    # Load predictions
-    predictions_df = None
-    if predictions_csv and Path(predictions_csv).exists():
-        try:
-            predictions_df = pd.read_csv(predictions_csv)
-            if 'datetime' in predictions_df.columns:
-                predictions_df['datetime'] = pd.to_datetime(predictions_df['datetime'])
-            elif 'timestamp' in predictions_df.columns:
-                predictions_df['datetime'] = pd.to_datetime(predictions_df['timestamp'])
-                predictions_df['timestamp'] = pd.to_datetime(predictions_df['timestamp'])
-        except Exception as e:
-            print(f"Warning: Could not load predictions CSV: {e}")
-    
-    # Observatory styles for markers
-    obs_styles = {
-        'SDO': {'color': 'purple', 'marker': 's', 'size': 12, 'name': 'SDO'},
-        'GOES': {'color': 'orange', 'marker': '^', 'size': 10, 'name': 'GOES'},
-        'SWPC': {'color': 'orange', 'marker': 'D', 'size': 10, 'name': 'SWPC'},
-        'Unknown': {'color': 'gray', 'marker': 'o', 'size': 6, 'name': 'Other'}
-    }
-    
-    print(f"Creating plots for {len(catalog_df)} events...")
-    
-    for idx, event in catalog_df.iterrows():
-        try:
-            track_id = event["track_id"]
-            track_data = flare_events_df[flare_events_df["track_id"] == track_id].copy()
-            if track_data.empty:
-                continue
-            
-            track_data = track_data.sort_values("datetime")
-            peak_time = pd.to_datetime(event["peak_time"])
-            
-            # Try to load AIA image at peak time
-            aia_image = None
-            peak_timestamp = None
-            if aia_path:
-                peak_row = track_data.iloc[(track_data["datetime"] - peak_time).abs().argsort()[:1]]
-                if not peak_row.empty:
-                    peak_timestamp = peak_row["timestamp"].iloc[0]
-                    aia_image = load_aia_image_at_time(aia_path, peak_timestamp)
-            
-            # Create figure with AIA image if available
-            if aia_image is not None:
-                fig = plt.figure(figsize=(16, 6))
-                gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], hspace=0.3)
-                ax_ts = fig.add_subplot(gs[0])
-                ax_img = fig.add_subplot(gs[1])
-            else:
-                fig, ax_ts = plt.subplots(figsize=(12, 6))
-            
-            window_start = peak_time - pd.Timedelta(hours=config.plot_window_hours/2)
-            window_end = peak_time + pd.Timedelta(hours=config.plot_window_hours/2)
-            
-            # Plot other tracks in faded grey for context
-            other_tracks = flare_events_df[flare_events_df["track_id"] != track_id]
-            if not other_tracks.empty:
-                other_tracks_in_window = other_tracks[
-                    (other_tracks["datetime"] >= window_start) & 
-                    (other_tracks["datetime"] <= window_end)
-                ]
-                
-                if not other_tracks_in_window.empty:
-                    plotted_other_tracks = False
-                    for other_track_id, other_track_data in other_tracks_in_window.groupby("track_id"):
-                        other_track_data = other_track_data.sort_values("datetime")
-                        label = 'Other Tracks' if not plotted_other_tracks else None
-                        ax_ts.plot(other_track_data["datetime"], other_track_data["sum_flux"], 
-                                 color='grey', linewidth=0.8, alpha=0.4, label=label)
-                        ax_ts.scatter(other_track_data["datetime"], other_track_data["sum_flux"],
-                                    color='grey', s=5, alpha=0.2, marker='o', zorder=3)
-                        plotted_other_tracks = True
-            
-            # Plot predictions on timeseries
-            if predictions_df is not None:
-                preds_in_window = predictions_df[
-                    (predictions_df["timestamp"] >= window_start) &
-                    (predictions_df["timestamp"] <= window_end)
-                ].copy()
-                
-                if not preds_in_window.empty:
-                    if 'groundtruth' in preds_in_window.columns:
-                        ax_ts.plot(preds_in_window["timestamp"], preds_in_window['groundtruth'],
-                               'k-', linewidth=1.5, alpha=0.8, label='GOES Ground Truth')
-                        ax_ts.scatter(preds_in_window["timestamp"], preds_in_window['groundtruth'],
-                                    color='black', s=8, alpha=0.3, marker='o', zorder=4)
-                    if 'predictions' in preds_in_window.columns:
-                        ax_ts.plot(preds_in_window["timestamp"], preds_in_window['predictions'],
-                               'r--', linewidth=1.5, alpha=0.8, label='FOXES Prediction')
-                        ax_ts.scatter(preds_in_window["timestamp"], preds_in_window['predictions'],
-                                    color='red', s=8, alpha=0.3, marker='s', zorder=4)
-            
-            # Plot track flux
-            ax_ts.plot(track_data["datetime"], track_data["sum_flux"],
-                   'b-', linewidth=2, alpha=0.9, label='Track Sum Flux')
-            ax_ts.scatter(track_data["datetime"], track_data["sum_flux"],
-                        color='blue', s=10, alpha=0.4, marker='o', zorder=5, edgecolors='white', linewidths=0.5)
-            
-            # Mark peak
-            ax_ts.axvline(peak_time, color='blue', linestyle=':', linewidth=2, label='Event Peak')
-            
-            # Add FOXES class annotation on timeseries
-            foxes_flux = event.get("peak_sum_flux", 0)
-            foxes_class = flux_to_goes_class(foxes_flux)
-            y_pos = ax_ts.get_ylim()[1] * 0.9
-            ax_ts.annotate(f'FOXES: {foxes_class}', (peak_time, y_pos),
-                       xytext=(0, -10), textcoords='offset points',
-                       ha='center', va='top', fontsize=10, color='blue', weight='bold',
-                       bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
-            
-            # Add HEK peak times on timeseries
-            if not pd.isna(event.get("matched_hek_entries")):
-                try:
-                    hek_entries = json.loads(event["matched_hek_entries"])
-                    plotted_obs_peaks = set()
-                    
-                    for entry in hek_entries:
-                        obs = entry.get("observatory", "Unknown")
-                        peak_time_str = entry.get("peak_time", "")
-                        goes_class = entry.get("goes_class", "")
-                        
-                        if peak_time_str:
-                            try:
-                                hek_peak_time = pd.to_datetime(peak_time_str)
-                                color = obs_styles.get(obs, obs_styles['Unknown'])['color']
-                                
-                                label = f'{obs} Peak' if obs not in plotted_obs_peaks else None
-                                if label:
-                                    plotted_obs_peaks.add(obs)
-                                
-                                ax_ts.axvline(hek_peak_time, color=color, linestyle=':', 
-                                            linewidth=2, alpha=0.8, label=label)
-                                
-                                if goes_class and obs in ['SDO', 'SWPC']:
-                                    y_pos = ax_ts.get_ylim()[1] * 0.7
-                                    ax_ts.annotate(goes_class, (hek_peak_time, y_pos),
-                                                 xytext=(0, -10), textcoords='offset points',
-                                                 ha='center', va='top', fontsize=8,
-                                                 color=color, weight='bold',
-                                                 bbox=dict(boxstyle='round,pad=0.2', 
-                                                          facecolor='white', alpha=0.8, edgecolor=color))
-                            except Exception:
-                                continue
-                except Exception:
-                    pass
-            
-            ax_ts.set_xlim(window_start, window_end)
-            ax_ts.set_yscale('log')
-            ax_ts.set_ylabel('Flux', fontsize=12)
-            ax_ts.set_xlabel('Time (UTC)', fontsize=12)
-            ax_ts.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax_ts.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-            plt.setp(ax_ts.xaxis.get_majorticklabels(), rotation=45)
-            ax_ts.legend(loc='upper left', fontsize=9, framealpha=0.9)
-            ax_ts.grid(True, alpha=0.3)
-            
-            # Plot AIA image with location markers
-            if aia_image is not None:
-                ax_img.imshow(aia_image, origin='lower', aspect='equal', alpha=0.8)
-                
-                ax_img.set_title(f'AIA Composite\n{peak_time.strftime("%H:%M:%S")}', fontsize=12)
-                ax_img.set_xlabel('X (pixels)', fontsize=10)
-                ax_img.set_ylabel('Y (pixels)', fontsize=10)
-                
-                # Mark FOXES centroid (blue star)
-                if not pd.isna(event.get("peak_centroid_img_x")) and not pd.isna(event.get("peak_centroid_img_y")):
-                    cx = event["peak_centroid_img_x"]
-                    cy = event["peak_centroid_img_y"]
-                    ax_img.plot(cx, cy, 'b*', markersize=15, markeredgecolor='white', 
-                              markeredgewidth=2, label='FOXES Location')
-                
-                # Class annotations on image
-                y_offset = 0.98
-                
-                # FOXES class (blue)
-                ax_img.text(0.02, y_offset, f'FOXES: {foxes_class}', 
-                          transform=ax_img.transAxes, fontsize=10, weight='bold',
-                          horizontalalignment='left', verticalalignment='top', color='blue',
-                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='blue'))
-                
-                # HEK classes and locations
-                if not pd.isna(event.get("matched_hek_entries")):
-                    try:
-                        hek_entries = json.loads(event["matched_hek_entries"])
-                        sdo_class = None
-                        goes_class_hek = None
-                        plotted_obs = set()
-                        
-                        for entry in hek_entries:
-                            obs = entry.get("observatory", "Unknown").strip() if entry.get("observatory") else "Unknown"
-                            entry_class = entry.get("goes_class", "").strip() if entry.get("goes_class") else ""
-                            
-                            # Track classes for annotation
-                            if entry_class:
-                                if obs == 'SDO':
-                                    sdo_class = entry_class
-                                elif obs in ['GOES', 'SWPC']:
-                                    goes_class_hek = entry_class
-                            
-                            # Plot location marker using numeric coordinates
-                            hpc_x = entry.get("hpc_x")
-                            hpc_y = entry.get("hpc_y")
-                            
-                            # Try numeric coords first, fall back to parsing string
-                            x_arcsec, y_arcsec = None, None
-                            if hpc_x is not None and hpc_y is not None:
-                                x_arcsec, y_arcsec = hpc_x, hpc_y
-                            else:
-                                coords = entry.get("coordinates", "").strip() if entry.get("coordinates") else ""
-                                if coords:
-                                    x_arcsec, y_arcsec = parse_hpc_coordinates(coords)
-                            
-                            if x_arcsec is not None and y_arcsec is not None:
-                                hek_x, hek_y = helioprojective_to_pixel(x_arcsec, y_arcsec, obs_date=entry.get("event_peaktime"))
-                                if hek_x is not None and hek_y is not None:
-                                    style = obs_styles.get(obs, obs_styles['Unknown'])
-                                    label = f'{style["name"]} Location' if obs not in plotted_obs else None
-                                    if label:
-                                        plotted_obs.add(obs)
-                                    
-                                    ax_img.scatter(hek_x, hek_y, marker=style['marker'], 
-                                                 color=style['color'], s=style['size']**2,
-                                                 edgecolors='white', linewidths=1.5, 
-                                                 label=label, alpha=0.9, zorder=8)
-                        
-                        # Add SDO class (purple)
-                        if sdo_class:
-                            y_offset -= 0.08
-                            ax_img.text(0.02, y_offset, f'SDO: {sdo_class}', 
-                                      transform=ax_img.transAxes, fontsize=10, weight='bold',
-                                      horizontalalignment='left', verticalalignment='top', color='purple',
-                                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='purple'))
-                        
-                        # Add GOES class (orange)
-                        if goes_class_hek:
-                            y_offset -= 0.08
-                            ax_img.text(0.02, y_offset, f'GOES: {goes_class_hek}', 
-                                      transform=ax_img.transAxes, fontsize=10, weight='bold',
-                                      horizontalalignment='left', verticalalignment='top', color='orange',
-                                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='orange'))
-                            
-                    except Exception:
-                        pass
-                
-                # Legend for image - deduplicate handles and labels
-                handles, labels = ax_img.get_legend_handles_labels()
-                if handles:
-                    # Remove duplicates while preserving order
-                    seen_labels = set()
-                    unique_handles = []
-                    unique_labels = []
-                    for handle, label in zip(handles, labels):
-                        if label not in seen_labels:
-                            seen_labels.add(label)
-                            unique_handles.append(handle)
-                            unique_labels.append(label)
-                    ax_img.legend(unique_handles, unique_labels, loc='upper right', fontsize=12, framealpha=1)
-            
-            # Title
-            match_status = event.get("match_status", "foxes_only")
-            foxes_class_display = event.get("foxes_goes_class", foxes_class)
-            hek_class_display = event.get("hek_goes_class", "N/A")
-            
-            status_label = {
-                "matched_time_magnitude": "Matched (Time + Mag)",
-                "matched_time_only": "Matched (Time Only)",
-                "foxes_only": "FOXES Only"
-            }.get(match_status, "Unknown")
-            
-            title_parts = [
-                f"Track {track_id} ({status_label})",
-                f"Peak: {peak_time.strftime('%Y-%m-%d %H:%M')}",
-
-            ]
-            if match_status in ["matched_time_magnitude", "matched_time_only"]:
-                title_parts.append(f"FOXES: {foxes_class_display} vs HEK: {hek_class_display}")
-            
-            fig.suptitle(" | ".join(title_parts), fontsize=12, y=0.95)
-            
-            plt.tight_layout()
-            
-            # Save to appropriate folder
-            filename = f"flare_event_{track_id}_{peak_time.strftime('%Y%m%d_%H%M%S')}.png"
-            if match_status == "matched_time_magnitude":
-                filepath = matched_dir / filename
-            elif match_status == "matched_time_only":
-                filepath = time_only_dir / filename
-            else:
-                filepath = foxes_only_dir / filename
-            
-            plt.savefig(filepath, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-        except Exception as e:
-            print(f"Error creating plot for event {idx}: {e}")
-            continue
-    
-    print(f"Saved plots to {output_dir}")
-
 
 def filter_hek_by_foxes_coverage(hek_df: pd.DataFrame, foxes_timestamps: pd.DatetimeIndex,
                                   max_gap_minutes: float = 10.0, min_points_required: int = 5,
@@ -2473,27 +1808,38 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         
         current_time = pd.to_datetime(timestamp)
         
-        # Create figure with 3 subplots stacked vertically:
-        # - AIA image (top)
-        # - SXR timeseries (middle)
-        # - Flare timeline (bottom)
-        fig = plt.figure(figsize=(6, 11))
-        # Use hspace for spacing between AIA and SXR, then manually adjust timeline to touch SXR
-        gs = fig.add_gridspec(3, 1, height_ratios=[2, 1, .5],
-                              hspace=0.25, wspace=0.05,
-                              left=0.1, right=0.9, top=0.95, bottom=0)
-        ax_aia = fig.add_subplot(gs[0, 0])  # Top row
-        ax_sxr = fig.add_subplot(gs[1, 0])   # Middle row
-        ax_timeline = fig.add_subplot(gs[2, 0], sharex=ax_sxr)  # Bottom row
+        # Create figure with 2 subplots side by side:
+        # - AIA image (left)
+        # - SXR timeseries (right)
+        fig = plt.figure(figsize=(14, 6), facecolor='black', edgecolor='none')
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.2, 1],
+                              hspace=0.25, wspace=0.3,
+                              left=0.08, right=0.95, top=0.95, bottom=0.08)
+        ax_aia = fig.add_subplot(gs[0, 0])  # Left column
+        ax_sxr = fig.add_subplot(gs[0, 1])  # Right column
         
-        # Manually adjust timeline to touch SXR (remove gap created by hspace)
-        bbox_sxr = ax_sxr.get_position()
-        bbox_timeline = ax_timeline.get_position()
-        # Move timeline up so its top edge touches SXR's bottom edge
-        new_timeline_top = bbox_sxr.y0  # SXR bottom = timeline top
-        new_timeline_height = bbox_timeline.height
-        ax_timeline.set_position([bbox_timeline.x0, new_timeline_top - new_timeline_height, 
-                                 bbox_timeline.width, new_timeline_height])
+        # Set backgrounds: AIA stays black, SXR uses tan theme
+        ax_aia.set_facecolor('black')
+        ax_sxr.set_facecolor('#feeee7')  # Tan color for SXR plot face
+        
+        # Set text colors for dark background
+        ax_aia.tick_params(colors='white', labelsize=10)
+        ax_sxr.tick_params(colors='white', labelsize=10)
+        # Make minor ticks white as well
+        ax_aia.tick_params(which='minor', colors='white')
+        ax_sxr.tick_params(which='minor', colors='white')
+        ax_aia.xaxis.label.set_color('white')
+        ax_aia.yaxis.label.set_color('white')
+        ax_sxr.xaxis.label.set_color('white')
+        ax_sxr.yaxis.label.set_color('white')
+        ax_aia.title.set_color('white')
+        ax_sxr.title.set_color('white')
+        
+        # Set spine colors
+        for spine in ax_aia.spines.values():
+            spine.set_color('white')
+        for spine in ax_sxr.spines.values():
+            spine.set_color('white')
         
         # Calculate time window (needed for both plots)
         window_start = current_time - pd.Timedelta(hours=plot_window_hours/2)
@@ -2536,8 +1882,10 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             blank_img = np.zeros((512, 512, 3))
             ax_aia.imshow(blank_img, origin='lower', aspect='equal')
         
-        ax_aia.set_xlabel('X (pixels)', fontsize=12)
-        ax_aia.set_ylabel('Y (pixels)', fontsize=12)
+        ax_aia.set_xlabel('X (pixels)', fontsize=12, color='white')
+        ax_aia.set_ylabel('Y (pixels)', fontsize=12, color='white')
+        plt.setp(ax_aia.xaxis.get_majorticklabels(), color='white')
+        plt.setp(ax_aia.yaxis.get_majorticklabels(), color='white')
         
         # Draw AR contours from pre-computed region labels (cached in memory during detection)
         region_labels = region_labels_cache.get(timestamp)
@@ -2609,15 +1957,25 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                            markeredgecolor='black', markeredgewidth=2,alpha=0.7, 
                            label=f'FOXES {track_id}' if len(plotted_tracks) <= 5 else None, zorder=15)
                 
-                ax_aia.annotate(f'FOXES: {foxes_class}', (marker_x, marker_y),
+                # Format flux as scientific notation or GOES class
+                flux_str = f'{current_flux:.2e}' if current_flux > 0 else '0'
+                ax_aia.annotate(f'FOXES: {foxes_class}\nFlux: {flux_str}', (marker_x, marker_y),
                                xytext=(15, 15), textcoords='offset points',
-                               fontsize=12, color='black', weight='bold',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor=track_color, 
+                               fontsize=11, color='black', weight='bold',
+                               bbox=dict(boxstyle='round,pad=0.4', facecolor=track_color, 
                                        alpha=0.95, edgecolor='black', linewidth=2))
             else:
                 # Smaller colored circle for tracked regions (at peak brightness)
                 ax_aia.plot(marker_x, marker_y, 'o', markersize=12, color=track_color, 
                            markeredgecolor='white', markeredgewidth=1.5, alpha=0.8, zorder=12)
+                
+                # Show flux for non-active regions too
+                flux_str = f'{current_flux:.2e}' if current_flux > 0 else '0'
+                ax_aia.annotate(f'Track {track_id}\nFlux: {flux_str}', (marker_x, marker_y),
+                               xytext=(10, 10), textcoords='offset points',
+                               fontsize=9, color='white', weight='bold',
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor=track_color, 
+                                       alpha=0.85, edgecolor='white', linewidth=1))
         
         # ========== HEK Flare Locations (from HEK catalog) ==========
         # Show HEK events that are currently active (between start and end time)
@@ -2674,7 +2032,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                     
                     if goes_class:
                         ax_aia.annotate(label_text, (hek_x, hek_y),
-                                      xytext=(12, -18), textcoords='offset points',
+                                      xytext=(-38, +18), textcoords='offset points',
                                       fontsize=12, color='white', weight='bold',
                                       bbox=dict(boxstyle='round,pad=0.3', 
                                               facecolor=style['color'], alpha=0.95, 
@@ -2728,7 +2086,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                                 # Add class label
                                 if goes_class:
                                     ax_aia.annotate(f'{obs}: {goes_class}', (hek_x, hek_y),
-                                                  xytext=(12, -18), textcoords='offset points',
+                                                  xytext=(-32, +18), textcoords='offset points',
                                                   fontsize=12, color='white', weight='bold',
                                                   bbox=dict(boxstyle='round,pad=0.3', 
                                                           facecolor=style['color'], alpha=0.95, 
@@ -2749,16 +2107,16 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                 # Plot GOES ground truth if available (column name is 'groundtruth')
                 if 'groundtruth' in preds_in_window.columns:
                     ax_sxr.plot(preds_in_window["datetime"], preds_in_window['groundtruth'],
-                               'b-', linewidth=1.5, alpha=0.8, label='GOES (Ground Truth)')
+                               color='#00D9FF', linewidth=1.5, alpha=0.8, label='GOES (Ground Truth)')
                     ax_sxr.scatter(preds_in_window["datetime"], preds_in_window['groundtruth'],
-                                 color='blue', s=8, alpha=0.3, marker='o', zorder=4)
+                                 color='#00D9FF', s=8, alpha=0.3, marker='o', zorder=4)
                 
                 # Plot FOXES predictions if available
                 if 'predictions' in preds_in_window.columns:
                     ax_sxr.plot(preds_in_window["datetime"], preds_in_window['predictions'],
-                               'r--', linewidth=1.5, alpha=0.8, label='FOXES Translation')
+                               color='#FF6B9D', linewidth=1.5, alpha=0.8, label='FOXES Translation')
                     ax_sxr.scatter(preds_in_window["datetime"], preds_in_window['predictions'],
-                                 color='red', s=8, alpha=0.3, marker='s', zorder=4)
+                                 color='#FF6B9D', s=8, alpha=0.3, marker='s', zorder=4)
         
         # Get set of active track IDs
         active_track_ids = set(active_foxes_flares['track_id'].values) if not active_foxes_flares.empty else set()
@@ -2815,8 +2173,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                 # Plot line with average alpha, scatter with per-point alpha
                 label = 'Other Tracks' if not plotted_other_tracks else None
                 ax_sxr.plot(track_data["datetime"], track_data["sum_flux"],
-                           color=track_color, linewidth=1.2, alpha=float(current_alpha), 
-                           label=label, zorder=3)
+                           color=track_color, linewidth=1.2, alpha=float(current_alpha), zorder=3)
                 
                 # Scatter points with varying alpha based on flux
                 for j, (dt, flux, alpha) in enumerate(zip(track_data["datetime"], track_fluxes, alphas)):
@@ -2829,333 +2186,20 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         ax_sxr.axvline(current_time, color='#E5446D', linestyle='-', linewidth=2, 
                       alpha=0.8, zorder=10)
         
-        # SXR plot formatting (no x-axis labels - shared with timeline)
+        # SXR plot formatting
         ax_sxr.set_xlim(window_start, window_end)
         ax_sxr.set_yscale('log')
-        ax_sxr.set_ylabel('Flux (W/m²)', fontsize=12)
-        plt.setp(ax_sxr.get_xticklabels(), visible=False)  # Hide x labels, shared with timeline
-        ax_sxr.legend(loc='lower right', fontsize=10, framealpha=1, ncol=1)
-        ax_sxr.grid(True, alpha=0.3)
-        ax_sxr.set_title(f'SXR Timeseries — {current_time.strftime("%Y-%m-%d %H:%M:%S")}', fontsize=12)
-        
-        # ========== Flare Timeline Subplot ==========
-        # Get all FOXES flares overlapping the time window
-        all_foxes_in_window = pd.DataFrame()
-        if not catalog_df.empty:
-            all_foxes_in_window = catalog_df[
-                (catalog_df['end_time'] >= window_start) &
-                (catalog_df['start_time'] <= window_end)
-            ].copy()
-        
-        # Plot FOXES flares as horizontal bars
-        foxes_y_positions = {}
-        next_y = 0.5
-        for i, (idx, flare) in enumerate(all_foxes_in_window.iterrows()):
-            track_id = flare['track_id']
-            flare_color = foxes_track_color_map.get(track_id, foxes_track_colors[i % len(foxes_track_colors)])
-            
-            flare_start = flare['start_time']
-            flare_end = flare['end_time']
-            flare_peak = flare['peak_time']
-            
-            # Assign y position (stack flares vertically)
-            if track_id not in foxes_y_positions:
-                foxes_y_positions[track_id] = next_y
-                next_y += 1.0
-            y_pos = foxes_y_positions[track_id]
-            
-            # Check if currently active
-            is_active = (flare_start <= current_time <= flare_end)
-            edge_width = .5 
-            
-            # Draw flare duration bar
-            ax_timeline.barh(y_pos, flare_end - flare_start, left=flare_start, height=0.6,
-                           color=flare_color, alpha=.3, edgecolor='grey', 
-                           linewidth=edge_width, zorder=3)
-            
-            # Mark peak with triangle
-            ax_timeline.scatter([flare_peak], [y_pos], marker='^', s=80, 
-                              color='white', edgecolor=flare_color, linewidth=2, zorder=5)
-            
-            # Add track label
-            label_x = min(flare_end, window_end)
-            ax_timeline.text(label_x + pd.Timedelta(minutes=2), y_pos, f' T{track_id}', fontsize=8, 
-                           va='center', ha='left', fontweight='bold', color=flare_color)
-        
-        # Plot HEK SDO flares as hatched bars (below FOXES)
-        hek_y_start = next_y + 0.5 if next_y > 0.5 else 1.5
-        for i, (idx, hek_event) in enumerate(all_hek_in_window.iterrows()):
-            hek_start = hek_event.get('event_starttime')
-            hek_end = hek_event.get('event_endtime')
-            hek_peak = hek_event.get('event_peaktime')
-            goes_class = hek_event.get('fl_goescls', '')
-            
-            if pd.isna(hek_start) or pd.isna(hek_end):
-                continue
-            
-            y_pos = hek_y_start + i * 1.0
-            is_active = (hek_start <= current_time <= hek_end)
-            bar_alpha = .3
-            
-            style = obs_styles.get('SDO', obs_styles['Unknown'])
-            
-            # Draw HEK flare bar with hatching
-            ax_timeline.barh(y_pos, hek_end - hek_start, left=hek_start, height=0.6,
-                           color=style['color'], alpha=bar_alpha, edgecolor=style['color'],
-                           linewidth=.5, hatch='//', zorder=2)
-            
-            # Mark peak
-            if pd.notna(hek_peak):
-                ax_timeline.scatter([hek_peak], [y_pos], marker='v', s=80,
-                                  color='white', edgecolor=style['color'], linewidth=2, zorder=5)
-            
-            # Add class label
-            label_x = min(hek_end, window_end)
-            label_text = f' HEK:{goes_class}' if goes_class else ' HEK'
-            ax_timeline.text(label_x + pd.Timedelta(minutes=2), y_pos, label_text, fontsize=8,
-                           va='center', ha='left', fontweight='bold', color=style['color'])
-        
-        # Mark current time on timeline
-        ax_timeline.axvline(current_time, color='#E5446D', linestyle='-', linewidth=2, 
-                           alpha=0.8, zorder=10, label='Current Time')
-        
-        # Timeline formatting
-        ax_timeline.set_xlim(window_start, window_end)
-        max_y = max(next_y, hek_y_start + len(all_hek_in_window)) + 0.5
-        ax_timeline.set_ylim(0, max(max_y, 2))
-        ax_timeline.set_ylabel('Events', fontsize=12)
-        ax_timeline.set_xlabel('Time (UTC)', fontsize=12)
-        ax_timeline.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax_timeline.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        plt.setp(ax_timeline.xaxis.get_majorticklabels(), rotation=0, ha='right')
-        ax_timeline.set_yticks([])  # Hide y-axis ticks (labels are on bars)
-        ax_timeline.grid(True, alpha=0.3, axis='x')
-        
-        # Add legend for timeline
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Patch(facecolor='white', edgecolor='grey', alpha=1, label='FOXES Detection'),
-            Patch(facecolor=obs_styles['SDO']['color'], edgecolor=obs_styles['SDO']['color'], 
-                  alpha=0.6, hatch='//', label='HEK (SDO) Detection'),
-            Line2D([0], [0], marker='^', color='w', markerfacecolor='white', 
-                   markeredgecolor='black', markersize=8, label='Flare Peak'),
-            Line2D([0], [0], color='#E5446D', linewidth=2, label='Current Time'),
-        ]
-        #ax_timeline.legend(handles=legend_elements, loc='upper right', fontsize=10, framealpha=0.9, ncol=2)
-        
-        # ========== AIA Image with Locations and Contours ==========
-        aia_image = None
-        if aia_path:
-            aia_image = load_aia_image_at_time(Path(aia_path), timestamp)
-        
-        if aia_image is not None:
-            ax_aia.imshow(aia_image, origin='lower', aspect='equal', alpha=0.9)
-        else:
-            # Create blank image if AIA not available
-            blank_img = np.zeros((512, 512, 3))
-            ax_aia.imshow(blank_img, origin='lower', aspect='equal')
-        
-        ax_aia.set_xlabel('X (pixels)', fontsize=12)
-        ax_aia.set_ylabel('Y (pixels)', fontsize=12)
-        
-        # Draw AR contours from pre-computed region labels (cached in memory during detection)
-        region_labels = region_labels_cache.get(timestamp)
-        
-        
-        # ========== FOXES Track Locations ==========
-        # Show ALL FOXES track locations - find nearest data point to current timestamp for each track
-        plotted_tracks = set()
-        plotted_obs = set()
-        
-        # Get tracks that have data at the EXACT current timestamp
-        # This ensures marker and contour are always in sync (both from same detection)
-        if not flare_events_df.empty and 'timestamp' in flare_events_df.columns:
-            current_events = flare_events_df[flare_events_df['timestamp'] == timestamp].copy()
-        else:
-            current_events = pd.DataFrame()
-
-        
-        for i, (_, track_event) in enumerate(current_events.iterrows()):
-            track_id = track_event['track_id']
-            if track_id in plotted_tracks:
-                continue
-            plotted_tracks.add(track_id)
-            
-            # Centroid coordinates
-            cx = track_event.get('centroid_img_x')
-            cy = track_event.get('centroid_img_y')
-            # Peak coordinates (for star marker - where the brightest patch is)
-            peak_x = track_event.get('peak_img_x')
-            peak_y = track_event.get('peak_img_y')
-            # Region label (direct association - no position lookup needed!)
-            region_label = track_event.get('region_label')
-            current_flux = track_event.get('sum_flux', 0)
-            
-            # Skip if coordinates are missing or invalid
-            if pd.isna(cx) or pd.isna(cy) or cx < 0 or cx > 512 or cy < 0 or cy > 512:
-                continue
-            
-            # Use peak coords if available, otherwise fall back to centroid
-            marker_x = peak_x if pd.notna(peak_x) else cx
-            marker_y = peak_y if pd.notna(peak_y) else cy
-            
-            # Get track color
-            track_color = foxes_track_color_map.get(track_id, foxes_track_colors[i % len(foxes_track_colors)])
-            
-            # Check if this track has an active flare (from catalog)
-            is_active_flare = False
-            if not active_foxes_flares.empty:
-                is_active_flare = track_id in active_foxes_flares['track_id'].values
-            
-            foxes_class = flux_to_goes_class(current_flux)
-            
-            # Draw highlighted contour using the track's directly-associated region_label
-            # No position lookup needed - each track knows its own region!
-            if region_labels is not None and pd.notna(region_label) and region_label > 0:
-                region_mask = region_labels == int(region_label)
-                if np.any(region_mask):
-                    try:
-                        # Thick contour for active flares, thinner for others
-                        lw = 4.0 if is_active_flare else 2.5
-                        ax_aia.contour(region_mask.astype(float), levels=[0.5], colors=track_color, 
-                                      linewidths=lw, alpha=0.9, extent=[0, 512, 0, 512])
-                    except Exception:
-                        pass
-            
-            # Plot track location marker at peak brightness location
-            if is_active_flare:
-                # Large star for active flares (at peak brightness)
-                ax_aia.plot(marker_x, marker_y, '*', markersize=15, color=track_color, 
-                           markeredgecolor='black', markeredgewidth=2,alpha=0.7, 
-                           label=f'FOXES {track_id}' if len(plotted_tracks) <= 5 else None, zorder=17)
-                
-                ax_aia.annotate(f'FOXES: {foxes_class}', (marker_x, marker_y),
-                               xytext=(15, 15), textcoords='offset points',
-                               fontsize=12, color='black', weight='bold',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor=track_color, 
-                                       alpha=0.95, edgecolor='black', linewidth=2))
-            else:
-                # Smaller colored circle for tracked regions (at peak brightness)
-                ax_aia.plot(marker_x, marker_y, 'o', markersize=12, color=track_color, 
-                           markeredgecolor='white', markeredgewidth=1.5, alpha=0.8, zorder=12)
-        
-        # ========== HEK Flare Locations (from HEK catalog) ==========
-        # Show HEK events that are currently active (between start and end time)
-        # This includes both matched HEK events and HEK-only events (missed by FOXES)
-        for idx, hek_event in active_hek_flares.iterrows():
-            obs = hek_event.get('obs_observatory', 'Unknown')
-            if pd.isna(obs):
-                obs = 'Unknown'
-            obs = str(obs).strip()
-            
-            goes_class = hek_event.get('fl_goescls', '')
-            if pd.isna(goes_class):
-                goes_class = ''
-            goes_class = str(goes_class).strip()
-            
-            # Check if this is a HEK-only event (not matched to FOXES)
-            is_hek_only = hek_event.get('match_status', '') == 'hek_only'
-            
-            # Get HEK coordinates
-            hpc_x = hek_event.get('hpc_x', hek_event.get('event_coord1'))
-            hpc_y = hek_event.get('hpc_y', hek_event.get('event_coord2'))
-            
-            x_arcsec, y_arcsec = None, None
-            if pd.notna(hpc_x) and pd.notna(hpc_y):
-                try:
-                    x_arcsec, y_arcsec = float(hpc_x), float(hpc_y)
-                except:
-                    pass
-            
-            if x_arcsec is not None and y_arcsec is not None:
-                hek_x, hek_y = helioprojective_to_pixel(x_arcsec, y_arcsec, obs_date=hek_event.get("event_peaktime"))
-                if hek_x is not None and hek_y is not None:
-                    style = obs_styles.get(obs, obs_styles['Unknown'])
-                    # Only add label for the first occurrence of this observatory
-                    is_first_obs = obs not in plotted_obs
-                    label = f'HEK {style["name"]}' if is_first_obs else None
-                    # Mark this observatory as plotted immediately (regardless of label)
-                    plotted_obs.add(obs)
-                    
-                    # Visual distinction for HEK-only events: thicker edge and slightly different alpha
-                    edge_width = 2.5
-                    marker_alpha = .7
-                    marker_style = style['marker']
-                    
-                    # Large, visible marker
-                    ax_aia.scatter(hek_x, hek_y, marker=marker_style,
-                                 color=style['color'], s=150,
-                                 edgecolors='white', linewidths=edge_width,
-                                 label=label, alpha=marker_alpha, zorder=16)
-                    
-                    
-                    # Add class label (with "HEK-only" indicator if applicable)
-                    label_text = f'{obs}: {goes_class}'
-                    
-                    if goes_class:
-                        ax_aia.annotate(label_text, (hek_x, hek_y),
-                                      xytext=(12, -18), textcoords='offset points',
-                                      fontsize=12, color='white', weight='bold',
-                                      bbox=dict(boxstyle='round,pad=0.3', 
-                                              facecolor=style['color'], alpha=0.95, 
-                                              edgecolor='white', linewidth=2))
-        
-        # Also show HEK locations from matched FOXES flares (SDO only)
-        # Skip entries that were already plotted in the first loop to avoid duplicate legend labels
-        for i, (idx, flare) in enumerate(active_foxes_flares.iterrows()):
-            if not pd.isna(flare.get("matched_hek_entries")):
-                try:
-                    hek_entries = json.loads(flare["matched_hek_entries"])
-                    for entry in hek_entries:
-                        obs = entry.get("observatory", "Unknown").strip() if entry.get("observatory") else "Unknown"
-                        
-                        # Skip non-SDO entries
-                        if 'SDO' not in obs.upper():
-                            continue
-                        
-                        # Skip if this obs was already plotted in the first loop (avoids duplicate legend)
-                        if obs in plotted_obs:
-                            continue
-                        
-                        goes_class = entry.get("goes_class", "").strip() if entry.get("goes_class") else ""
-                        
-                        hpc_x = entry.get("hpc_x")
-                        hpc_y = entry.get("hpc_y")
-                        
-                        x_arcsec, y_arcsec = None, None
-                        if hpc_x is not None and hpc_y is not None:
-                            x_arcsec, y_arcsec = hpc_x, hpc_y
-                        else:
-                            coords = entry.get("coordinates", "").strip() if entry.get("coordinates") else ""
-                            if coords:
-                                x_arcsec, y_arcsec = parse_hpc_coordinates(coords)
-                        
-                        if x_arcsec is not None and y_arcsec is not None:
-                            hek_x, hek_y = helioprojective_to_pixel(x_arcsec, y_arcsec, obs_date=entry.get("event_peaktime"))
-                            if hek_x is not None and hek_y is not None:
-                                style = obs_styles.get(obs, obs_styles['Unknown'])
-                                # Only add label for the first occurrence of this observatory
-                                is_first_obs = obs not in plotted_obs
-                                label = f'HEK {style["name"]}' if is_first_obs else None
-                                # Mark this observatory as plotted immediately (regardless of label)
-                                plotted_obs.add(obs)
-                                
-                                ax_aia.scatter(hek_x, hek_y, marker=style['marker'],
-                                            color=style['color'], s=150,
-                                             edgecolors='white', linewidths=2,
-                                             label=label, alpha=0.7, zorder=14)
-                                
-                                # Add class label
-                                if goes_class:
-                                    ax_aia.annotate(f'{obs}: {goes_class}', (hek_x, hek_y),
-                                                  xytext=(12, -18), textcoords='offset points',
-                                                  fontsize=12, color='white', weight='bold',
-                                                  bbox=dict(boxstyle='round,pad=0.3', 
-                                                          facecolor=style['color'], alpha=0.95, 
-                                                          edgecolor='white', linewidth=2))
-                except Exception as e:
-                    pass
+        ax_sxr.set_ylabel('Flux (W/m²)', fontsize=12, color='white')
+        ax_sxr.set_xlabel('Time (UTC)', fontsize=12, color='white')
+        ax_sxr.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax_sxr.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+        plt.setp(ax_sxr.xaxis.get_majorticklabels(), rotation=0, ha='right', color='white')
+        plt.setp(ax_sxr.yaxis.get_majorticklabels(), color='white')
+        ax_sxr.legend(loc='lower right', fontsize=10, framealpha=0.9, ncol=1, 
+                     facecolor='black', edgecolor='white', labelcolor='white')
+        ax_sxr.grid(True, alpha=0.2, color='black', linestyle='--')
+        ax_sxr.set_title(f'SXR Timeseries — {current_time.strftime("%Y-%m-%d %H:%M:%S")}', 
+                        fontsize=12, color='white')
         
         # Legend - deduplicate handles and labels
         handles, labels_legend = ax_aia.get_legend_handles_labels()
@@ -3169,7 +2213,8 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                     seen_labels.add(label)
                     unique_handles.append(handle)
                     unique_labels.append(label)
-            ax_aia.legend(unique_handles, unique_labels, loc='upper right', fontsize=10, framealpha=1)
+            ax_aia.legend(unique_handles, unique_labels, loc='upper right', fontsize=10, 
+                         framealpha=0.9, facecolor='black', edgecolor='white', labelcolor='white')
         
         # Overall title
         # num_foxes_active = len(active_foxes_flares) if not active_foxes_flares.empty else 0
@@ -3178,7 +2223,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         # if num_foxes_active > 0 or num_hek_active > 0:
         #     title += f" | FOXES: {num_foxes_active}, HEK: {num_hek_active} Active"
         # fig.suptitle(title, fontsize=14, y=0.98)
-        
+        fig.patch.set_facecolor('none')
         plt.tight_layout()
         
         # Save frame with unique counter
@@ -3190,10 +2235,11 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             frame_path = frames_dir / f"frame_{frame_idx:06d}.jpg"
             # JPEG is much faster than PNG and good enough for video
             # Save as JPEG (matplotlib handles quality internally)
-            plt.savefig(frame_path, dpi=frame_dpi, format='jpg')
+            plt.savefig(frame_path, dpi=frame_dpi, format='jpg', edgecolor='none', bbox_inches='tight', pad_inches=0.1)
         else:
             frame_path = frames_dir / f"frame_{frame_idx:06d}.png"
-            plt.savefig(frame_path, dpi=frame_dpi, format='png')
+            # Save as PNG with transparent background
+            plt.savefig(frame_path, dpi=frame_dpi, format='png', edgecolor='none', bbox_inches='tight', pad_inches=0.1)
         
         plt.close()
         
@@ -3203,24 +2249,6 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         plt.close('all')
         print(f"Error creating frame {frame_idx} for {timestamp}: {e}")
         return None
-
-
-def _load_flux_contributions_standalone(flux_path: str, timestamp: str, config) -> Optional[np.ndarray]:
-    """Load flux contributions for a given timestamp (standalone function for multiprocessing).
-    
-    Matches the analyzer's load_flux_contributions method: looks for file named exactly {timestamp}
-    (no extension) and loads as CSV with np.loadtxt.
-    """
-    try:
-        flux_dir = Path(flux_path)
-        flux_file = flux_dir / f"{timestamp}"
-        if flux_file.exists():
-            return np.loadtxt(flux_file, delimiter=',')
-        return None
-    except Exception as e:
-        # Silently fail - contours just won't be drawn for this frame
-        return None
-
 
 def create_flare_movie(catalog_df: pd.DataFrame, flare_events_df: pd.DataFrame,
                        output_dir: Path, config: FlareAnalysisConfig,
@@ -3328,8 +2356,6 @@ def create_flare_movie(catalog_df: pd.DataFrame, flare_events_df: pd.DataFrame,
     
     # Determine overall time range for SXR plot
     all_datetimes = [pd.to_datetime(ts) for ts in timestamps_to_use]
-    overall_start = min(all_datetimes)
-    overall_end = max(all_datetimes)
     plot_window_hours = config.plot_window_hours
     
     # Assign colors to FOXES tracks (pre-compute for all workers)
@@ -3522,166 +2548,6 @@ def create_flare_movie(catalog_df: pd.DataFrame, flare_events_df: pd.DataFrame,
         return None
 
 
-def create_hek_only_plots(hek_only_df: pd.DataFrame, output_dir: Path,
-                          config: FlareAnalysisConfig,
-                          predictions_csv: Optional[str] = None,
-                          flare_events_df: Optional[pd.DataFrame] = None) -> None:
-    """Create plots for HEK-only events (events in HEK but not detected by FOXES)."""
-    # Setup font before creating any plots
-    setup_barlow_font()
-    
-    if hek_only_df.empty:
-        print("No HEK-only events to plot")
-        return
-    
-    output_dir = Path(output_dir)
-    hek_only_dir = output_dir / "hek_only"
-    hek_only_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load predictions
-    predictions_df = None
-    foxes_timestamps = None
-    if predictions_csv and Path(predictions_csv).exists():
-        try:
-            predictions_df = pd.read_csv(predictions_csv)
-            if 'datetime' in predictions_df.columns:
-                predictions_df['datetime'] = pd.to_datetime(predictions_df['datetime'])
-            elif 'timestamp' in predictions_df.columns:
-                predictions_df['datetime'] = pd.to_datetime(predictions_df['timestamp'])
-                predictions_df['timestamp'] = pd.to_datetime(predictions_df['timestamp'])
-            
-            if 'timestamp' in predictions_df.columns:
-                foxes_timestamps = pd.DatetimeIndex(predictions_df['timestamp'])
-            elif 'datetime' in predictions_df.columns:
-                foxes_timestamps = pd.DatetimeIndex(predictions_df['datetime'])
-        except Exception as e:
-            print(f"Warning: Could not load predictions CSV: {e}")
-    
-    # Ensure datetime columns are parsed (filtering already done in main)
-    hek_only_df = hek_only_df.copy()
-    for col in ["event_starttime", "event_endtime", "event_peaktime"]:
-        if col in hek_only_df.columns:
-            hek_only_df[col] = pd.to_datetime(hek_only_df[col])
-    
-    hek_only_df = hek_only_df.sort_values("event_peaktime")
-    
-    print(f"Creating HEK-only plots for {len(hek_only_df)} events...")
-    
-    # Observatory styles
-    obs_colors = {'SDO': 'purple', 'GOES': 'orange', 'SWPC': 'magenta', 'Unknown': 'gray'}
-    
-    plotted_peaks = []
-    plots_created = 0
-    
-    for idx, hek_event in hek_only_df.iterrows():
-        try:
-            peak_time = hek_event.get("event_peaktime")
-            if pd.isna(peak_time):
-                continue
-            
-            # Skip duplicates within 5 minutes
-            already_plotted = False
-            for prev_peak in plotted_peaks:
-                if abs((peak_time - prev_peak).total_seconds()) < 300:
-                    already_plotted = True
-                    break
-            
-            if already_plotted:
-                continue
-            
-            plotted_peaks.append(peak_time)
-            
-            start_time = hek_event.get("event_starttime", peak_time - pd.Timedelta(minutes=30))
-            end_time = hek_event.get("event_endtime", peak_time + pd.Timedelta(minutes=30))
-            obs = hek_event.get("obs_observatory", "Unknown")
-            goes_class = hek_event.get("fl_goescls", hek_event.get("goes_class", ""))
-            
-            fig, ax = plt.subplots(figsize=(12, 6))
-            
-            window_start = peak_time - pd.Timedelta(hours=config.plot_window_hours/2)
-            window_end = peak_time + pd.Timedelta(hours=config.plot_window_hours/2)
-            
-            has_data = False
-            
-            # Plot FOXES tracks in faded grey for context (even though HEK didn't match)
-            if flare_events_df is not None and not flare_events_df.empty:
-                tracks_in_window = flare_events_df[
-                    (flare_events_df["datetime"] >= window_start) & 
-                    (flare_events_df["datetime"] <= window_end)
-                ]
-                
-                if not tracks_in_window.empty:
-                    plotted_tracks = False
-                    for track_id, track_data in tracks_in_window.groupby("track_id"):
-                        track_data = track_data.sort_values("datetime")
-                        label = 'FOXES Tracks' if not plotted_tracks else None
-                        ax.plot(track_data["datetime"], track_data["sum_flux"], 
-                                color='grey', linewidth=0.8, alpha=0.4, label=label)
-                        plotted_tracks = True
-            
-            if predictions_df is not None:
-                preds_in_window = predictions_df[
-                    (predictions_df["timestamp"] >= window_start) &
-                    (predictions_df["timestamp"] <= window_end)
-                ].copy()
-                
-                if not preds_in_window.empty:
-                    has_data = True
-                    if 'groundtruth' in preds_in_window.columns:
-                        ax.plot(preds_in_window["timestamp"], preds_in_window['groundtruth'],
-                               'k-', linewidth=1.5, alpha=0.8, label='GOES Ground Truth')
-                    if 'predictions' in preds_in_window.columns:
-                        ax.plot(preds_in_window["timestamp"], preds_in_window['predictions'],
-                               'r--', linewidth=1.5, alpha=0.8, label='FOXES Prediction')
-            
-            # Mark HEK event
-            color = obs_colors.get(obs, 'purple')
-            ax.axvline(peak_time, color=color, linestyle=':', linewidth=2, label=f'{obs} Peak')
-            
-            if not pd.isna(start_time) and not pd.isna(end_time):
-                ax.axvspan(start_time, end_time, alpha=0.15, color=color, label='HEK Event Duration')
-            
-            # Add GOES class annotation
-            if goes_class:
-                y_pos = ax.get_ylim()[1] * 0.9 if has_data else 0.9
-                ax.annotate(f'{goes_class}', (peak_time, y_pos),
-                           xytext=(0, -10), textcoords='offset points',
-                           ha='center', va='top', fontsize=12, color=color, weight='bold',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor=color))
-            
-            ax.set_xlim(window_start, window_end)
-            if has_data:
-                ax.set_yscale('log')
-                ax.set_ylim(bottom=1e-7)
-            ax.set_ylabel('Flux', fontsize=12)
-            ax.set_xlabel('Time (UTC)', fontsize=12)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
-            ax.legend(loc='upper left', fontsize=12, framealpha=1)
-            ax.grid(True, alpha=0.3)
-            
-            title_parts = ["HEK Only (Not detected by FOXES)",
-                          f"Peak: {peak_time.strftime('%Y-%m-%d %H:%M')}"]
-            if goes_class:
-                title_parts.append(f"Class: {goes_class}")
-            if obs:
-                title_parts.append(f"Source: {obs}")
-            
-            fig.suptitle(" | ".join(title_parts), fontsize=14, y=0.95)
-            plt.tight_layout()
-            
-            filename = f"hek_only_{peak_time.strftime('%Y%m%d_%H%M%S')}_{obs}.png"
-            plt.savefig(hek_only_dir / filename, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            plots_created += 1
-            
-        except Exception as e:
-            print(f"Error creating HEK-only plot: {e}")
-            continue
-    
-    print(f"Created {plots_created} HEK-only plots in {hek_only_dir}")
 
 
 # =============================================================================
@@ -3709,38 +2575,28 @@ def build_flare_catalog(config: FlareAnalysisConfig, output_dir: Optional[Path] 
     
     # Step 1: Detect tracked regions
     print("\n=== Step 1: Detecting and tracking regions ===")
-    flare_events_df = analyzer.detect_flare_events()
+    tracked_regions_df = analyzer.record_individual_timestamps()
     
-    # Ensure flare_events_df is a valid DataFrame with required columns
-    if flare_events_df is None:
-        flare_events_df = pd.DataFrame()
-    if flare_events_df.empty:
-        print("Warning: No flare events detected. Creating empty DataFrame with required columns.")
-        flare_events_df = pd.DataFrame(columns=['track_id', 'timestamp', 'datetime', 'sum_flux', 
+    # Ensure tracked_regions_df is a valid DataFrame with required columns
+    if tracked_regions_df is None:
+        tracked_regions_df = pd.DataFrame()
+    if tracked_regions_df.empty:
+        print("Warning: No tracked regions detected. Creating empty DataFrame with required columns.")
+        tracked_regions_df = pd.DataFrame(columns=['track_id', 'timestamp', 'datetime', 'sum_flux', 
                                                 'centroid_img_x', 'centroid_img_y', 'centroid_patch_x', 
                                                 'centroid_patch_y', 'region_size', 'max_flux'])
-
-    # Detect simultaneous flares from region-level events (optional)
-    if config.enable_simultaneous_flares:
-        print("\n=== Step 1b: Detecting simultaneous flares ===")
-        simultaneous_flares_df = analyzer.detect_simultaneous_flares(
-            threshold=config.simultaneous_flare_threshold,
-            sequence_window_hours=config.sequence_window_hours,
-        )
-    else:
-        print("\n=== Step 1b: Simultaneous flare detection disabled in config ===")
-        simultaneous_flares_df = pd.DataFrame()
-    
-    # Step 2: Build individual flare events
+    # Step 2: Build individual flare events from tracks
     print("\n=== Step 2: Building flare events from tracks ===")
-    flare_events = build_flare_events(flare_events_df, config)
+    flare_events = build_flare_events(tracked_regions_df, config)
     
-    # Step 3: Apply quality filters
-    print("\n=== Step 3: Applying quality filters ===")
-    filtered_events = filter_flare_events(flare_events, config)
-    
-    # Step 4: Load HEK catalog
-    print("\n=== Step 4: Loading HEK catalog ===")
+    # Convert list of events to DataFrame
+    if flare_events:
+        flare_events_df = pd.DataFrame(flare_events)
+    else:
+        flare_events_df = pd.DataFrame()
+
+    # Step 3: Load HEK catalog
+    print("\n=== Step 3: Loading HEK catalog ===")
     min_flux = goes_class_to_flux(config.min_goes_class)
     
     hek_save_path = None
@@ -3757,18 +2613,18 @@ def build_flare_catalog(config: FlareAnalysisConfig, output_dir: Optional[Path] 
     )
     
     if hek_df is not None and not hek_df.empty:
-        hek_df = normalize_hek_catalog(hek_df, min_flux)
+        hek_df = process_hek_catalog_entries(hek_df, min_flux)
     
-    # Step 5: Match to HEK
-    print("\n=== Step 5: Matching to HEK catalog ===")
+    # Step 4: Match to HEK
+    print("\n=== Step 4: Matching to HEK catalog ===")
     catalog_df, hek_only_df = match_events_to_hek(
-        filtered_events,
+        flare_events_df,
         hek_df,
         match_window_minutes=config.hek_match_window_minutes,
         magnitude_tolerance=1.0,  # Fixed internal default
     )
     
-    return catalog_df, hek_only_df, flare_events_df, simultaneous_flares_df, hek_df, analyzer
+    return catalog_df, hek_only_df, tracked_regions_df, hek_df, analyzer
 
 def setup_barlow_font():
     """Setup Barlow font for matplotlib plots"""
@@ -3893,7 +2749,7 @@ def main() -> None:
     print(f"Created: {output_dir}")
     
     # Run analysis (pass output_dir for saving region labels)
-    catalog_df, hek_only_df, flare_events_df, simultaneous_flares_df, hek_df, analyzer = build_flare_catalog(config, output_dir)
+    catalog_df, hek_only_df, tracked_regions_df, hek_df, analyzer = build_flare_catalog(config, output_dir)
     
     # Save CSVs
     print(f"\n=== Saving CSV Catalogs ===")
@@ -3950,17 +2806,6 @@ def main() -> None:
     if not catalog_df.empty:
         catalog_df.to_csv(output_dir / "flare_events_all_foxes.csv", index=False)
 
-    # Save simultaneous flare summary (region-level) if enabled and present
-    if config.enable_simultaneous_flares and simultaneous_flares_df is not None and not simultaneous_flares_df.empty:
-        sim_path = output_dir / "simultaneous_flares_summary.csv"
-        simultaneous_flares_df.to_csv(sim_path, index=False)
-        num_sequences = simultaneous_flares_df["sequence_id"].nunique()
-        num_groups = simultaneous_flares_df["group_id"].nunique()
-        print(f"\n=== Simultaneous Flare Summary ===")
-        print(f"  Timestamps with simultaneous flares: {num_groups}")
-        print(f"  Simultaneous flare sequences: {num_sequences}")
-        print(f"  Total simultaneous events: {len(simultaneous_flares_df)}")
-        print(f"  Saved summary to: {sim_path}")
     
     # Summary
     print(f"\n=== Event Summary ===")
@@ -3969,29 +2814,6 @@ def main() -> None:
     print(f"    - Matched time only: {len(matched_to)}")
     print(f"    - FOXES-only: {len(foxes_only)}")
     print(f"  HEK-only (missed, with coverage): {len(hek_only_filtered)}")
-    
-    # Create plots
-    if config.create_plots:
-        print(f"\n=== Creating Plots ===")
-        plots_dir = output_dir / "plots"
-        create_sxr_plots(
-            catalog_df,
-            flare_events_df,
-            plots_dir,
-            config,
-            predictions_csv=config.predictions_csv,
-        )
-        
-        # Create HEK-only plots (already filtered)
-        if not hek_only_filtered.empty:
-            create_hek_only_plots(
-                hek_only_filtered,
-                plots_dir,
-                config,
-                predictions_csv=config.predictions_csv,
-                flare_events_df=flare_events_df,
-            )
-    
     # Create movie
     if getattr(config, 'create_movie', False):
         print(f"\n=== Creating Movie ===")
@@ -4023,7 +2845,7 @@ def main() -> None:
         
         movie_path = create_flare_movie(
             catalog_df,
-            flare_events_df,
+            tracked_regions_df,
             output_dir,
             config,
             predictions_csv=config.predictions_csv,

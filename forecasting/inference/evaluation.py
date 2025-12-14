@@ -39,11 +39,16 @@ def setup_barlow_font():
         else:
             # Try alternative approach - directly specify font file
             barlow_path = '/usr/share/fonts/truetype/barlow/Barlow-Regular.ttf'
+            barlow_path2 = '/Users/griffingoodwin/Library/Fonts/Barlow-Regular.otf'
             if os.path.exists(barlow_path):
                 # Add the font file directly to matplotlib
                 fm.fontManager.addfont(barlow_path)
                 rcParams['font.family'] = 'Barlow'
                 print(f"Using Barlow font from: {barlow_path}")
+            elif os.path.exists(barlow_path2):
+                fm.fontManager.addfont(barlow_path2)
+                rcParams['font.family'] = 'Barlow'
+                print(f"Using Barlow font from: {barlow_path2}")
             else:
                 # Fallback to sans-serif
                 rcParams['font.family'] = 'sans-serif'
