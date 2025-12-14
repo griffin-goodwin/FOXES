@@ -21,8 +21,8 @@ paths:
 # Time Range
 # -----------------------------------------------------------------------------
 time_range:
-  start: "2023-07-11T03:00:00"
-  end: "2023-07-11T04:59:59"
+  start: "2023-07-11T02:00:00"
+  end: "2023-07-12T4:59:59"
   auto_fetch_hek: true
 
 # -----------------------------------------------------------------------------
@@ -32,30 +32,28 @@ detection:
   # Minimum GOES class for catalog (filters weak events)
   min_goes_class: "B1.0"
   
-  # Flux threshold for region detection
+  # Flux threshold for flaring regions ()
   min_flux_threshold: 0.000000001  # 1e-10
   
   # Peak/region detection parameters
-  threshold_std_multiplier: 4  # For initial flux mask (higher = stricter)
+  threshold_std_multiplier: 3  # For initial flux mask (higher = stricter)
   
   
   # Spatial smoothing (reduces noise, stabilizes region boundaries)
-  spatial_smoothing_sigma: 1    # Gaussian sigma for smoothing (0 = disabled)
+  spatial_smoothing_sigma: 2    # Gaussian sigma for smoothing (0 = disabled)
   
   # Radial expansion from peaks (regions grow outward until flux drops)
   radial_expansion_threshold_percentile: 50  # Percentile of flux values for growth cutoff (0-100)
   
   # Peak stability filters
-  peak_prominence_ratio: 1  # Peak must be this multiple of neighborhood mean (1.0 = disabled)
   min_peak_distance: 0  # Minimum patches between peaks; closer peaks merge (0 = disabled)
   
   # Multi-scale peak detection (handles ARs of different sizes)
   # Note: All sizes are in PATCHES on the 64x64 grid, not image pixels
   peak_neighborhood_size: null      # Local max window size (patches)
-  multiscale_peak_detection: true  # Enable multi-scale detection
   peak_neighborhood_sizes: [4, 8, 12, 16, 20]  # Kernel sizes in patches
-  peak_min_scale_agreement: 4  # Peak must appear at this many scales to be kept
-  peak_scale_tolerance: 2  # Patch tolerance for matching peaks across scales
+  peak_min_scale_agreement: 3  # Peak must appear at this many scales to be kept
+  peak_scale_tolerance: 3  # Patch tolerance for matching peaks across scales
   
   # HEK matching
   hek_match_window_minutes: 5.0
@@ -78,13 +76,9 @@ peak_detection:
 # -----------------------------------------------------------------------------
 tracking:
   max_tracking_distance: 10       # Max pixel distance between frames
-  max_time_gap_minutes: 30.0     # Max gap to bridge (2 hours)
-  flare_distance_relax_factor: 4.5  # Distance multiplier for flaring regions
-  
-  
-  # Temporal smoothing (exponential moving average)
-  flux_smoothing_alpha: 1      # EMA alpha (0-1, higher = more responsive to changes)
-
+  distance_weight: 1.0          # Weight for spatial distance in tracking
+  flux_ratio_weight: 1.0          # Weight for flux similarity in tracking
+  size_ratio_weight: 0.5          # Weight for size similarity in tracking
 # -----------------------------------------------------------------------------
 # Event Quality Filters
 # -----------------------------------------------------------------------------
@@ -135,5 +129,5 @@ movie:
   fps: 30.0  # Frames per second for movie
   frame_interval_minutes: 1  # Time between frames (minutes)
   num_workers: 20  # Number of parallel workers for frame generation
-  dpi: 100                    # DPI for frames (lower = faster, 75 is good for video)
+  dpi: 400                    # DPI for frames (lower = faster, 75 is good for video)
   frame_format: "png"         # "jpg" (faster) or "png" (higher quality, slower)
