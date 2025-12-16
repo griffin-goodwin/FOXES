@@ -134,7 +134,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
     model_type = detect_model_type(checkpoint_path)
     
     # Create output directory
-    output_dir = f"/data/FOXES_Data/batch_results/{model_name}"
+    output_dir = f"/Volumes/T9/FOXES_Data/paper_res/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{output_dir}/weights", exist_ok=True)
     
@@ -226,7 +226,7 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
         },
         'evaluation': {
             'output_dir': output_dir,
-            'sxr_cutoff': 1e-9 if not prediction_only else None
+            'sxr_cutoff': 1e-10 if not prediction_only else None
         },
         'time_range': {
             'start_time': '2023-08-08T20:00:00',
@@ -354,7 +354,7 @@ def main():
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
     parser.add_argument('-prediction_only', action='store_true', help='Force prediction-only mode (no SXR ground truth)')
-    parser.add_argument('-regression_background', type=str, choices=['black', 'white'], default='black',
+    parser.add_argument('-regression_background', type=str, choices=['black', 'white'], default='white',
                         help='Background color for regression plots (default: black)')
     
     args = parser.parse_args()
