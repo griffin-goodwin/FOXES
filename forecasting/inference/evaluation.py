@@ -357,10 +357,10 @@ class SolarFlareEvaluator:
         theme = 'white' if self.plot_background in ('white', 'light') else 'black'
         axis_facecolor = '#FFFFFF' if theme == 'white' else '#FFFFFF'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
-        legend_facecolor = '#F5F5F5' if theme == 'white' else '#1E1E2F'
+        legend_facecolor = '#FFFFFF' if theme == 'white' else '#1E1E2F'
         grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
         minor_grid_color = '#E6E6E6' if theme == 'white' else '#1F1F35'
-        legend_edge_color = '#BABABA' if theme == 'white' else '#3A3A5A'
+        legend_edge_color = 'black' if theme == 'white' else '#3A3A5A'
         colorbar_facecolor = axis_facecolor
         figure_facecolor = '#FFFFFF' if theme == 'white' else '#000000'
 
@@ -456,7 +456,7 @@ class SolarFlareEvaluator:
         max_val = max(max(self.y_true), max(self.y_pred))
         log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 100)
 
-        shared_norm = LogNorm(vmin=1, vmax=None)
+        shared_norm = LogNorm(vmin=1, vmax=1000)
 
         # Create figure with transparent background but solid plot area
         fig, (ax1) = plt.subplots(1, 1, figsize=(10, 6))
@@ -465,8 +465,8 @@ class SolarFlareEvaluator:
         fig.patch.set_alpha(1.0)
 
         # Main model plot (1-to-1 with MAE contours)
-        min_val = min(min(self.y_true), min(self.y_pred))
-        max_val = max(max(self.y_true), max(self.y_pred))
+        min_val = min(min(self.y_true), min(self.y_pred)) * 0.9
+        max_val = max(max(self.y_true), max(self.y_pred)) * 1.1
 
         # Perfect prediction line
         ax1.plot([min_val, max_val], [min_val, max_val],
@@ -500,7 +500,7 @@ class SolarFlareEvaluator:
         #ax1.set_title(title, fontsize=16, color='white', pad=20, fontfamily='Barlow')
         
         # Style the legend
-        legend = ax1.legend(loc='upper left', frameon=True, fancybox=True, shadow=True,
+        legend = ax1.legend(loc='upper left',
                             prop={'family': 'Barlow', 'size': 12})
         legend.get_frame().set_facecolor(legend_facecolor)
         legend.get_frame().set_edgecolor(legend_edge_color)
