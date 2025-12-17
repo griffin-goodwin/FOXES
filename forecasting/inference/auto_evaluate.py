@@ -229,9 +229,9 @@ def create_evaluation_config(model_name, output_dir, base_data_dir="/mnt/data/NO
             'sxr_cutoff': 1e-10 if not prediction_only else None
         },
         'time_range': {
-            'start_time': '2023-08-08T20:00:00',
-            'end_time': '2023-08-08T23:59:00',
-            'interval_minutes': 1
+            'start_time': '2023-08-05T21:00:00',
+            'end_time': '2023-08-05T23:59:00',
+            'interval_minutes': 5
         },
         'plotting': {
             'figure_size': [12, 8],
@@ -354,7 +354,7 @@ def main():
     parser.add_argument('-skip_inference', action='store_true', help='Skip inference and only run evaluation')
     parser.add_argument('-skip_evaluation', action='store_true', help='Skip evaluation and only run inference')
     parser.add_argument('-prediction_only', action='store_true', help='Force prediction-only mode (no SXR ground truth)')
-    parser.add_argument('-regression_background', type=str, choices=['black', 'white'], default='white',
+    parser.add_argument('-regression_background', type=str, choices=['black', 'white'], default='black',
                         help='Background color for regression plots (default: black)')
     
     args = parser.parse_args()
