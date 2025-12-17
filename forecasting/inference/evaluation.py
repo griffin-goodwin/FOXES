@@ -783,8 +783,7 @@ class SolarFlareEvaluator:
             attention_data = self.load_attention_map(timestamp)
 
             if aia_data is None:
-                print(f"Worker {os.getpid()}: Skipping {timestamp} (missing AIA data)")
-                return None
+                print(f"Worker {os.getpid()}: AIA data missing for {timestamp}, generating SXR-only frame")
 
             # Get SXR data from CSV
             sxr_window, sxr_current, target_time = self.get_sxr_data_for_timestamp(timestamp)
@@ -795,39 +794,51 @@ class SolarFlareEvaluator:
             # Setup Barlow font
             setup_barlow_font()
 
-            # Create figure with transparent background
-            fig = plt.figure(figsize=(10, 5))
-            fig.patch.set_alpha(0.0)  # Transparent background
-            gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.1)
+            # Determine theme (black/white) for frame generation
+            theme = (self.plot_background or 'black').lower()
+            is_dark = theme == 'black'
 
-            # Right gridspec for SXR plot (column 3) with more padding
-            gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0.1)
+            # Create figure (we'll control saved background via savefig)
+            # Adjust figure size and layout based on whether AIA data is available
+            if attention_data is None:
+                # SXR-only layout - wider plot
+                fig = plt.figure(figsize=(10, 5))
+                fig.patch.set_alpha(0.0)  # Keep transparent canvas; background decided at save
+                gs_right = fig.add_gridspec(2, 1, left=0.1, right=0.95, hspace=0.1)
+            else:
+                # Full layout with AIA and SXR
+                fig = plt.figure(figsize=(10, 5))
+                fig.patch.set_alpha(0.0)
+                gs_left = fig.add_gridspec(1, 1, left=0.0, right=0.35, width_ratios=[1], hspace=0, wspace=0.1)
 
-            wavs = ['94', '131', '171', '193', '211', '304']
-            att_max = np.percentile(attention_data, 100)
-            att_min = np.percentile(attention_data, 0)
-            att_norm = AsinhNorm(vmin=att_min, vmax=att_max, clip=False)
-            max_attention_idx = np.unravel_index(np.argmax(attention_data), attention_data.shape)
+                # Right gridspec for SXR plot (column 3) with more padding
+                gs_right = fig.add_gridspec(2, 1, left=0.45, right=1, hspace=0.1)
 
-            row = 0
-            col = 0
-            ax = fig.add_subplot(gs_left[row, col])
+                wavs = ['94', '131', '171', '193', '211', '304']
+                att_max = np.percentile(attention_data, 100)
+                att_min = np.percentile(attention_data, 0)
+                att_norm = AsinhNorm(vmin=att_min, vmax=att_max, clip=False)
+                max_attention_idx = np.unravel_index(np.argmax(attention_data), attention_data.shape)
 
-            aia_img = aia_data[1]
+                row = 0
+                col = 0
+                ax = fig.add_subplot(gs_left[row, col])
 
-            ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
-            ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5,norm=att_norm)
+                aia_img = aia_data[1]
 
-            ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow', color='white')
-            ax.axis('off')
+                ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
+                ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5,norm=att_norm)
+
+                ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+                ax.axis('off')
 
 
             # Plot SXR data with uncertainty bands
             sxr_ax = fig.add_subplot(gs_right[:, 0])
             
-            # Set SXR plot background to have light background inside plot area
-            sxr_ax.set_facecolor('#FFEEE6')  # Light background for SXR plot area
-            sxr_ax.patch.set_alpha(1.0)      # Make axes patch opaque
+            # Set SXR plot background by theme
+            sxr_ax.set_facecolor('#1E1E1E' if is_dark else '#FFFFFF')
+            sxr_ax.patch.set_alpha(1.0)
 
             if sxr_window is not None and not sxr_window.empty:
                 # Plot ground truth (no uncertainty)
@@ -846,7 +857,7 @@ class SolarFlareEvaluator:
 
                 # Plot model predictions with uncertainty bands
                 model_label = 'Baseline Model' if self.baseline_only_mode else 'FOXES Model'
-                model_color = "#94ECBE" if self.baseline_only_mode else "#C0B9DD"
+                model_color = ("#94ECBE" if self.baseline_only_mode else "#C0B9DD")
                 sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
                                                   label=model_label, linewidth=2.5, alpha=1, markersize=5,
                                                   color=model_color)
@@ -860,7 +871,7 @@ class SolarFlareEvaluator:
 
                 # Mark current time
                 if sxr_current is not None:
-                    sxr_ax.axvline(target_time, color='black', linestyle='--',
+                    sxr_ax.axvline(target_time, color=('white' if is_dark else 'black'), linestyle='--',
                                    linewidth=2, alpha=0.4, label='Current Time')
 
                     # Create info text with all available values
@@ -884,41 +895,42 @@ class SolarFlareEvaluator:
 
                     info_text = "\n".join(info_lines)
                     sxr_ax.text(0.02, 0.98, info_text, transform=sxr_ax.transAxes,
-                                fontsize=8, verticalalignment='top', fontfamily='Barlow',
-                                bbox=dict(boxstyle='round', alpha=0.9, facecolor='#FFEEE6'))
+                                fontsize=12, verticalalignment='top', fontfamily='Barlow',
+                                color=('white' if is_dark else 'black'),
+                                bbox=dict(boxstyle='round', alpha=0.9, facecolor=('#2B2B2B' if is_dark else '#FFFFFF')))
 
                 sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
                 sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
-                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow', color='white')
-                sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color='white')
+                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+                sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
                 title = 'Baseline Prediction vs. Ground Truth Comparison' if self.baseline_only_mode else 'FOXES Prediction vs. Ground Truth Comparison'
-                sxr_ax.set_title(title, fontsize=12, fontfamily='Barlow', color='white')
+                sxr_ax.set_title(title, fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
                 
                 # Style the legend to match regression plot
-                legend1 = sxr_ax.legend(fontsize=8, loc='upper right', prop={'family': 'Barlow', 'size': 8})
-                legend1.get_frame().set_facecolor('#FFEEE6')
-                legend1.get_frame().set_alpha(0.9)
+                legend1 = sxr_ax.legend(fontsize=12, loc='upper right', prop={'family': 'Barlow', 'size': 12})
+                legend1.get_frame().set_facecolor('#2B2B2B' if is_dark else '#FFFFFF')
+                legend1.get_frame().set_edgecolor('#2B2B2B' if is_dark else 'black')
                 for text in legend1.get_texts():
-                    text.set_color('black')
+                    text.set_color('white' if is_dark else 'black')
                     text.set_fontfamily('Barlow')
                 
-                sxr_ax.grid(True, alpha=0.3, color='black')
-                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors='white', 
+                sxr_ax.grid(True, alpha=0.3, color=('white' if is_dark else 'black'))
+                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors=('white' if is_dark else 'black'), 
                                 )
-                sxr_ax.tick_params(axis='y', labelsize=12, colors='white',
+                sxr_ax.tick_params(axis='y', labelsize=12, colors=('white' if is_dark else 'black'),
                                 )
                 
-                # Set tick labels to Barlow font and white color
+                # Set tick labels to Barlow font and theme color
                 for label in sxr_ax.get_xticklabels():
                     label.set_fontfamily('Barlow')
-                    label.set_color('white')
+                    label.set_color('white' if is_dark else 'black')
                 for label in sxr_ax.get_yticklabels():
                     label.set_fontfamily('Barlow')
-                    label.set_color('white')
+                    label.set_color('white' if is_dark else 'black')
                 
-                # Set graph border (spines) to white
+                # Set graph border (spines) to theme color
                 for spine in sxr_ax.spines.values():
-                    spine.set_color('white')
+                    spine.set_color('white' if is_dark else 'black')
                 try:
                     sxr_ax.set_yscale('log')
                 except:
@@ -926,9 +938,11 @@ class SolarFlareEvaluator:
             else:
                 sxr_ax.text(0.5, 0.5, 'No SXR Data\nAvailable',
                             transform=sxr_ax.transAxes, fontsize=12, fontfamily='Barlow',
+                            color=('white' if is_dark else 'black'),
                             horizontalalignment='center', verticalalignment='center')
-                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow')
-            plt.savefig(save_path, dpi=500, facecolor='none',bbox_inches='tight')
+                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+            # Save with explicit background matching theme
+            plt.savefig(save_path, dpi=500, facecolor=('black' if is_dark else 'white'), bbox_inches='tight')
             plt.close()
 
             print(f"Worker {os.getpid()}: Completed {timestamp}")
