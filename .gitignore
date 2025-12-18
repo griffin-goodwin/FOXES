@@ -157,3 +157,6 @@ notebooks_tests/
 /.vscode/
 
 *.code-workspace
+.idea
+.xml
+.iml
