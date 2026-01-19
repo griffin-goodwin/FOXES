@@ -5,7 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$" isTestSource="false" />
       <excludePattern pattern="*/T9/*" />
     </content>
-    <content url="file:///Volumes/T9/FOXES_Data">
+    <content url="file:///Volumes/T9">
       <excludeFolder url="file:///Volumes/T9/FOXES_Data" />
     </content>
     <orderEntry type="jdk" jdkName="foxes" jdkType="Python SDK" />
