@@ -358,8 +358,8 @@ class SolarFlareEvaluator:
         axis_facecolor = '#FFFFFF' if theme == 'white' else '#FFFFFF'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
         legend_facecolor = '#FFFFFF' if theme == 'white' else '#1E1E2F'
-        grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
-        minor_grid_color = '#E6E6E6' if theme == 'white' else '#1F1F35'
+        grid_color = 'grey'
+        minor_grid_color = 'grey'
         legend_edge_color = 'black' if theme == 'white' else '#3A3A5A'
         colorbar_facecolor = axis_facecolor
         figure_facecolor = '#FFFFFF' if theme == 'white' else '#000000'
@@ -386,10 +386,10 @@ class SolarFlareEvaluator:
             for class_name, (min_flux, max_flux) in flare_classes.items():
                 if min_flux >= min_val and min_flux <= max_val:
                     flare_positions.append(min_flux)
-                    flare_labels.append(f'{class_name}')
+                    flare_labels.append(f'{min_flux:.0e}')
                 if max_flux >= min_val and max_flux <= max_val and max_flux != min_flux:
                     flare_positions.append(max_flux)
-                    flare_labels.append(f'{class_name}')
+                    flare_labels.append(f'{max_flux:.0e}')
 
             if flare_positions:
                 ax_top.set_xticks(flare_positions)
@@ -452,10 +452,28 @@ class SolarFlareEvaluator:
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
                                         alpha=0.75,color=color)
 
+        # Main model plot (1-to-1 with MAE contours)
         min_val = min(min(self.y_true), min(self.y_pred))
         max_val = max(max(self.y_true), max(self.y_pred))
-        log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 100)
 
+        # Enforce realistic minimum at 1e-8 (A1.0 flare class threshold)
+        min_val = max(min_val, 1e-8)
+
+        # Enforce realistic maximum at 1e-2 (beyond X10 class)
+        max_val = min(max_val, 1e-2)
+
+        # Add small buffer (5% on log scale)
+        log_range = np.log10(max_val) - np.log10(min_val)
+        buffer = 0.05 * log_range
+
+        min_val = 10 ** (np.log10(min_val) - buffer)
+        max_val = 10 ** (np.log10(max_val) + buffer)
+
+        # Ensure limits stay within realistic bounds after buffer, but allow a bit below 1e-8 for padding
+        min_val = max(min_val, 0.5e-8)
+        max_val = min(max_val, 1e-2)
+
+        log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 100)
         shared_norm = LogNorm(vmin=1, vmax=1000)
 
         # Create figure with transparent background but solid plot area
@@ -464,17 +482,15 @@ class SolarFlareEvaluator:
         fig.patch.set_facecolor(figure_facecolor)
         fig.patch.set_alpha(1.0)
 
-        # Main model plot (1-to-1 with MAE contours)
-        min_val = min(min(self.y_true), min(self.y_pred)) * 0.9
-        max_val = max(max(self.y_true), max(self.y_pred)) * 1.1
-
         # Perfect prediction line
         ax1.plot([min_val, max_val], [min_val, max_val],
                 label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
 
         # 2D histogram
+        cmap = plt.get_cmap("icefire").copy()
+        cmap.set_bad(alpha=0)
         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-                        cmap="bone", norm=shared_norm, alpha=1)
+                        cmap=cmap, norm=shared_norm, alpha=1)
 
         # Draw MAE contours on main plot
         draw_mae_contours(ax1, min_val, max_val)
@@ -482,6 +498,9 @@ class SolarFlareEvaluator:
         # Set plot area background to dark blue-purple that complements fire colormap
         ax1.set_facecolor(axis_facecolor)
         ax1.patch.set_alpha(1.0)
+
+        ax1.set_xlim(min_val, max_val)
+        ax1.set_ylim(min_val, max_val)
 
         # Set labels and styling
         ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)', fontsize=14, color=text_color, fontfamily='Barlow')
@@ -526,7 +545,7 @@ class SolarFlareEvaluator:
         add_flare_class_axes(ax1, min_val, max_val, text_color)
 
         # Colorbar styling
-        cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)
+        cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.15)
         cbar.ax.yaxis.set_tick_params(labelsize=12, colors=text_color)
         cbar.set_label("Count", fontsize=14, color=text_color, fontfamily='Barlow')
         cbar.ax.tick_params(colors=text_color)
@@ -900,7 +919,7 @@ class SolarFlareEvaluator:
                                 bbox=dict(boxstyle='round', alpha=0.9, facecolor=('#2B2B2B' if is_dark else '#FFFFFF')))
 
                 sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
-                sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
+                #sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
                 sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
                 sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
                 title = 'Baseline Prediction vs. Ground Truth Comparison' if self.baseline_only_mode else 'FOXES Prediction vs. Ground Truth Comparison'
