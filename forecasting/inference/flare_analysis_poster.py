@@ -1818,28 +1818,28 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         ax_aia = fig.add_subplot(gs[0, 0])  # Left column
         ax_sxr = fig.add_subplot(gs[0, 1])  # Right column
         
-        # Set backgrounds: AIA stays black, SXR uses tan theme
+        # Set backgrounds: AIA stays black
         ax_aia.set_facecolor('black')
-        ax_sxr.set_facecolor('white')  # Tan color for SXR plot face
+        ax_sxr.set_facecolor('white')  # Lighter black/dark gray for SXR plot
         
         # Set text colors for dark background
-        ax_aia.tick_params(colors='black', labelsize=10)
-        ax_sxr.tick_params(colors='black', labelsize=10)
+        ax_aia.tick_params(colors='white', labelsize=10)
+        ax_sxr.tick_params(colors='white', labelsize=10)
         # Make minor ticks white as well
-        ax_aia.tick_params(which='minor', colors='black')
-        ax_sxr.tick_params(which='minor', colors='black')
-        ax_aia.xaxis.label.set_color('black')
-        ax_aia.yaxis.label.set_color('black')
-        ax_sxr.xaxis.label.set_color('black')
-        ax_sxr.yaxis.label.set_color('black')
-        ax_aia.title.set_color('black')
-        ax_sxr.title.set_color('black')
+        ax_aia.tick_params(which='minor', colors='white')
+        ax_sxr.tick_params(which='minor', colors='white')
+        ax_aia.xaxis.label.set_color('white')
+        ax_aia.yaxis.label.set_color('white')
+        ax_sxr.xaxis.label.set_color('white')
+        ax_sxr.yaxis.label.set_color('white')
+        ax_aia.title.set_color('white')
+        ax_sxr.title.set_color('white')
         
         # Set spine colors
         for spine in ax_aia.spines.values():
-            spine.set_color('black')
+            spine.set_color('white')
         for spine in ax_sxr.spines.values():
-            spine.set_color('black')
+            spine.set_color('white')
         
         # Calculate time window (needed for both plots)
         window_start = current_time - pd.Timedelta(hours=plot_window_hours/2)
@@ -1882,10 +1882,10 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             blank_img = np.zeros((512, 512, 3))
             ax_aia.imshow(blank_img, origin='lower', aspect='equal')
         
-        ax_aia.set_xlabel('X (pixels)', fontsize=12, color='black')
-        ax_aia.set_ylabel('Y (pixels)', fontsize=12, color='black')
-        plt.setp(ax_aia.xaxis.get_majorticklabels(), color='black')
-        plt.setp(ax_aia.yaxis.get_majorticklabels(), color='black')
+        ax_aia.set_xlabel('X (pixels)', fontsize=12, color='white')
+        ax_aia.set_ylabel('Y (pixels)', fontsize=12, color='white')
+        plt.setp(ax_aia.xaxis.get_majorticklabels(), color='white')
+        plt.setp(ax_aia.yaxis.get_majorticklabels(), color='white')
         
         # Draw AR contours from pre-computed region labels (cached in memory during detection)
         region_labels = region_labels_cache.get(timestamp)
@@ -1954,16 +1954,16 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
             if is_active_flare:
                 # Large star for active flares (at peak brightness)
                 ax_aia.plot(marker_x, marker_y, '*', markersize=15, color=track_color, 
-                           markeredgecolor='black', markeredgewidth=2,alpha=0.7, 
+                           markeredgecolor='white', markeredgewidth=2,alpha=0.7, 
                            label=f'FOXES {track_id}' if len(plotted_tracks) <= 5 else None, zorder=15)
                 
                 # Format flux as scientific notation or GOES class
                 flux_str = f'{current_flux:.2e}' if current_flux > 0 else '0'
                 ax_aia.annotate(f'FOXES: {foxes_class}\nFlux: {flux_str}', (marker_x, marker_y),
                                xytext=(15, 15), textcoords='offset points',
-                               fontsize=11, color='black', weight='bold',
+                               fontsize=11, color='white', weight='bold',
                                bbox=dict(boxstyle='round,pad=0.4', facecolor=track_color, 
-                                       alpha=0.95, edgecolor='black', linewidth=2))
+                                       alpha=0.95, edgecolor='white', linewidth=2))
             else:
                 # Smaller colored circle for tracked regions (at peak brightness)
                 ax_aia.plot(marker_x, marker_y, 'o', markersize=12, color=track_color, 
@@ -2149,7 +2149,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                            label=f'Track {track_id} (Active)', zorder=4)
                 ax_sxr.scatter(track_data["datetime"], track_data["sum_flux"],
                              color=track_color, s=25, alpha=0.8, marker='o', 
-                             edgecolor='black', linewidth=0.5, zorder=4)
+                             edgecolor='white', linewidth=0.5, zorder=4)
             else:
                 # Non-active tracks: use track color with alpha based on flux
                 # Higher flux = higher alpha (more visible)
@@ -2189,17 +2189,17 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
         # SXR plot formatting
         ax_sxr.set_xlim(window_start, window_end)
         ax_sxr.set_yscale('log')
-        ax_sxr.set_ylabel('Flux (W/m²)', fontsize=12, color='black')
-        ax_sxr.set_xlabel('Time (UTC)', fontsize=12, color='black')
+        ax_sxr.set_ylabel('Flux (W/m²)', fontsize=12, color='white')
+        ax_sxr.set_xlabel('Time (UTC)', fontsize=12, color='white')
         ax_sxr.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         ax_sxr.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        plt.setp(ax_sxr.xaxis.get_majorticklabels(), rotation=0, ha='right', color='black')
-        plt.setp(ax_sxr.yaxis.get_majorticklabels(), color='black')
+        plt.setp(ax_sxr.xaxis.get_majorticklabels(), rotation=0, ha='right', color='white')
+        plt.setp(ax_sxr.yaxis.get_majorticklabels(), color='white')
         ax_sxr.legend(loc='lower right', fontsize=10, framealpha=0.9, ncol=1, 
-                     facecolor='white', edgecolor='black', labelcolor='black')
-        ax_sxr.grid(True, alpha=0.2, color='black', linestyle='--')
+                     facecolor='black', edgecolor='white', labelcolor='white')
+        ax_sxr.grid(True, alpha=0.3, color='black', linestyle='--')
         ax_sxr.set_title(f'SXR Timeseries — {current_time.strftime("%Y-%m-%d %H:%M:%S")}', 
-                        fontsize=12, color='black')
+                        fontsize=12, color='white')
         
         # Legend - deduplicate handles and labels
         handles, labels_legend = ax_aia.get_legend_handles_labels()
@@ -2214,7 +2214,7 @@ def _generate_single_frame(args: Tuple) -> Optional[str]:
                     unique_handles.append(handle)
                     unique_labels.append(label)
             ax_aia.legend(unique_handles, unique_labels, loc='upper right', fontsize=10, 
-                         framealpha=0.9, facecolor='white', edgecolor='black', labelcolor='black')
+                         framealpha=0.9, facecolor='black', edgecolor='white', labelcolor='white')
         
         # Overall title
         # num_foxes_active = len(active_foxes_flares) if not active_foxes_flares.empty else 0

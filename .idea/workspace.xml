@@ -4,29 +4,38 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="Implement dynamic theme-based plotting for regression output and tweak default parameters&#10;&#10;- Added theme-based (black/white) formatting for regression plots, impacting text, gridlines, legends, and backgrounds.&#10;- Adjusted layout to handle missing AIA data with specialized SXR-only frames.&#10;- Updated evaluation time ranges and plot intervals for better granularity.&#10;- Changed default regression plot background to black in CLI arguments.">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="e883d810-3b4e-470d-b72e-9ed3eee941a0" name="Changes" comment="Simplify and restructure README: streamlined project description, updated team details, clarified repository structure, removed redundant sections, and added Docker setup instructions.">
+      <change afterPath="$PROJECT_DIR$/cleanup_data.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/cleanup_data_mp.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/notebook_tests/Additional_Results_Analysis.ipynb" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/notebook_tests/Additional_Results_Investigation_Download.ipynb" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/notebook_tests/processing_utils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/FOXES.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/FOXES.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/FOXES_ML_Workflow.pdf" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/model_architecture.pdf" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/forecasting/inference/evaluation.py" beforeDir="false" afterPath="$PROJECT_DIR$/forecasting/inference/evaluation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/forecasting/inference/flare_analysis_poster.py" beforeDir="false" afterPath="$PROJECT_DIR$/forecasting/inference/flare_analysis_poster.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/forecasting/inference/local_config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/forecasting/inference/local_config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebook_tests/timelineplot.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebook_tests/timelineplot.ipynb" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_/Volumes/T9/FOXES_Data" value="300pTKGqQDgkIrymxlGIrm6ZrO3" />
+    </persistenceIdMap>
+  </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="99" />
+    <option name="cachedIndexableFilesCount" value="105" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
-        <option value="Jupyter Notebook" />
         <option value="Python Script" />
+        <option value="Jupyter Notebook" />
       </list>
     </option>
   </component>
@@ -39,10 +48,7 @@
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
-  &quot;lastFilter&quot;: {
-    &quot;state&quot;: &quot;OPEN&quot;,
-    &quot;assignee&quot;: &quot;griffin-goodwin&quot;
-  }
+  &quot;lastFilter&quot;: {}
 }</component>
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
@@ -50,6 +56,10 @@
     &quot;accountId&quot;: &quot;dd5815ef-d79a-4f68-9de1-d483f99a50dd&quot;
   }
 }</component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
   <component name="NamedScopeManager">
     <scope name="hide ._" pattern="!*.___*" />
   </component>
@@ -62,33 +72,42 @@
     <option name="showLibraryContents" value="true" />
     <option name="sortKey" value="BY_TIME_DESCENDING" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.mappings&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.symlinks&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.date&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.permissions&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.size&quot;: &quot;false&quot;,
-    &quot;com.google.cloudcode.ide_session_index&quot;: &quot;20251029_0000&quot;,
-    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
-    &quot;database.data.extractors.current.export.id&quot;: &quot;Comma-separated (CSV)_id&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/griffingoodwin/Documents/gitrepos/FOXES&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;junie.project.settings&quot;,
-    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
+    "WebServerToolWindowPanel.toolwindow.show.date": "false",
+    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
+    "WebServerToolWindowPanel.toolwindow.show.size": "false",
+    "ai.playground.ignore.import.keys.banner.in.settings": "true",
+    "com.google.cloudcode.ide_session_index": "20251029_0000",
+    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
+    "database.data.extractors.current.export.id": "Comma-separated (CSV)_id",
+    "git-widget-placeholder": "main",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "/Users/griffingoodwin/Documents/gitrepos/FOXES",
+    "node.js.detected.package.eslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable",
+    "to.speed.mode.migration.done": "true",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
+  <component name="RecapSpentCounter">
+    <option name="endsOfQuotaMs" value="1768932019187" />
+    <option name="spentUsd" value="0.032168448" />
+  </component>
+  <component name="RecapUselessUpdatesCounter">
+    <option name="suspendCountdown" value="0" />
+  </component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/flaring/forecasting/training" />
@@ -101,8 +120,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-PY-253.29346.142" />
+        <option value="bundled-python-sdk-f2b7a9f6281b-6e1f45a539f7-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.29346.142" />
       </set>
     </attachedChunks>
   </component>
@@ -163,15 +182,12 @@
       <workItem from="1765923830409" duration="95000" />
       <workItem from="1765923932850" duration="4525000" />
       <workItem from="1766071632234" duration="557000" />
-      <workItem from="1766072202434" duration="2196000" />
-    </task>
-    <task id="LOCAL-00005" summary="added requirements.txt">
-      <option name="closed" value="true" />
-      <created>1752777460454</created>
-      <option name="number" value="00005" />
-      <option name="presentableId" value="LOCAL-00005" />
-      <option name="project" value="LOCAL" />
-      <updated>1752777460454</updated>
+      <workItem from="1766072202434" duration="3172000" />
+      <workItem from="1767642746610" duration="7711000" />
+      <workItem from="1768318275660" duration="7100000" />
+      <workItem from="1768511581940" duration="1375000" />
+      <workItem from="1768590208522" duration="10356000" />
+      <workItem from="1768855583083" duration="4001000" />
     </task>
     <task id="LOCAL-00006" summary="added some nice animations and plots for analysis to plotting_test_results.ipynb">
       <option name="closed" value="true" />
@@ -557,7 +573,15 @@
       <option name="project" value="LOCAL" />
       <updated>1766005071312</updated>
     </task>
-    <option name="localTasksCounter" value="54" />
+    <task id="LOCAL-00054" summary="Simplify and restructure README: streamlined project description, updated team details, clarified repository structure, removed redundant sections, and added Docker setup instructions.">
+      <option name="closed" value="true" />
+      <created>1766078172890</created>
+      <option name="number" value="00054" />
+      <option name="presentableId" value="LOCAL-00054" />
+      <option name="project" value="LOCAL" />
+      <updated>1766078172890</updated>
+    </task>
+    <option name="localTasksCounter" value="55" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -602,7 +626,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="refactor model evaluation and configuration to include sxr norm; update model name to 'ViT'," />
     <MESSAGE value="Changed weights for ViT" />
     <MESSAGE value="Enhance AIA_GOESDataset to support cadence and reference time" />
     <MESSAGE value="Add oversampling functionality to AIA_GOESDataset and update configuration" />
@@ -627,7 +650,8 @@
     <MESSAGE value="Add in ViT ML Workflow illustration" />
     <MESSAGE value="updates" />
     <MESSAGE value="Implement dynamic theme-based plotting for regression output and tweak default parameters&#10;&#10;- Added theme-based (black/white) formatting for regression plots, impacting text, gridlines, legends, and backgrounds.&#10;- Adjusted layout to handle missing AIA data with specialized SXR-only frames.&#10;- Updated evaluation time ranges and plot intervals for better granularity.&#10;- Changed default regression plot background to black in CLI arguments." />
-    <option name="LAST_COMMIT_MESSAGE" value="Implement dynamic theme-based plotting for regression output and tweak default parameters&#10;&#10;- Added theme-based (black/white) formatting for regression plots, impacting text, gridlines, legends, and backgrounds.&#10;- Adjusted layout to handle missing AIA data with specialized SXR-only frames.&#10;- Updated evaluation time ranges and plot intervals for better granularity.&#10;- Changed default regression plot background to black in CLI arguments." />
+    <MESSAGE value="Simplify and restructure README: streamlined project description, updated team details, clarified repository structure, removed redundant sections, and added Docker setup instructions." />
+    <option name="LAST_COMMIT_MESSAGE" value="Simplify and restructure README: streamlined project description, updated team details, clarified repository structure, removed redundant sections, and added Docker setup instructions." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
