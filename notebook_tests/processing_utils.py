@@ -94,3 +94,108 @@ def process_file_sum(file_info):
     except Exception as e:
         print(f"Error loading {filename}: {e}")
         return None
+
+def analyze_all_channels_radial(aia_data):
+    """
+    Analyze radial distribution for all 7 channels
+    """
+    channels = ['94', '131', '171', '193', '211', '304', '335']
+    h, w = aia_data[0].shape
+    center_x, center_y = w // 2, h // 2
+    
+    y, x = np.ogrid[:h, :w]
+    distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+    max_radius = min(center_x, center_y)
+    normalized_distance = distance_from_center / max_radius
+    
+    n_bins = 10
+    bins = np.linspace(0, 1, n_bins + 1)
+    
+    results = {}
+    
+    for idx, chan_name in enumerate(channels):
+        channel = aia_data[idx]
+        radial_intensity = []
+        radial_bright_pixels = []
+        threshold = np.percentile(channel, 90)
+        
+        for i in range(n_bins):
+            mask = (normalized_distance >= bins[i]) & (normalized_distance < bins[i+1])
+            radial_intensity.append(np.mean(channel[mask]))
+            radial_bright_pixels.append(np.sum(channel[mask] > threshold))
+        
+        results[chan_name] = {
+            'intensities': np.array(radial_intensity),
+            'bright_pixels': np.array(radial_bright_pixels)
+        }
+        
+    return bins[:-1], results
+
+def analyze_ar_radial_distribution(aia_data, channel_idx=2):  # channel 2 = 171Å
+    """
+    Analyze if ARs are more concentrated near limb vs center
+    """
+    channel = aia_data[channel_idx]
+    h, w = channel.shape
+    center_x, center_y = w // 2, h // 2
+    
+    # Create distance map from center
+    y, x = np.ogrid[:h, :w]
+    distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+    
+    # Normalize distances to solar radius (0=center, 1=limb)
+    max_radius = min(center_x, center_y)
+    normalized_distance = distance_from_center / max_radius
+    
+    # Define radial bins
+    n_bins = 10
+    bins = np.linspace(0, 1, n_bins + 1)
+    
+    # Calculate mean intensity in each radial bin
+    radial_intensity = []
+    radial_bright_pixels = []
+    
+    # Threshold for "bright" pixels (adjust based on your data)
+    threshold = np.percentile(channel, 90)
+    
+    for i in range(n_bins):
+        mask = (normalized_distance >= bins[i]) & (normalized_distance < bins[i+1])
+        radial_intensity.append(np.mean(channel[mask]))
+        radial_bright_pixels.append(np.sum(channel[mask] > threshold))
+    
+    return bins[:-1], radial_intensity, radial_bright_pixels
+
+def process_single_file_radial(filename, data_path, channels, n_bins):
+    """Worker function for multiprocessing radial analysis"""
+    try:
+        aia_data = np.load(os.path.join(data_path, filename))
+        bins, results = analyze_all_channels_radial(aia_data)
+        return results
+    except Exception as e:
+        print(f"Error processing {filename}: {e}")
+        return None
+
+def process_single_file_radial_ratio(filename, data_path, channels, n_bins):
+    """Worker function for multiprocessing radial analysis - returns limb/center ratio"""
+    try:
+        aia_data = np.load(os.path.join(data_path, filename))
+        # Use 171A (idx 2) for AR distribution by default if multiple channels provided
+        # or analyze all and average if needed. Here we use idx 2 as in previous examples.
+        bins, radial_intensity, radial_bright_pixels = analyze_ar_radial_distribution(aia_data, channel_idx=2)
+        
+        # Compare inner half (0-0.5 radius) vs outer half (0.5-1.0 radius)
+        # n_bins is 10, so first 5 are center, last 5 are limb
+        center_activity = np.sum(radial_bright_pixels[:5])
+        limb_activity = np.sum(radial_bright_pixels[5:])
+        
+        ratio = limb_activity / center_activity if center_activity > 0 else np.nan
+        
+        return {
+            'filename': filename,
+            'center_activity': center_activity,
+            'limb_activity': limb_activity,
+            'limb_center_ratio': ratio
+        }
+    except Exception as e:
+        print(f"Error processing {filename}: {e}")
+        return None
