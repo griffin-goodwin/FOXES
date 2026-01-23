@@ -32,7 +32,7 @@ def setup_barlow_font():
         for font in fm.fontManager.ttflist:
             if 'barlow' in font.name.lower() or 'barlow' in font.fname.lower():
                 barlow_fonts.append(font.name)
-        
+
         if barlow_fonts:
             rcParams['font.family'] = 'Barlow'
             print(f"Using Barlow font: {barlow_fonts[0]}")
@@ -60,11 +60,11 @@ def setup_barlow_font():
 class SolarFlareEvaluator:
     """
     Comprehensive solar flare evaluation system with baseline model comparison capabilities.
-    
+
     This class provides functionality for evaluating solar flare prediction models by comparing
     their performance against ground truth data and baseline models. It includes quantitative
     metrics calculation, regression analysis visualization, and attention-based movie generation.
-    
+
     Key Features:
         - Performance metrics calculation (MSE, RMSE, MAE, R², Pearson correlation)
         - Flare class-specific analysis (A, B, C, M, X classes)
@@ -73,7 +73,7 @@ class SolarFlareEvaluator:
         - Attention map visualization with AIA imagery
         - Multi-process frame generation for efficient movie creation
     """
-    
+
     def __init__(self,
                  csv_path=None,
                  aia_dir=None,
@@ -102,7 +102,7 @@ class SolarFlareEvaluator:
         self.output_dir = output_dir
         self.sxr_cutoff = sxr_cutoff
         self.plot_background = (plot_background or 'black').lower()
-        
+
         # Determine if we're in baseline-only mode
         self.baseline_only_mode = (csv_path is None or not os.path.exists(csv_path)) and baseline_csv_path is not None
 
@@ -126,11 +126,11 @@ class SolarFlareEvaluator:
     def load_data(self):
         """
         Load and prepare all required data including baseline.
-        
+
         This method handles data loading for both regular comparison mode and baseline-only mode.
         It applies outlier filtering and SXR cutoff filtering as specified during initialization.
         Ground truth uncertainty is automatically calculated as 20% of the ground truth values.
-        
+
         Returns:
             None
         """
@@ -138,18 +138,18 @@ class SolarFlareEvaluator:
             # In baseline-only mode, use baseline data as the main data
             if self.baseline_csv_path and os.path.exists(self.baseline_csv_path):
                 self.df = pd.read_csv(self.baseline_csv_path)
-                outlier_threshold = 1 # 0.01
+                outlier_threshold = 1  # 0.01
                 self.mask = self.df['predictions'] < outlier_threshold
-                
+
                 # Apply SXR cutoff filter if specified
                 if self.sxr_cutoff is not None:
                     sxr_mask = self.df['groundtruth'] >= self.sxr_cutoff
                     self.mask = self.mask & sxr_mask
                     print(f"Applied SXR cutoff filter: ground truth >= {self.sxr_cutoff}")
-                
+
                 self.df = self.df[self.mask]
                 self.y_true = self.df['groundtruth'].values
-                #add 20% uncertainty to ground truth
+                # add 20% uncertainty to ground truth
                 self.y_true_uncertainty = 0.2 * self.y_true
                 self.y_pred = self.df['predictions'].values
                 if 'uncertainty' in self.df.columns and self.df['uncertainty'] is not None:
@@ -157,7 +157,7 @@ class SolarFlareEvaluator:
                 else:
                     self.y_uncertainty = None
                 print(f"Loaded baseline model data with {len(self.df)} records (baseline-only mode)")
-                
+
                 # Set baseline data to None since we're using it as main data
                 self.baseline_df = None
                 self.y_baseline = None
@@ -169,18 +169,18 @@ class SolarFlareEvaluator:
             # Load main model prediction data
             if self.csv_path and os.path.exists(self.csv_path):
                 self.df = pd.read_csv(self.csv_path)
-                outlier_threshold = 999999 # 0.01
+                outlier_threshold = 999999  # 0.01
                 self.mask = self.df['predictions'] < outlier_threshold
-                
+
                 # Apply SXR cutoff filter if specified
                 if self.sxr_cutoff is not None:
                     sxr_mask = self.df['groundtruth'] >= self.sxr_cutoff
                     self.mask = self.mask & sxr_mask
                     print(f"Applied SXR cutoff filter: ground truth >= {self.sxr_cutoff}")
-                
+
                 self.df = self.df[self.mask]
                 self.y_true = self.df['groundtruth'].values
-                #add 20% uncertainty to ground truth
+                # add 20% uncertainty to ground truth
                 self.y_true_uncertainty = 0.2 * self.y_true
                 self.y_pred = self.df['predictions'].values
                 if 'uncertainty' in self.df.columns and self.df['uncertainty'] is not None:
@@ -200,15 +200,14 @@ class SolarFlareEvaluator:
                     self.y_baseline_uncertainty = None
                 print(f"Loaded baseline model data with {len(self.baseline_df)} records")
 
-
     def calculate_metrics(self):
         """
         Calculate and save performance metrics for both models.
-        
-        Computes standard regression metrics (MSE, RMSE, MAE, R², Pearson correlation) 
+
+        Computes standard regression metrics (MSE, RMSE, MAE, R², Pearson correlation)
         in log-space for both the main model and baseline model. Additionally calculates
         class-specific metrics for different flare classes (Quiet, C, M, X).
-        
+
         Returns:
             pandas.DataFrame: DataFrame containing all calculated metrics
         """
@@ -310,15 +309,15 @@ class SolarFlareEvaluator:
     def _calculate_tss(self, y_true, y_pred, threshold=None):
         """
         Calculate True Skill Statistic (TSS) for binary classification performance.
-        
+
         TSS is calculated as Sensitivity + Specificity - 1, providing a measure of
         classification skill that accounts for both true positives and true negatives.
-        
+
         Args:
             y_true (array-like): Ground truth values
             y_pred (array-like): Predicted values
             threshold (float, optional): Classification threshold. Defaults to median of y_true.
-        
+
         Returns:
             float: True Skill Statistic value
         """
@@ -336,7 +335,7 @@ class SolarFlareEvaluator:
     def _plot_regression_comparison(self):
         """
         Generate regression comparison plot with MAE contours and residuals plot.
-        
+
         Creates a comprehensive visualization showing:
         - 2D histogram of predicted vs. actual values
         - Perfect prediction line (1:1 relationship)
@@ -358,8 +357,8 @@ class SolarFlareEvaluator:
         axis_facecolor = '#FFFFFF' if theme == 'white' else '#FFFFFF'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
         legend_facecolor = '#FFFFFF' if theme == 'white' else '#1E1E2F'
-        grid_color = 'grey'
-        minor_grid_color = 'grey'
+        grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
+        minor_grid_color = '#E6E6E6' if theme == 'white' else '#1F1F35'
         legend_edge_color = 'black' if theme == 'white' else '#3A3A5A'
         colorbar_facecolor = axis_facecolor
         figure_facecolor = '#FFFFFF' if theme == 'white' else '#000000'
@@ -386,10 +385,10 @@ class SolarFlareEvaluator:
             for class_name, (min_flux, max_flux) in flare_classes.items():
                 if min_flux >= min_val and min_flux <= max_val:
                     flare_positions.append(min_flux)
-                    flare_labels.append(f'{min_flux:.0e}')
+                    flare_labels.append(f'{class_name}')
                 if max_flux >= min_val and max_flux <= max_val and max_flux != min_flux:
                     flare_positions.append(max_flux)
-                    flare_labels.append(f'{max_flux:.0e}')
+                    flare_labels.append(f'{class_name}')
 
             if flare_positions:
                 ax_top.set_xticks(flare_positions)
@@ -416,7 +415,7 @@ class SolarFlareEvaluator:
             # Define flare classes
             flare_classes_mae = {
                 'A': (1e-8, 1e-7, "#FFAAA5"),
-                'B': (1e-7, 1e-6,  "#FFAAA5"),
+                'B': (1e-7, 1e-6, "#FFAAA5"),
                 'C': (1e-6, 1e-5, "#FFAAA5"),
                 'M': (1e-5, 1e-4, "#FFAAA5"),
                 'X': (1e-4, 1e-2, "#FFAAA5")
@@ -446,34 +445,16 @@ class SolarFlareEvaluator:
                 # Plot MAE contours on the 1-to-1 plot
                 if class_name == 'X':
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
-                                        alpha=0.75,
-                                        label=f'MAE',color=color)
+                                         alpha=0.75,
+                                         label=f'MAE', color=color)
                 else:
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
-                                        alpha=0.75,color=color)
+                                         alpha=0.75, color=color)
 
-        # Main model plot (1-to-1 with MAE contours)
         min_val = min(min(self.y_true), min(self.y_pred))
         max_val = max(max(self.y_true), max(self.y_pred))
-
-        # Enforce realistic minimum at 1e-8 (A1.0 flare class threshold)
-        min_val = max(min_val, 1e-8)
-
-        # Enforce realistic maximum at 1e-2 (beyond X10 class)
-        max_val = min(max_val, 1e-2)
-
-        # Add small buffer (5% on log scale)
-        log_range = np.log10(max_val) - np.log10(min_val)
-        buffer = 0.05 * log_range
-
-        min_val = 10 ** (np.log10(min_val) - buffer)
-        max_val = 10 ** (np.log10(max_val) + buffer)
-
-        # Ensure limits stay within realistic bounds after buffer, but allow a bit below 1e-8 for padding
-        min_val = max(min_val, 0.5e-8)
-        max_val = min(max_val, 1e-2)
-
         log_bins = np.logspace(np.log10(min_val), np.log10(max_val), 100)
+
         shared_norm = LogNorm(vmin=1, vmax=1000)
 
         # Create figure with transparent background but solid plot area
@@ -482,15 +463,17 @@ class SolarFlareEvaluator:
         fig.patch.set_facecolor(figure_facecolor)
         fig.patch.set_alpha(1.0)
 
+        # Main model plot (1-to-1 with MAE contours)
+        min_val = min(min(self.y_true), min(self.y_pred)) * 0.9
+        max_val = max(max(self.y_true), max(self.y_pred)) * 1.1
+
         # Perfect prediction line
         ax1.plot([min_val, max_val], [min_val, max_val],
-                label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
+                 label='Perfect Prediction', color='#A00503', linestyle='-', linewidth=1, zorder=5)
 
         # 2D histogram
-        cmap = plt.get_cmap("icefire").copy()
-        cmap.set_bad(alpha=0)
         h1 = ax1.hist2d(self.y_true, self.y_pred, bins=[log_bins, log_bins],
-                        cmap=cmap, norm=shared_norm, alpha=1)
+                        cmap="bone", norm=shared_norm, alpha=1)
 
         # Draw MAE contours on main plot
         draw_mae_contours(ax1, min_val, max_val)
@@ -499,14 +482,11 @@ class SolarFlareEvaluator:
         ax1.set_facecolor(axis_facecolor)
         ax1.patch.set_alpha(1.0)
 
-        ax1.set_xlim(min_val, max_val)
-        ax1.set_ylim(min_val, max_val)
-
         # Set labels and styling
         ax1.set_xlabel(r'Ground Truth Flux (W/m$^{2}$)', fontsize=14, color=text_color, fontfamily='Barlow')
         ax1.set_ylabel(r'Predicted Flux (W/m$^{2}$)', fontsize=14, color=text_color, fontfamily='Barlow')
         ax1.tick_params(labelsize=12, colors=text_color)
-        
+
         # Set tick labels to Barlow font
         for label in ax1.get_xticklabels():
             label.set_fontfamily('Barlow')
@@ -514,10 +494,10 @@ class SolarFlareEvaluator:
         for label in ax1.get_yticklabels():
             label.set_fontfamily('Barlow')
             label.set_color(text_color)
-        
+
         title = 'Baseline Model Performance with MAE Overlay' if self.baseline_only_mode else 'FOXES Model Performance with MAE Overlay'
-        #ax1.set_title(title, fontsize=16, color='white', pad=20, fontfamily='Barlow')
-        
+        # ax1.set_title(title, fontsize=16, color='white', pad=20, fontfamily='Barlow')
+
         # Style the legend
         legend = ax1.legend(loc='upper left',
                             prop={'family': 'Barlow', 'size': 12})
@@ -528,8 +508,9 @@ class SolarFlareEvaluator:
             text.set_color(text_color)
             text.set_fontsize(12)
             text.set_fontfamily('Barlow')
-        
+
         # Grid styling
+        ax1.set_axisbelow(True)
         ax1.grid(True, alpha=0.6, color=grid_color, linestyle='-', linewidth=0.5)
         ax1.tick_params()
         ax1.set_xscale('log')
@@ -545,18 +526,18 @@ class SolarFlareEvaluator:
         add_flare_class_axes(ax1, min_val, max_val, text_color)
 
         # Colorbar styling
-        cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.15)
+        cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)
         cbar.ax.yaxis.set_tick_params(labelsize=12, colors=text_color)
         cbar.set_label("Count", fontsize=14, color=text_color, fontfamily='Barlow')
         cbar.ax.tick_params(colors=text_color)
-        #make cbar small ticks white
+        # make cbar small ticks white
         cbar.ax.yaxis.set_tick_params(colors=text_color)
         cbar.ax.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
         cbar.ax.tick_params(which='minor', colors=text_color)
         # Make colorbar background match the plot area
         cbar.ax.set_facecolor(colorbar_facecolor)
         cbar.ax.patch.set_alpha(1.0)
-        
+
         # Set colorbar tick labels to Barlow font
         for label in cbar.ax.get_yticklabels():
             label.set_fontfamily('Barlow')
@@ -573,15 +554,14 @@ class SolarFlareEvaluator:
         plt.close()
         print(f"Saved regression comparison plot to {plot_path}")
 
-
     @staticmethod
     def init_worker(csv_data, baseline_csv_data):
         """
         Initialize each worker process with CSV data.
-        
+
         This static method is used as the initializer function for multiprocessing.Pool.
         It loads the CSV data into global variables accessible by worker processes.
-        
+
         Args:
             csv_data (pandas.DataFrame): Main model CSV data
             baseline_csv_data (pandas.DataFrame): Baseline model CSV data
@@ -594,11 +574,11 @@ class SolarFlareEvaluator:
     def load_csv_data(self):
         """
         Load and prepare CSV data for workers.
-        
-        Prepares CSV data for multiprocessing by converting timestamps to datetime 
-        objects and adding ground truth uncertainty. Handles both regular and 
+
+        Prepares CSV data for multiprocessing by converting timestamps to datetime
+        objects and adding ground truth uncertainty. Handles both regular and
         baseline-only modes.
-        
+
         Returns:
             tuple: (csv_data, baseline_csv_data) - Main and baseline CSV dataframes
         """
@@ -630,12 +610,12 @@ class SolarFlareEvaluator:
     def load_aia_image(self, timestamp):
         """
         Load AIA image for given timestamp.
-        
+
         Searches for AIA image files matching the timestamp pattern in the specified directory.
-        
+
         Args:
             timestamp (str): Timestamp in format YYYY-MM-DDTHH:MM:SS
-            
+
         Returns:
             numpy.ndarray or None: AIA image data if found, None otherwise
         """
@@ -648,19 +628,19 @@ class SolarFlareEvaluator:
     def load_attention_map(self, timestamp):
         """
         Load attention map for given timestamp.
-        
+
         Loads attention weights from text files and resizes them to match AIA image dimensions.
-        
+
         Args:
             timestamp (str): Timestamp in format YYYY-MM-DDTHH:MM:SS
-            
+
         Returns:
             numpy.ndarray or None: Resized attention map or None if loading failed
         """
         if not self.weight_path or not os.path.exists(self.weight_path):
             print(f"Weight path not available: {self.weight_path}")
             return None
-            
+
         filepath = os.path.join(self.weight_path, f"{timestamp}")
         try:
             attention = np.loadtxt(filepath, delimiter=",")
@@ -675,16 +655,16 @@ class SolarFlareEvaluator:
     def get_sxr_data_for_timestamp(self, timestamp, window_hours=16):
         """
         Get SXR data around the given timestamp from CSV files.
-        
-        Retrieves both current timestamp data and surrounding temporal window data 
+
+        Retrieves both current timestamp data and surrounding temporal window data
         for comprehensive visualization. Merges main model and baseline predictions.
-        
+
         Args:
             timestamp (str): Target timestamp for data retrieval
             window_hours (int): Temporal window size in hours (default: 16)
-            
+
         Returns:
-            tuple: (window_data, current_data, target_time) - 
+            tuple: (window_data, current_data, target_time) -
                    Window dataframe, current timestamp data, and datetime object
         """
         try:
@@ -742,7 +722,7 @@ class SolarFlareEvaluator:
                 ].copy()
 
             # Merge the windows for plotting
-            window_data = main_window[['timestamp', 'groundtruth', 'groundtruth_uncertainty' , 'predictions']].copy()
+            window_data = main_window[['timestamp', 'groundtruth', 'groundtruth_uncertainty', 'predictions']].copy()
 
             # Add main model uncertainty if available
             if 'uncertainty' in main_window.columns:
@@ -779,18 +759,18 @@ class SolarFlareEvaluator:
     def generate_frame_worker(self, timestamp):
         """
         Worker function to generate a single frame.
-        
-        This method is designed for multiprocessing and creates a comprehensive 
+
+        This method is designed for multiprocessing and creates a comprehensive
         visualization frame showing:
         - AIA 131Å image with attention overlay
         - SXR time series with ground truth, model predictions, and uncertainties
         - Current timestamp marker
         - Quantitative performance metrics
         - Professional styling with consistent color scheme
-        
+
         Args:
             timestamp (str): Timestamp for frame generation
-            
+
         Returns:
             str or None: Path to generated frame file or None if generation failed
         """
@@ -846,15 +826,15 @@ class SolarFlareEvaluator:
                 aia_img = aia_data[1]
 
                 ax.imshow(aia_img, cmap=cm.cmlist['sdoaia131'], origin='lower')
-                ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5,norm=att_norm)
+                ax.imshow(attention_data, cmap='hot', origin='lower', alpha=0.5, norm=att_norm)
 
-                ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+                ax.set_title(f'AIA {wavs[1]} Å', fontsize=12, fontfamily='Barlow',
+                             color=('white' if is_dark else 'black'))
                 ax.axis('off')
-
 
             # Plot SXR data with uncertainty bands
             sxr_ax = fig.add_subplot(gs_right[:, 0])
-            
+
             # Set SXR plot background by theme
             sxr_ax.set_facecolor('#1E1E1E' if is_dark else '#FFFFFF')
             sxr_ax.patch.set_alpha(1.0)
@@ -870,7 +850,7 @@ class SolarFlareEvaluator:
                 # Calculate uncertainty bounds
                 lower_bound = gt - uncertainties
                 upper_bound = gt + uncertainties
-                
+
                 # Ensure bounds are positive for log scale
                 lower_bound = np.maximum(lower_bound, 1e-12)
 
@@ -878,8 +858,8 @@ class SolarFlareEvaluator:
                 model_label = 'Baseline Model' if self.baseline_only_mode else 'FOXES Model'
                 model_color = ("#94ECBE" if self.baseline_only_mode else "#C0B9DD")
                 sxr_ax.plot(sxr_window['timestamp'], sxr_window['predictions'],
-                                                  label=model_label, linewidth=2.5, alpha=1, markersize=5,
-                                                  color=model_color)
+                            label=model_label, linewidth=2.5, alpha=1, markersize=5,
+                            color=model_color)
 
                 # Plot baseline predictions if available and not in baseline-only mode
                 if not self.baseline_only_mode and 'baseline_predictions' in sxr_window.columns and sxr_window[
@@ -918,13 +898,15 @@ class SolarFlareEvaluator:
                                 color=('white' if is_dark else 'black'),
                                 bbox=dict(boxstyle='round', alpha=0.9, facecolor=('#2B2B2B' if is_dark else '#FFFFFF')))
 
-                sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
-                #sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
-                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+                sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),
+                                 pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
+                sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
+                sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow',
+                                  color=('white' if is_dark else 'black'))
                 sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
                 title = 'Baseline Prediction vs. Ground Truth Comparison' if self.baseline_only_mode else 'FOXES Prediction vs. Ground Truth Comparison'
                 sxr_ax.set_title(title, fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
-                
+
                 # Style the legend to match regression plot
                 legend1 = sxr_ax.legend(fontsize=12, loc='upper right', prop={'family': 'Barlow', 'size': 12})
                 legend1.get_frame().set_facecolor('#2B2B2B' if is_dark else '#FFFFFF')
@@ -932,13 +914,13 @@ class SolarFlareEvaluator:
                 for text in legend1.get_texts():
                     text.set_color('white' if is_dark else 'black')
                     text.set_fontfamily('Barlow')
-                
+
                 sxr_ax.grid(True, alpha=0.3, color=('white' if is_dark else 'black'))
-                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors=('white' if is_dark else 'black'), 
-                                )
+                sxr_ax.tick_params(axis='x', rotation=15, labelsize=12, colors=('white' if is_dark else 'black'),
+                                   )
                 sxr_ax.tick_params(axis='y', labelsize=12, colors=('white' if is_dark else 'black'),
-                                )
-                
+                                   )
+
                 # Set tick labels to Barlow font and theme color
                 for label in sxr_ax.get_xticklabels():
                     label.set_fontfamily('Barlow')
@@ -946,7 +928,7 @@ class SolarFlareEvaluator:
                 for label in sxr_ax.get_yticklabels():
                     label.set_fontfamily('Barlow')
                     label.set_color('white' if is_dark else 'black')
-                
+
                 # Set graph border (spines) to theme color
                 for spine in sxr_ax.spines.values():
                     spine.set_color('white' if is_dark else 'black')
@@ -959,7 +941,8 @@ class SolarFlareEvaluator:
                             transform=sxr_ax.transAxes, fontsize=12, fontfamily='Barlow',
                             color=('white' if is_dark else 'black'),
                             horizontalalignment='center', verticalalignment='center')
-                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
+                sxr_ax.set_title('SXR Data Comparison with Uncertainties', fontsize=12, fontfamily='Barlow',
+                                 color=('white' if is_dark else 'black'))
             # Save with explicit background matching theme
             plt.savefig(save_path, dpi=500, facecolor=('black' if is_dark else 'white'), bbox_inches='tight')
             plt.close()
@@ -975,15 +958,15 @@ class SolarFlareEvaluator:
     def create_attention_movie(self, timestamps, auto_cleanup=True):
         """
         Generate attention visualization movie with baseline comparison and uncertainties.
-        
+
         Creates a comprehensive movie showing attention maps overlaid on AIA images
-        alongside SXR time series comparisons. Uses multiprocessing for efficient 
+        alongside SXR time series comparisons. Uses multiprocessing for efficient
         parallel frame generation and compiles frames into a video file.
-        
+
         Args:
             timestamps (list): List of timestamps for frame generation
             auto_cleanup (bool): Whether to automatically delete individual frame files after movie creation
-            
+
         Returns:
             None
         """
@@ -1040,11 +1023,11 @@ class SolarFlareEvaluator:
         print(f"Total time: {total_time:.2f} seconds")
         print(f"✅ Movie saved to: {movie_path}")
 
-        #Optional: Clean up frame files
+        # Optional: Clean up frame files
         if auto_cleanup:
             for frame_path in frame_paths:
                 if os.path.exists(frame_path):
-                    #os.remove(frame_path)
+                    # os.remove(frame_path)
                     print("Frame files not deleted")
         else:
             cleanup = input("Delete individual frame files? (y/n): ").lower().strip()
@@ -1057,16 +1040,16 @@ class SolarFlareEvaluator:
     def run_full_evaluation(self, timestamps=None):
         """
         Run complete evaluation pipeline with baseline comparison and uncertainties.
-        
+
         Executes the full evaluation workflow including:
         1. Data loading and preprocessing
         2. Quantitative metrics calculation and saving
         3. Regression comparison plot generation
         4. Attention movie creation (if timestamps provided)
-        
+
         Args:
             timestamps (list, optional): List of timestamps for movie generation
-            
+
         Returns:
             pandas.DataFrame: Performance metrics dataframe
         """
@@ -1093,19 +1076,17 @@ class SolarFlareEvaluator:
         return metrics_df
 
 
-
-
 def resolve_config_variables(config_dict):
     """
     Recursively resolve ${variable} references within the config.
-    
-    This function processes configuration dictionaries to substitute variable 
-    references of the form ${variable_name} with their actual values defined 
+
+    This function processes configuration dictionaries to substitute variable
+    references of the form ${variable_name} with their actual values defined
     elsewhere in the configuration.
-    
+
     Args:
         config_dict (dict): Configuration dictionary with potential variable references
-        
+
     Returns:
         dict: Configuration dictionary with resolved variable substitutions
     """
@@ -1137,19 +1118,19 @@ def resolve_config_variables(config_dict):
 def load_evaluation_config(config_path):
     """
     Load evaluation configuration from YAML file.
-    
-    Reads a YAML configuration file and applies variable substitution to 
+
+    Reads a YAML configuration file and applies variable substitution to
     resolve any ${variable} references within the configuration.
-    
+
     Args:
         config_path (str): Path to the YAML configuration file
-        
+
     Returns:
         dict: Loaded and processed configuration dictionary
     """
     with open(config_path, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
-    
+
     # Resolve variable substitutions
     config_data = resolve_config_variables(config_data)
     return config_data
@@ -1158,62 +1139,62 @@ def load_evaluation_config(config_path):
 def generate_timestamps(start_time_str, end_time_str, interval_minutes):
     """
     Generate list of timestamps for evaluation.
-    
-    Creates a sequence of timestamps within the specified time range at 
+
+    Creates a sequence of timestamps within the specified time range at
     regular intervals for evaluation purposes.
-    
+
     Args:
         start_time_str (str): Start time in ISO format (YYYY-MM-DDTHH:MM:SS)
         end_time_str (str): End time in ISO format (YYYY-MM-DDTHH:MM:SS)
         interval_minutes (int): Time interval between timestamps in minutes
-        
+
     Returns:
         list: List of timestamp strings in format YYYY-MM-DDTHH:MM:SS
     """
     start_time = datetime.fromisoformat(start_time_str)
     end_time = datetime.fromisoformat(end_time_str)
     interval = timedelta(minutes=interval_minutes)
-    
+
     timestamps = []
     current_time = start_time
     while current_time <= end_time:
         timestamps.append(current_time.strftime("%Y-%m-%dT%H:%M:%S"))
         current_time += interval
-    
+
     return timestamps
 
 
 def main():
     """
     Main function to run evaluation with config file.
-    
-    Parses command line arguments, loads configuration, generates timestamps, 
+
+    Parses command line arguments, loads configuration, generates timestamps,
     and executes the complete evaluation pipeline using the SolarFlareEvaluator class.
     """
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='Run solar flare evaluation')
-    parser.add_argument('-config', type=str, default='evaluation_config.yaml', 
-                       help='Path to evaluation config YAML file')
+    parser.add_argument('-config', type=str, default='evaluation_config.yaml',
+                        help='Path to evaluation config YAML file')
     args = parser.parse_args()
-    
+
     # Load configuration
     config = load_evaluation_config(args.config)
-    
+
     # Extract parameters from config
     model_predictions = config['model_predictions']
     data = config['data']
     evaluation = config['evaluation']
     time_range = config['time_range']
     plotting_config = config.get('plotting', {})
-    
+
     # Generate timestamps
     timestamps = generate_timestamps(
         time_range['start_time'],
         time_range['end_time'],
         time_range['interval_minutes']
     )
-    
+
     print(f"Loaded evaluation config from: {args.config}")
     print(f"Main model CSV: {model_predictions['main_model_csv']}")
     print(f"Baseline CSV: {model_predictions['baseline_csv']}")
@@ -1225,14 +1206,14 @@ def main():
         print(f"SXR cutoff filter: ground truth >= {evaluation['sxr_cutoff']}")
     else:
         print("SXR cutoff filter: disabled")
-    
+
     # Check if we're in baseline-only mode
     main_csv = model_predictions['main_model_csv']
     if main_csv is None or main_csv == 'null' or not os.path.exists(main_csv):
         print("Running in baseline-only mode")
     else:
         print("Running in comparison mode (main model + baseline)")
-    
+
     # Initialize evaluator
     evaluator = SolarFlareEvaluator(
         csv_path=main_csv if main_csv != 'null' else None,
@@ -1243,7 +1224,7 @@ def main():
         sxr_cutoff=evaluation.get('sxr_cutoff'),
         plot_background=plotting_config.get('regression_background', 'black')
     )
-    
+
     # Run complete evaluation
     print("Starting evaluation...")
     evaluator.run_full_evaluation(timestamps=timestamps)
