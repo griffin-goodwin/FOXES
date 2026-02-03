@@ -57,7 +57,7 @@ If you use this code or data in your work, please cite:
 ```aiexclude
 @software{FOXES,
     title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
-    institution     = {Frontier Development Lab (FDL), NASA Goddard Space Flight Center},
+    institution     = {Frontier Development Lab (FDL)},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
     version         = {v1.0},
     year            = {2026}
