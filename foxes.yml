@@ -1,19 +1,30 @@
 name: foxes
 channels:
   - defaults
+  - conda-forge
   - https://repo.anaconda.com/pkgs/main
   - https://repo.anaconda.com/pkgs/r
 dependencies:
+  - _openmp_mutex=4.5=7_kmp_llvm
   - bzip2=1.0.8=h80987f9_6
-  - ca-certificates=2025.12.2=hca03da5_0
+  - ca-certificates=2026.1.4=hbd8a1cb_0
+  - cmap=0.7.0=pyhd8ed1ab_0
   - expat=2.7.3=h982b769_0
+  - libblas=3.11.0=5_h51639a9_openblas
+  - libcblas=3.11.0=5_hb0561ab_openblas
   - libcxx=20.1.8=hd7fd590_1
   - libffi=3.4.4=hca03da5_1
+  - libgcc=15.2.0=hcbb3090_16
+  - libgfortran=15.2.0=h07b0088_16
+  - libgfortran5=15.2.0=hdae7583_16
+  - liblapack=3.11.0=5_hd9741b5_openblas
   - libmpdec=4.0.0=h80987f9_0
+  - libopenblas=0.3.30=openmp_ha158390_4
   - libzlib=1.3.1=h5f15de7_0
+  - llvm-openmp=21.1.8=h4a912ad_0
   - lz4-c=1.9.4=h313beb8_1
   - ncurses=6.5=hee39554_0
-  - openssl=3.0.18=h9b4081a_0
+  - openssl=3.6.1=hd24854e_1
   - python=3.14.0=h1858270_101_cp314
   - python_abi=3.14=2_cp314
   - readline=8.3=h0b18652_0
