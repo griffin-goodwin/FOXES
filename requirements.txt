@@ -1,30 +1,38 @@
+# Solar physics and astronomy
 sunpy[all]
+sunpy-soar
+astropy
+drms
 itipy
-snakemake
-wandb
-pytorch-lightning
-pandas
-netCDF4
-matplotlib
-scikit-learn
-scikit-image
+
+# Deep learning
 torch
 torchvision
-torchaudio
-validators
-albumentations
-opencv-python
-spicepy
-xitorch
-sympy
+pytorch-lightning
+
+# Data processing
 numpy
 scipy
-PyYAML
-imageio
-tqdm
-seaborn
+pandas
 xarray
-astropy
-Pillow
+h5py
+
+# Machine learning
+scikit-learn
+
+# Visualization
+matplotlib
+seaborn
+plotly
 colormaps
+
+# Image processing
+opencv-python
+Pillow
+imageio
 imageio-ffmpeg
+
+# Utilities
+tqdm
+wandb
+PyYAML

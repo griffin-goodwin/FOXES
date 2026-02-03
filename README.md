@@ -1,13 +1,11 @@
 # FOXES: A Framework For Operational X-ray Emission Synthesis
 
-This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab Multimodal Flare Prediction Model Project.
+This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab Multimodal Flare Prediction Project.
 
 ### Abstract
-Understanding solar flares is critical for predicting space weather, as their activity shapes how the Sun influences Earth and its environment. The development of reliable forecasting methodologies of these events depends on robust flare catalogs, but current methods are limited to flare classification using integrated soft X-ray emission that are available only from Earth’s perspective. This reduces accuracy in pinpointing the location and strength of farside flares and their connection to geoeffective events. 
+The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity, used for the classification of flare strength. As a result, the flare class, along with the SXR light curve, are routinely used as the primary input to many forecasting methods, from coronal mass ejection speed to energetic particle output. However, the SXR irradiance lacks spatial information leading to dubious classification during periods of high activity, and is  applicable only for observations from Earth orbit, hindering forecasting for other places in the heliosphere. This work introduces the Framework for Operational X-ray Emission Synthesis (FOXES), a Vision Transformer-based approach for translating Extreme Ultraviolet (EUV) spatially-resolved observations into SXR irradiance predictions. The model produces two outputs: (1) a global SXR flux prediction and (2) per-patch flux contributions, which offer a spatially resolved interpretation of where the model attributes SXR emission. This paves the way for EUV-based flare detection to be extended beyond Earth's line of sight, allowing for a more comprehensive and reliable flare catalog to support robust, scalable, and real-time forecasting, extending our monitoring into a true multiviewpoint system.
 
-In this work, we introduce a **Vision Transformer (ViT)**-based approach that translates Extreme Ultraviolet (EUV) observations into soft x-ray flux while also setting the groundwork for estimating flare locations in the future. The model achieves accurate flux predictions across flare classes using quantitative metrics. This paves the way for EUV-based flare detection to be extended beyond Earth’s line of sight, which allows for a more comprehensive and complete solar flare catalog. 
-
-**Team**: Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger, Robert Jarolim, Angelos Vourlidas, Lorien Pratt
+**Team**: Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger, Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, Lorien Pratt
 
 ## Repository Structure
 
@@ -20,8 +18,10 @@ FOXES
 │   ├── inference       # Inference and evaluation scripts
 │   ├── models          # Vision Transformer model definitions
 │   └── training        # Training scripts and callbacks
+├── misc                # Personal utility scripts (gitignored)
 ├── notebook_tests      # Visualization and testing notebooks
 ├── Dockerfile          # Docker configuration for environment reproducibility
+├── foxes.yml           # Conda environment file
 └── requirements.txt    # Python dependencies
 ```
 
@@ -33,15 +33,19 @@ git clone https://github.com/griffin-goodwin/FOXES.git
 cd FOXES
 ```
 
-### 2) Create an environment (conda or mamba)
+### 2) Create an environment
+
+**Option A — pip:**
 ```bash
-mamba create -n foxes python=3.11 -y    # or: conda create -n foxes python=3.11 -y
-mamba activate foxes                   # or: conda activate foxes
+conda create -n foxes python=3.11 -y
+conda activate foxes
+pip install -r requirements.txt
 ```
 
-### 3) Install Python dependencies
+**Option B — conda (full environment):**
 ```bash
-pip install -r requirements.txt
+conda env create -f foxes.yml
+conda activate foxes
 ```
 
 ### 4) Docker Setup (Optional)
@@ -56,7 +60,7 @@ If you use this code or data in your work, please cite:
     institution     = {Frontier Development Lab (FDL), NASA Goddard Space Flight Center},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
     version         = {v1.0},
-    year            = {2025}
+    year            = {2026}
 }
 ```
 
