@@ -1,8 +1,8 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/data/FOXES_Data"  # Change this line for different datasets
-base_checkpoint_dir: "/data/FOXES_Data"    # Change this line for different datasets
-wavelengths: [171, 193, 211, 304]  # AIA wavelengths in Angstroms
+base_data_dir: "/Volumes/T9/FOXES_Data"  # Change this line for different datasets
+base_checkpoint_dir: "/Volumes/T9/FOXES_Data"    # Change this line for different datasets
+wavelengths: [94, 131, 171, 193, 211, 304, 335]  # AIA wavelengths in Angstroms
 
 # GPU configuration
 # Options:
@@ -12,7 +12,7 @@ wavelengths: [171, 193, 211, 304]  # AIA wavelengths in Angstroms
 #   - CPU only: gpu_ids: -1
 gpu_ids: "all"  # Use both GPUs
 # Model configuration
-selected_model: "ViTLocal"  # Options: "hybrid", "vit", "fusion", "vitpatch"
+selected_model: "ViTLocal"
 batch_size:    6
 epochs:        150
 oversample: false
@@ -21,7 +21,7 @@ calculate_base_weights: false  # Whether to calculate class-based weights for lo
 
 vit_custom:
     embed_dim: 256
-    num_channels: 4
+    num_channels: 7
     num_classes: 1
     patch_size: 8
     num_patches: 4096

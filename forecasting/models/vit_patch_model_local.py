@@ -5,11 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-import torch.utils.data as data
-import torchvision
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from torchvision import transforms
+from torch.utils.checkpoint import checkpoint
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
@@ -38,8 +34,9 @@ class ViTLocal(pl.LightningModule):
         self.base_weights = base_weights
         self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=self.base_weights)
         self.sxr_norm = sxr_norm
+        self.use_gradient_checkpointing = True
 
-    
+
     def forward(self, x, return_attention=True):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
 
@@ -202,11 +199,24 @@ class VisionTransformerLocal(nn.Module):
 
         attention_weights = []
         for block in self.transformer_blocks:
-            if return_attention:
-                x, attn_weights = block(x, return_attention=True)
-                attention_weights.append(attn_weights)
+            if self.use_gradient_checkpointing and self.training:
+                # Use checkpointing to trade compute for memory
+                if return_attention:
+                    x, attn_weights = torch.utils.checkpoint.checkpoint(
+                        block, x, return_attention, use_reentrant=False
+                    )
+                    attention_weights.append(attn_weights)
+                else:
+                    x = torch.utils.checkpoint.checkpoint(
+                        block, x, return_attention, use_reentrant=False
+                    )
             else:
-                x = block(x)
+                # Normal forward pass
+                if return_attention:
+                    x, attn_weights = block(x, return_attention=True)
+                    attention_weights.append(attn_weights)
+                else:
+                    x = block(x)
 
         patch_embeddings = x.transpose(0, 1)  # [B, num_patches, embed_dim]
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)  # normalized log predictions [B, num_patches]
@@ -317,22 +327,18 @@ class LocalAttentionBlock(nn.Module):
         # For a 32x32 grid of patches with local_window=3, each patch can only
         # attend to patches within a 3x3 window around it
         
-        num_patches = self.num_patches  
+        num_patches = self.num_patches
         grid_size = int(math.sqrt(num_patches))
-        
-        # Create mask for patches only: [num_patches, num_patches]
-        mask = torch.zeros(num_patches, num_patches)
-        
-        # Patches can only attend to nearby patches
-        for i in range(num_patches):
-            row_i, col_i = i // grid_size, i % grid_size
-            for j in range(num_patches):
-                row_j, col_j = j // grid_size, j % grid_size
-                # Only allow attention if patches are within local_window distance
-                if abs(row_i - row_j) <= self.local_window // 2 and abs(col_i - col_j) <= self.local_window // 2:
-                    mask[i, j] = 1
-        
-        return mask.bool()
+        half_w = self.local_window // 2
+
+        indices = torch.arange(num_patches)
+        rows = indices // grid_size
+        cols = indices % grid_size
+        row_dist = torch.abs(rows.unsqueeze(1) - rows.unsqueeze(0))
+        col_dist = torch.abs(cols.unsqueeze(1) - cols.unsqueeze(0))
+        mask = (row_dist <= half_w) & (col_dist <= half_w)
+
+        return ~mask
 
     def forward(self, x, return_attention=False):
         inp_x = self.layer_norm_1(x)
@@ -355,9 +361,6 @@ class LocalAttentionBlock(nn.Module):
             x = x + attn_output
             x = x + self.linear(self.layer_norm_2(x))
             return x
-
-
-
 
 def img_to_patch(x, patch_size, flatten_channels=True):
     """
@@ -397,10 +400,10 @@ class SXRRegressionDynamicLoss:
     def _get_base_weights(self):
         #Calculate the base weights based on the number of samples in each class within training data
         return {
-            'quiet': 1.5,    # Increase from current value
-            'c_class': 1.0,  # Keep as baseline
-            'm_class': 8.0,  # Maintain M-class focus
-            'x_class': 20.0  # Maintain X-class focus
+            'quiet': 6.643528005464481,    # Increase from current value
+            'c_class': 1.626986450317832,  # Keep as baseline
+            'm_class': 4.724573441010383,  # Maintain M-class focus
+            'x_class': 43.13137472283814  # Maintain X-class focus
         }
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
