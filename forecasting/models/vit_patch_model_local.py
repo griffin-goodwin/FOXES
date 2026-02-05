@@ -51,9 +51,9 @@ class ViTLocal(pl.LightningModule):
 
         scheduler = CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=250,  # Restart every 20 epochs
-            T_mult=2,  # Double the cycle length after each restart
-            eta_min=1e-7  # Minimum learning rate
+            T_0=150,
+            T_mult=2,
+            eta_min=1e-7
         )
 
         return {
@@ -65,8 +65,6 @@ class ViTLocal(pl.LightningModule):
                 'name': 'learning_rate'
             }
         }
-
-    # M/X Class Flare Detection Optimized Weights
 
     def _calculate_loss(self, batch, mode="train"):
         imgs, sxr = batch
@@ -304,9 +302,9 @@ class InvertedAttentionBlock(nn.Module):
         )
 
         # Pre-compute attention mask for local interactions
-        self.register_buffer('attention_mask', self._create_local_attention_mask())
+        self.register_buffer('attention_mask', self._create_inverted_attention_mask())
 
-    def _create_local_attention_mask(self):
+    def _create_inverted_attention_mask(self):
         """Create attention mask for local interactions only"""
         # This creates a mask where only distant patches can attend to each other
 
