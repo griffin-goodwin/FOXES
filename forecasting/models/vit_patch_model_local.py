@@ -5,11 +5,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
-#norm = np.load("/mnt/data/ML-Ready_clean/mixed_data/SXR/normalized_sxr.npy")
 
 def normalize_sxr(unnormalized_values, sxr_norm):
     """Convert from unnormalized to normalized space"""
@@ -17,8 +15,10 @@ def normalize_sxr(unnormalized_values, sxr_norm):
     normalized = (log_values - float(sxr_norm[0].item())) / float(sxr_norm[1].item())
     return normalized
 
+
 def unnormalize_sxr(normalized_values, sxr_norm):
     return 10 ** (normalized_values * float(sxr_norm[1].item()) + float(sxr_norm[0].item())) - 1e-8
+
 
 class ViTLocal(pl.LightningModule):
     def __init__(self, model_kwargs, sxr_norm, base_weights=None):
@@ -30,12 +30,10 @@ class ViTLocal(pl.LightningModule):
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformerLocal(**filtered_kwargs)
-        #Set the base weights based on the number of samples in each class within training data
+        # Set the base weights based on the number of samples in each class within training data
         self.base_weights = base_weights
         self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=self.base_weights)
         self.sxr_norm = sxr_norm
-        self.use_gradient_checkpointing = True
-
 
     def forward(self, x, return_attention=True):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
@@ -72,7 +70,7 @@ class ViTLocal(pl.LightningModule):
 
     def _calculate_loss(self, batch, mode="train"):
         imgs, sxr = batch
-        raw_preds, raw_patch_contributions = self.model(imgs,self.sxr_norm)
+        raw_preds, raw_patch_contributions = self.model(imgs, self.sxr_norm)
         raw_preds_squeezed = torch.squeeze(raw_preds)
         sxr_un = unnormalize_sxr(sxr, self.sxr_norm)
 
@@ -82,7 +80,7 @@ class ViTLocal(pl.LightningModule):
             norm_preds_squeezed, sxr, sxr_un
         )
 
-        #Also calculate huber loss for logging
+        # Also calculate huber loss for logging
         huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=.3)
         mse_loss = F.mse_loss(norm_preds_squeezed, sxr)
         mae_loss = F.l1_loss(norm_preds_squeezed, sxr)
@@ -116,10 +114,12 @@ class ViTLocal(pl.LightningModule):
             for key, value in multipliers.items():
                 self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
             self.log("val_total_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True,
+                     sync_dist=True)
             self.log("val_mse_loss", mse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("val_mae_loss", mae_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-            self.log("val_rmse_loss", rmse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val_rmse_loss", rmse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True,
+                     sync_dist=True)
 
         return loss
 
@@ -131,7 +131,6 @@ class ViTLocal(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         self._calculate_loss(batch, mode="test")
-
 
 
 class VisionTransformerLocal(nn.Module):
@@ -170,7 +169,7 @@ class VisionTransformerLocal(nn.Module):
         self.input_layer = nn.Linear(num_channels * (patch_size ** 2), embed_dim)
 
         self.transformer_blocks = nn.ModuleList([
-            LocalAttentionBlock(embed_dim, hidden_dim, num_heads, num_patches, dropout=dropout)
+            InvertedAttentionBlock(embed_dim, hidden_dim, num_heads, num_patches, dropout=dropout)
             for _ in range(num_layers)
         ])
 
@@ -182,7 +181,6 @@ class VisionTransformerLocal(nn.Module):
         self.grid_h = int(math.sqrt(num_patches))
         self.grid_w = int(math.sqrt(num_patches))
         self.pos_embedding_2d = nn.Parameter(torch.randn(1, self.grid_h, self.grid_w, embed_dim))
-
 
     def forward(self, x, sxr_norm, return_attention=False):
         # Preprocess input
@@ -199,35 +197,22 @@ class VisionTransformerLocal(nn.Module):
 
         attention_weights = []
         for block in self.transformer_blocks:
-            if self.use_gradient_checkpointing and self.training:
-                # Use checkpointing to trade compute for memory
-                if return_attention:
-                    x, attn_weights = torch.utils.checkpoint.checkpoint(
-                        block, x, return_attention, use_reentrant=False
-                    )
-                    attention_weights.append(attn_weights)
-                else:
-                    x = torch.utils.checkpoint.checkpoint(
-                        block, x, return_attention, use_reentrant=False
-                    )
+            if return_attention:
+                x, attn_weights = block(x, return_attention=True)
+                attention_weights.append(attn_weights)
             else:
-                # Normal forward pass
-                if return_attention:
-                    x, attn_weights = block(x, return_attention=True)
-                    attention_weights.append(attn_weights)
-                else:
-                    x = block(x)
+                x = block(x)
 
         patch_embeddings = x.transpose(0, 1)  # [B, num_patches, embed_dim]
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)  # normalized log predictions [B, num_patches]
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
-        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean)- 1e-8, min=1e-15, max=1)
+        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean) - 1e-8, min=1e-15, max=1)
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
-        
+
         # Ensure global flux is never zero (add small epsilon if needed)
         global_flux_raw = torch.clamp(global_flux_raw, min=1e-15)
 
@@ -235,29 +220,29 @@ class VisionTransformerLocal(nn.Module):
             return global_flux_raw, attention_weights, patch_flux_raw
         else:
             return global_flux_raw, patch_flux_raw
-        
+
     def _add_2d_positional_encoding(self, x):
         """Add learned 2D positional encoding to patch embeddings"""
         B, T, embed_dim = x.shape
         num_patches = T  # All tokens are patches (no CLS token)
-        
+
         # Reshape patches to 2D grid: [B, grid_h, grid_w, embed_dim]
         patch_embeddings = x.reshape(B, self.grid_h, self.grid_w, embed_dim)
-        
+
         # Add learned 2D positional encoding
         # Broadcasting: [B, grid_h, grid_w, embed_dim] + [1, grid_h, grid_w, embed_dim]
         patch_embeddings = patch_embeddings + self.pos_embedding_2d
-        
+
         # Reshape back to sequence format: [B, num_patches, embed_dim]
         x = patch_embeddings.reshape(B, num_patches, embed_dim)
-                
+
         return x
-    
+
     def forward_for_callback(self, x, return_attention=True):
         """Forward method compatible with AttentionMapCallback"""
         global_flux_raw, attention_weights, patch_flux_raw = self.forward(x, return_attention=return_attention)
         # Callback expects (outputs, attention_weights, _)
-        return global_flux_raw, attention_weights    
+        return global_flux_raw, attention_weights
 
 
 class AttentionBlock(nn.Module):
@@ -300,7 +285,7 @@ class AttentionBlock(nn.Module):
             return x
 
 
-class LocalAttentionBlock(nn.Module):
+class InvertedAttentionBlock(nn.Module):
     def __init__(self, embed_dim, hidden_dim, num_heads, num_patches, dropout=0.0, local_window=9):
         super().__init__()
         self.embed_dim = embed_dim
@@ -317,36 +302,38 @@ class LocalAttentionBlock(nn.Module):
             nn.Linear(hidden_dim, embed_dim),
             nn.Dropout(dropout),
         )
-        
+
         # Pre-compute attention mask for local interactions
         self.register_buffer('attention_mask', self._create_local_attention_mask())
 
     def _create_local_attention_mask(self):
         """Create attention mask for local interactions only"""
-        # This creates a mask where only nearby patches can attend to each other
-        # For a 32x32 grid of patches with local_window=3, each patch can only
-        # attend to patches within a 3x3 window around it
-        
+        # This creates a mask where only distant patches can attend to each other
+
         num_patches = self.num_patches
         grid_size = int(math.sqrt(num_patches))
-        half_w = self.local_window // 2
 
-        indices = torch.arange(num_patches)
-        rows = indices // grid_size
-        cols = indices % grid_size
-        row_dist = torch.abs(rows.unsqueeze(1) - rows.unsqueeze(0))
-        col_dist = torch.abs(cols.unsqueeze(1) - cols.unsqueeze(0))
-        mask = (row_dist <= half_w) & (col_dist <= half_w)
+        # Create mask for patches only: [num_patches, num_patches]
+        mask = torch.zeros(num_patches, num_patches)
 
-        return ~mask
+        # Patches can only attend to nearby patches
+        for i in range(num_patches):
+            row_i, col_i = i // grid_size, i % grid_size
+            for j in range(num_patches):
+                row_j, col_j = j // grid_size, j % grid_size
+                # Only allow attention if patches are within local_window distance
+                if abs(row_i - row_j) <= self.local_window // 2 and abs(col_i - col_j) <= self.local_window // 2:
+                    mask[i, j] = 1
+
+        return mask.bool()
 
     def forward(self, x, return_attention=False):
         inp_x = self.layer_norm_1(x)
-        
+
         if return_attention:
             # Apply local attention mask
             attn_output, attn_weights = self.attn(
-                inp_x, inp_x, inp_x, 
+                inp_x, inp_x, inp_x,
                 attn_mask=self.attention_mask,
                 average_attn_weights=False
             )
@@ -361,6 +348,7 @@ class LocalAttentionBlock(nn.Module):
             x = x + attn_output
             x = x + self.linear(self.layer_norm_2(x))
             return x
+
 
 def img_to_patch(x, patch_size, flatten_channels=True):
     """
@@ -379,8 +367,9 @@ def img_to_patch(x, patch_size, flatten_channels=True):
         x = x.flatten(2, 4)  # [B, H'*W', C*p_H*p_W]
     return x
 
+
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=15000, base_weights=None):    
+    def __init__(self, window_size=15000, base_weights=None):
         self.c_threshold = 1e-6
         self.m_threshold = 1e-5
         self.x_threshold = 1e-4
@@ -391,14 +380,14 @@ class SXRRegressionDynamicLoss:
         self.m_errors = deque(maxlen=window_size)
         self.x_errors = deque(maxlen=window_size)
 
-        #Calculate the base weights based on the number of samples in each class within training data
+        # Calculate the base weights based on the number of samples in each class within training data
         if base_weights is None:
             self.base_weights = self._get_base_weights()
         else:
             self.base_weights = base_weights
 
     def _get_base_weights(self):
-        #Calculate the base weights based on the number of samples in each class within training data
+        # Base weights based on the number of samples in each class within training data
         return {
             'quiet': 6.643528005464481,    # Increase from current value
             'c_class': 1.626986450317832,  # Keep as baseline
@@ -408,7 +397,7 @@ class SXRRegressionDynamicLoss:
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
         base_loss = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
-        #base_loss = F.mse_loss(preds_norm, sxr_norm, reduction='none')
+        # base_loss = F.mse_loss(preds_norm, sxr_norm, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
         self._update_tracking(sxr_un, sxr_norm, preds_norm)
         weighted_loss = base_loss * weights
@@ -423,10 +412,10 @@ class SXRRegressionDynamicLoss:
             self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.05, sxrclass='quiet'  # Was 0.2
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'    # Was 0.3
+            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'  # Was 0.3
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'   # Was 0.4
+            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'  # Was 0.4
         )
         x_mult = self._get_performance_multiplier(
             self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=0.12, sxrclass='x_class'  # Was 0.5
@@ -461,7 +450,8 @@ class SXRRegressionDynamicLoss:
 
         return weights
 
-    def _get_performance_multiplier(self, error_history, max_multiplier=10.0, min_multiplier=0.5, sensitivity=3.0, sxrclass='quiet'):
+    def _get_performance_multiplier(self, error_history, max_multiplier=10.0, min_multiplier=0.5, sensitivity=3.0,
+                                    sxrclass='quiet'):
         """Class-dependent performance multiplier"""
 
         class_params = {
@@ -482,15 +472,13 @@ class SXRRegressionDynamicLoss:
         multiplier = np.exp(sensitivity * (ratio - 1))
         return np.clip(multiplier, min_multiplier, max_multiplier)
 
-
     def _update_tracking(self, sxr_un, sxr_norm, preds_norm):
         sxr_un_np = sxr_un.detach().cpu().numpy()
 
-        #Huber loss
+        # Huber loss
         error = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
         error = error.detach().cpu().numpy()
 
-    
         quiet_mask = sxr_un_np < self.c_threshold
         if quiet_mask.sum() > 0:
             self.quiet_errors.append(float(np.mean(error[quiet_mask])))
@@ -506,7 +494,6 @@ class SXRRegressionDynamicLoss:
         x_mask = sxr_un_np >= self.x_threshold
         if x_mask.sum() > 0:
             self.x_errors.append(float(np.mean(error[x_mask])))
-
 
     def get_current_multipliers(self):
         """Get current performance multipliers for logging"""
