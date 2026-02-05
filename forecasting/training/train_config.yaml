@@ -52,4 +52,4 @@ wandb:
     - sxr
     - regression
   wb_name: paper-8-patch-4ch
-  notes: Regression from AIA images (4 channels) to GOES SXR flux
+  notes: Regression from AIA images to SXR images using ViTLocal model with 8x8 patches
