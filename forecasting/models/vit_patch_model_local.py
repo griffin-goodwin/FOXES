@@ -1,5 +1,4 @@
 from collections import deque
-
 import math
 import numpy as np
 import torch
@@ -51,7 +50,7 @@ class ViTLocal(pl.LightningModule):
 
         scheduler = CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=150,
+            T_0=250,
             T_mult=2,
             eta_min=1e-7
         )
@@ -395,7 +394,6 @@ class SXRRegressionDynamicLoss:
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
         base_loss = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
-        # base_loss = F.mse_loss(preds_norm, sxr_norm, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
         self._update_tracking(sxr_un, sxr_norm, preds_norm)
         weighted_loss = base_loss * weights
@@ -407,16 +405,16 @@ class SXRRegressionDynamicLoss:
 
         # Get continuous multipliers per class with custom params
         quiet_mult = self._get_performance_multiplier(
-            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.05, sxrclass='quiet'  # Was 0.2
+            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.05, sxrclass='quiet'
         )
         c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'  # Was 0.3
+            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'
         )
         m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'  # Was 0.4
+            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'
         )
         x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=0.12, sxrclass='x_class'  # Was 0.5
+            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=0.12, sxrclass='x_class'
         )
 
         quiet_weight = self.base_weights['quiet'] * quiet_mult
