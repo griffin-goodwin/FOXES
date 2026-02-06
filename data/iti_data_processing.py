@@ -42,14 +42,7 @@ base_input_folder = config['iti']['input_folder']
 output_folder = config['iti']['output_folder']
 os.makedirs(output_folder, exist_ok=True)
 
-sdo_norms = {
-    '94': ImageNormalize(vmin=0, vmax=np.float32(16.560747), stretch=AsinhStretch(0.005), clip=True),
-    '131': ImageNormalize(vmin=0, vmax=np.float32(75.84181), stretch=AsinhStretch(0.005), clip=True),
-    '171': ImageNormalize(vmin=0, vmax=np.float32(1536.1443), stretch=AsinhStretch(0.005), clip=True),
-    '193': ImageNormalize(vmin=0, vmax=np.float32(2288.1), stretch=AsinhStretch(0.005), clip=True),
-    '211': ImageNormalize(vmin=0, vmax=np.float32(1163.9178), stretch=AsinhStretch(0.005), clip=True),
-    '304': ImageNormalize(vmin=0, vmax=np.float32(401.82352), stretch=AsinhStretch(0.001), clip=True),
-}
+
 
 
 class SDODataset_flaring(StackDataset):
@@ -66,13 +59,12 @@ class SDODataset_flaring(StackDataset):
     """
 
     def __init__(self, data, patch_shape=None, wavelengths=None, resolution=2048, ext='.fits', allow_errors=False, **kwargs):
-        wavelengths = [171, 193, 211, 304, 6173, ] if wavelengths is None else wavelengths
         if isinstance(data, list):
             paths = data
         else:
             paths = get_intersecting_files(data, wavelengths, ext=ext, **kwargs)
         ds_mapping = {94: AIADataset, 131: AIADataset, 171: AIADataset, 193: AIADataset, 211: AIADataset,
-                      304: AIADataset}
+                      304: AIADataset, 335: AIADataset, 1600: AIADataset, 1700: AIADataset, 4500: AIADataset, 6173: AIADataset}
         data_sets = [ds_mapping[wl_id](files, wavelength=wl_id, resolution=resolution, ext=ext, allow_errors=allow_errors)
                      for wl_id, files in zip(wavelengths, paths)]
         super().__init__(data_sets, **kwargs)
