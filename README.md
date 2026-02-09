@@ -67,4 +67,7 @@ If you use this code or data in your work, please cite:
 ## Acknowledgement
 This work is a research product of Heliolab (heliolab.ai), an initiative of the Frontier Development Lab (FDL.ai). FDL is a public–private partnership between NASA, Trillium Technologies (trillium.tech), and commercial AI partners including Google Cloud and NVIDIA.
 Heliolab was designed, delivered, and managed by Trillium Technologies Inc., a research and development company focused on intelligent systems and collaborative communities for Heliophysics, planetary stewardship and space exploration.
-We gratefully acknowledge Google Cloud for extensive computational resources, and NVIDIA Corporation for access to DGX Cloud and/or the Ada Lovelace L40 platform, enabled through NVIDIA and VMware.
+We gratefully acknowledge Google Cloud for extensive computational resources and NVIDIA Corporation.
+This material is based upon work supported by NASA under award number No. 80GSFC23CA040. Any opinions, findings, conclusions or recommendations expressed are those of the authors and do not necessarily reflect the views of the National Aeronautics and Space Administration.
+
+Large language models were used as brainstorming tools to discuss possible training strategies and methodological considerations. The authors retained full responsibility for all research decisions, interpretations, and conclusions presented in this work.
