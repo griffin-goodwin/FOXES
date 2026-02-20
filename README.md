@@ -3,7 +3,9 @@
 This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab 2025.
 
 Model / Data:
+
 https://huggingface.co/spaces/griffingoodwin04/FOXES-model
+
 https://huggingface.co/datasets/griffingoodwin04/FOXES-Data
 
 ### Abstract
