@@ -34,7 +34,7 @@ FOXES
 │   └── sxr_downloader.py        # Download GOES SXR flux data
 ├── forecasting                  # Model training and inference
 │   ├── data_loaders
-│   │   ├── SDOAIA_dataloader.py# PyTorch Lightning DataModule for AIA+SXR
+│   │   ├── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
 │   │   └── patch_flux_dataloader.py
 │   ├── inference
 │   │   ├── inference.py         # Batch inference; writes predictions.csv
