@@ -1,7 +1,7 @@
 
 #Base directories - change these to switch datasets
-base_data_dir: "/Volumes/T9/FOXES_Data"  # Change this line for different datasets
-base_checkpoint_dir: "/Volumes/T9/FOXES_Data"    # Change this line for different datasets
+base_data_dir: "/Volumes/T9/Data_FOXES"  # Change this line for different datasets
+base_checkpoint_dir: "/Volumes/T9/Data_FOXES"    # Change this line for different datasets
 wavelengths: [94, 131, 171, 193, 211, 304, 335]  # AIA wavelengths in Angstroms
 
 # GPU configuration
@@ -35,11 +35,11 @@ vit_architecture:
 # Data paths (automatically constructed from base directories)
 data:
   aia_dir:
-    "${base_data_dir}/AIA"
+    "${base_data_dir}/AIA_processed"
   sxr_dir:
-    "${base_data_dir}/SXR"
+    "${base_data_dir}/SXR_processed"
   sxr_norm_path:
-    "${base_data_dir}/SXR/normalized_sxr.npy"
+    "${base_data_dir}/SXR_processed/normalized_sxr.npy"
   checkpoints_dir:
     "${base_checkpoint_dir}/new-checkpoint/"
 

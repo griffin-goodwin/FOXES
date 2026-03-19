@@ -154,4 +154,4 @@ wandb/
 *.code-workspace
 
 .claude/
-misc/
+Untracked/

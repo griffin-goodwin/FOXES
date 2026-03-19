@@ -10,11 +10,9 @@ import pandas as pd
 class SXRDownloader:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def __init__(self, save_dir: str = '/mnt/data/PAPER/GOES-timespan', concat_dir: str = '/mnt/data/PAPER/GOES-timespan/combined'):
+    def __init__(self, save_dir: str = '/mnt/data/PAPER/GOES-timespan'):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
-        self.concat_dir = Path(concat_dir)
-        self.concat_dir.mkdir(exist_ok=True)
         self.used_g13_files = []
         self.used_g14_files = []
         self.used_g15_files = []
