@@ -60,7 +60,7 @@ RUN . $CONDA_DIR/etc/profile.d/conda.sh && \
 WORKDIR /workspace/FOXES
 
 # Copy requirements.txt first for better Docker layer caching
-COPY requirements.txt /workspace/FOXES/requirements.txt
+COPY ../requirements.txt /workspace/FOXES/requirements.txt
 
 # Create conda environment (Miniforge uses conda-forge by default, no TOS required)
 RUN . $CONDA_DIR/etc/profile.d/conda.sh && \

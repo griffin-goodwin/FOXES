@@ -3,7 +3,7 @@ version: '3.8'
 services:
   foxes:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     image: foxes:latest
     container_name: FOXES
