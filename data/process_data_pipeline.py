@@ -105,11 +105,8 @@ class DataProcessingPipeline:
         """
         Check if data alignment is complete by looking for output directories.
         """
-        output_dirs = [
-            Path(self.config.get_path('alignment', 'output_sxr_a_dir')),
-            Path(self.config.get_path('alignment', 'output_sxr_b_dir'))
-        ]
-        return all(d.exists() and any(d.iterdir()) for d in output_dirs)
+        output_dir = Path(self.config.get_path('alignment', 'output_sxr_dir'))
+        return output_dir.exists() and any(output_dir.iterdir())
     
     def run_script(self, script_name, step_info):
         """
@@ -135,7 +132,7 @@ class DataProcessingPipeline:
         # Create environment variables for configuration
         env = os.environ.copy()
         env.update({
-            'PIPELINE_CONFIG': str(self.config.config),
+            'PIPELINE_CONFIG': self.config.to_json(),
             'BASE_DATA_DIR': self.config.get_path('base_data_dir', 'base_data_dir')
         })
         
@@ -145,23 +142,18 @@ class DataProcessingPipeline:
             # Run the script
             result = subprocess.run(
                 [sys.executable, str(script_path)],
-                capture_output=True,
-                text=True,
                 cwd=self.base_dir,
                 env=env
             )
-            
+
             end_time = time.time()
             duration = end_time - start_time
-            
+
             if result.returncode == 0:
                 logger.info(f"✓ {step_info['name']} completed successfully in {duration:.2f} seconds")
-                if result.stdout:
-                    logger.debug(f"Output: {result.stdout}")
                 return True
             else:
                 logger.error(f"✗ {step_info['name']} failed with return code {result.returncode}")
-                logger.error(f"Error output: {result.stderr}")
                 return False
                 
         except Exception as e:
