@@ -50,10 +50,10 @@ class SXRDataProcessor:
         total_files = len(g13_files) + len(g14_files) + len(g15_files) + len(g16_files) + len(g17_files) + len(g18_files)
         logging.info(
             f"Found {len(g13_files)} GOES-13 files, {len(g14_files)} GOES-14 files, {len(g15_files)} GOES-15 files, {len(g16_files)} GOES-16 files, {len(g17_files)} GOES-17 files, and {len(g18_files)} GOES-18 files.")
-        print(f"📊 Total files found: {total_files}")
+        print(f"Total files found: {total_files}")
         
         if total_files == 0:
-            print("⚠️  No GOES data files found in the specified directory.")
+            print("No GOES data files found in the specified directory.")
             return
 
         def process_files(files, satellite_name, output_file, used_file_list):
@@ -84,37 +84,37 @@ class SXRDataProcessor:
                             ds.close()
 
             if not datasets:
-                print(f"❌ No valid datasets for {satellite_name}")
+                print(f"No valid datasets for {satellite_name}")
                 logging.warning(f"No valid datasets for {satellite_name}")
                 return
 
-            print(f"📊 Processing {len(datasets)} datasets for {satellite_name}...")
+            print(f"Processing {len(datasets)} datasets for {satellite_name}...")
             
             try:
-                print(f"🔗 Concatenating datasets...")
+                print(f"Concatenating datasets...")
                 combined_ds = xr.concat(datasets, dim='time').sortby('time')
                 
                 # Scaling factors for GOES-13, GOES-14, and GOES-15
                 if satellite_name in ['GOES-13', 'GOES-14', 'GOES-15']:
-                    print(f"⚖️  Applying scaling factors for {satellite_name}...")
+                    print(f"Applying scaling factors for {satellite_name}...")
                     combined_ds['xrsa_flux'] = combined_ds['xrsa_flux'] / .85
                     combined_ds['xrsb_flux'] = combined_ds['xrsb_flux'] / .7
                 
-                print(f"🔄 Converting to DataFrame...")
+                print(f"Converting to DataFrame...")
                 df = combined_ds.to_dataframe().reset_index()
                 
                 if 'quad_diode' in df.columns:
-                    print(f"🔍 Filtering quad diode data...")
+                    print(f"Filtering quad diode data...")
                     df = df[df['quad_diode'] == 0]  # Filter out quad diode data
 
                 #Filter out data where xrsb_flux has a quality flag of >0
-                print(f"🔍 Filtering out data where xrsb_flux has a quality flag of >0...")
-                df = df[df['xrsb_quality'] == 0]
+                print(f"Filtering out data where xrsb_flux has a quality flag of >0...")
+                df = df[df['xrsb_flag'] == 0]
                 
                 df['time'] = pd.to_datetime(df['time'])
                 df.set_index('time', inplace=True)
                 
-                print(f"📈 Applying log interpolation...")
+                print(f"Applying log interpolation...")
                 df_log = np.log10(df[columns_to_interp].replace(0, np.nan))
 
                 # Step 3: Interpolate in log space
@@ -128,14 +128,14 @@ class SXRDataProcessor:
                 max_date = df.index.max().strftime('%Y%m%d')
                 filename = f"{str(output_file)}_{min_date}_{max_date}.csv"
                 
-                print(f"💾 Saving to {filename}...")
+                print(f"Saving to {filename}...")
                 df.to_csv(filename, index=True)
 
-                print(f"✅ Successfully processed {satellite_name}: {successful_files} files loaded, {failed_files} failed")
+                print(f"Successfully processed {satellite_name}: {successful_files} files loaded, {failed_files} failed")
                 logging.info(f"Saved combined file: {output_file}")
                 
             except Exception as e:
-                print(f"❌ Failed to process {satellite_name}: {e}")
+                print(f"Failed to process {satellite_name}: {e}")
                 logging.error(f"Failed to write {output_file}: {e}")
             finally:
                 for ds in datasets:
@@ -156,7 +156,7 @@ class SXRDataProcessor:
         if len(g18_files) != 0:
             satellites_to_process.append((g18_files, "GOES-18", self.output_dir / "combined_g18_avg1m", self.used_g18_files))
 
-        print(f"\n🚀 Starting processing of {len(satellites_to_process)} satellites...")
+        print(f"\nStarting processing of {len(satellites_to_process)} satellites...")
         
         # Process each satellite with overall progress tracking
         successful_satellites = 0
@@ -164,36 +164,36 @@ class SXRDataProcessor:
         
         for i, (files, satellite_name, output_file, used_file_list) in enumerate(satellites_to_process, 1):
             print(f"\n{'='*60}")
-            print(f"📡 Processing satellite {i}/{len(satellites_to_process)}: {satellite_name}")
+            print(f"Processing satellite {i}/{len(satellites_to_process)}: {satellite_name}")
             print(f"{'='*60}")
             
             try:
                 process_files(files, satellite_name, output_file, used_file_list)
                 successful_satellites += 1
             except Exception as e:
-                print(f"❌ Failed to process {satellite_name}: {e}")
+                print(f"Failed to process {satellite_name}: {e}")
                 failed_satellites += 1
                 logging.error(f"Failed to process {satellite_name}: {e}")
         
         # Print final summary
         print(f"\n{'='*60}")
-        print(f"📊 PROCESSING COMPLETE")
+        print(f"PROCESSING COMPLETE")
         print(f"{'='*60}")
-        print(f"✅ Successfully processed: {successful_satellites} satellites")
-        print(f"❌ Failed: {failed_satellites} satellites")
-        print(f"📁 Total files processed: {total_files}")
-        print(f"📂 Output directory: {self.output_dir}")
+        print(f"Successfully processed: {successful_satellites} satellites")
+        print(f"Failed: {failed_satellites} satellites")
+        print(f"Total files processed: {total_files}")
+        print(f"Output directory: {self.output_dir}")
         
         # Print file usage statistics
         total_used_files = (len(self.used_g13_files) + len(self.used_g14_files) + 
                            len(self.used_g15_files) + len(self.used_g16_files) + 
                            len(self.used_g17_files) + len(self.used_g18_files))
-        print(f"📋 Files used in processing: {total_used_files}")
+        print(f"Files used in processing: {total_used_files}")
         
         if successful_satellites > 0:
-            print(f"\n🎉 SXR data processing completed successfully!")
+            print(f"\nSXR data processing completed successfully!")
         else:
-            print(f"\n⚠️  No satellites were processed successfully.")
+            print(f"\n⚠No satellites were processed successfully.")
 
 
 if __name__ == '__main__':
@@ -204,13 +204,13 @@ if __name__ == '__main__':
                         help='Directory where combined GOES data will be saved.')
     args = parser.parse_args()
     
-    print("🌞 GOES SXR Data Processing Tool")
+    print("GOES SXR Data Processing Tool")
     print("=" * 50)
-    print(f"📂 Data directory: {args.data_dir}")
-    print(f"📁 Output directory: {args.output_dir}")
+    print(f"Data directory: {args.data_dir}")
+    print(f"Output directory: {args.output_dir}")
     print("=" * 50)
     
     processor = SXRDataProcessor(data_dir=args.data_dir, output_dir=args.output_dir)
     processor.combine_goes_data()
 
-    print("\n🏁 All processing tasks completed.")
+    print("\nAll processing tasks completed.")

@@ -24,7 +24,7 @@ venv.bak/
 
 # IDE
 .vscode/
-.idea/
+../.idea/
 *.swp
 *.swo
 *~

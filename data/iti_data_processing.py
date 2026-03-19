@@ -10,38 +10,18 @@ from astropy.visualization import ImageNormalize, AsinhStretch
 from itipy.data.dataset import StackDataset, get_intersecting_files, AIADataset
 from itipy.data.editor import BrightestPixelPatchEditor, sdo_norms
 import os
+import json
 from multiprocessing import Pool
 from tqdm import tqdm
 
-# Configuration for all wavelengths to process
-# Load configuration from environment or use defaults
-import os
-import json
 
 def load_config():
     """Load configuration from environment or use defaults."""
-    if 'PIPELINE_CONFIG' in os.environ:
-        try:
-            config = json.loads(os.environ['PIPELINE_CONFIG'])
-            return config
-        except:
-            pass
-    
-    # Default configuration
-    return {
-        'iti': {
-            'wavelengths': [94, 131, 171, 193, 211, 304],
-            'input_folder': '/mnt/data/PAPER/SDOData',
-            'output_folder': '/mnt/data/PAPER/SDOITI'
-        }
-    }
-
-config = load_config()
-wavelengths = config['iti']['wavelengths']
-base_input_folder = config['iti']['input_folder']
-output_folder = config['iti']['output_folder']
-os.makedirs(output_folder, exist_ok=True)
-
+    try:
+        config = json.loads(os.environ['PIPELINE_CONFIG'])
+        return config
+    except:
+        pass
 
 
 
@@ -72,72 +52,72 @@ class SDODataset_flaring(StackDataset):
             self.addEditor(BrightestPixelPatchEditor(patch_shape))
 
 
-# Check if we need to process anything before loading the dataset
-def check_existing_files():
-    """Check how many files already exist without loading the full dataset"""
-    # Get file list from the base folder to estimate total samples
-    from itipy.data.dataset import get_intersecting_files
+_aia_dataset = None
+_output_folder = None
+
+
+def _init_worker(dataset, out_folder):
+    global _aia_dataset, _output_folder
+    _aia_dataset = dataset
+    _output_folder = out_folder
+
+
+def save_sample(i):
+    try:
+        data = _aia_dataset[i]
+        file_path = os.path.join(_output_folder, _aia_dataset.getId(i)) + '.npy'
+        np.save(file_path, data)
+    except Exception as e:
+        print(f"Warning: Could not process sample {i} (ID: {_aia_dataset.getId(i)}): {e}")
+
+
+def check_existing_files(base_input_folder, wavelengths, output_folder):
+    """Check how many files already exist without loading the full dataset."""
     files = get_intersecting_files(base_input_folder, wavelengths, ext='.fits')
     if not files or len(files) == 0:
         return 0, 0
-    
-    # Count existing output files - need to check for each wavelength combination
+
     existing_count = 0
-    total_expected = len(files[0])  # All wavelength lists should have same length
-    
-    # Check each time step (index across all wavelengths)
+    total_expected = len(files[0])
+
     for i in range(total_expected):
-        # Check if output file exists for this time step
-        # The output filename should be based on the first wavelength's filename
-        first_wl_file = files[0][i]  # Use first wavelength as reference
+        first_wl_file = files[0][i]
         base_name = os.path.splitext(os.path.basename(first_wl_file))[0]
-        # Remove wavelength suffix if present (e.g., "_171" from filename)
         if '_' in base_name:
             base_name = '_'.join(base_name.split('_')[:-1])
         output_path = os.path.join(output_folder, base_name) + '.npy'
-        
         if os.path.exists(output_path):
             existing_count += 1
-    
+
     return existing_count, total_expected
 
-# Check existing files first
-existing_files, total_expected = check_existing_files()
-print(f"Found {existing_files} existing files out of {total_expected} expected files")
 
-if existing_files >= total_expected:
-    print("All files already processed. Nothing to do.")
-else:
-    print(f"Need to process {total_expected - existing_files} remaining files")
-    
-    # Only load the dataset if we need to process files
-    aia_dataset = SDODataset_flaring(data=base_input_folder, wavelengths=wavelengths, resolution=512, allow_errors=True)
-    
-    # Filter out indices that already have processed files
-    def get_unprocessed_indices():
-        unprocessed = []
-        for i in range(len(aia_dataset)):
-            file_path = os.path.join(output_folder, aia_dataset.getId(i)) + '.npy'
-            if not os.path.exists(file_path):
-                unprocessed.append(i)
-        return unprocessed
+if __name__ == '__main__':
+    config = load_config()
+    wavelengths = config['iti']['wavelengths']
+    base_input_folder = config['iti']['input_folder']
+    output_folder = config['iti']['output_folder']
+    os.makedirs(output_folder, exist_ok=True)
 
-    def save_sample(i):
-        try:
-            data = aia_dataset[i]
-            file_path = os.path.join(output_folder, aia_dataset.getId(i)) + '.npy'
-            np.save(file_path, data)
-        except Exception as e:
-            print(f"Warning: Could not process sample {i} (ID: {aia_dataset.getId(i)}): {e}")
-            return  # Skip this sample and continue with the next one
+    existing_files, total_expected = check_existing_files(base_input_folder, wavelengths, output_folder)
+    print(f"Found {existing_files} existing files out of {total_expected} expected files")
 
-    # Get only unprocessed indices
-    unprocessed_indices = get_unprocessed_indices()
-    print(f"Processing {len(unprocessed_indices)} unprocessed samples")
-
-    if unprocessed_indices:
-        with Pool(processes=os.cpu_count()) as pool:
-            list(tqdm(pool.imap(save_sample, unprocessed_indices), total=len(unprocessed_indices)))
-            print("AIA data processing completed.")
+    if existing_files >= total_expected:
+        print("All files already processed. Nothing to do.")
     else:
-        print("All samples already processed. Nothing to do.")
+        print(f"Need to process {total_expected - existing_files} remaining files")
+
+        aia_dataset = SDODataset_flaring(data=base_input_folder, wavelengths=wavelengths, resolution=512, allow_errors=True)
+
+        unprocessed_indices = [
+            i for i in range(len(aia_dataset))
+            if not os.path.exists(os.path.join(output_folder, aia_dataset.getId(i)) + '.npy')
+        ]
+        print(f"Processing {len(unprocessed_indices)} unprocessed samples")
+
+        if unprocessed_indices:
+            with Pool(processes=os.cpu_count(), initializer=_init_worker, initargs=(aia_dataset, output_folder)) as pool:
+                list(tqdm(pool.imap(save_sample, unprocessed_indices), total=len(unprocessed_indices)))
+            print("AIA data processing completed.")
+        else:
+            print("All samples already processed. Nothing to do.")

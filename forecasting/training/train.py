@@ -84,69 +84,6 @@ def resolve_config_variables(config_dict):
     return recursive_substitute(config_dict, variables)
 
 
-# Parser
-parser = argparse.ArgumentParser()
-parser.add_argument('-config', type=str, default='config.yaml', required=True, help='Path to config YAML.')
-args = parser.parse_args()
-
-# Load config with variable substitution
-with open(args.config, 'r') as stream:
-    config_data = yaml.load(stream, Loader=yaml.SafeLoader)
-
-# Resolve variables like ${base_data_dir}
-config_data = resolve_config_variables(config_data)
-
-
-# Debug: Print resolved paths
-print("Resolved paths:")
-print(f"AIA dir: {config_data['data']['aia_dir']}")
-print(f"SXR dir: {config_data['data']['sxr_dir']}")
-print(f"Checkpoints dir: {config_data['data']['checkpoints_dir']}")
-
-sxr_norm = np.load(config_data['data']['sxr_norm_path'])
-training_wavelengths = config_data['wavelengths']
-
-
-# DataModule
-data_loader = AIA_GOESDataModule(
-    aia_train_dir= config_data['data']['aia_dir']+"/train",
-    aia_val_dir=config_data['data']['aia_dir']+"/val",
-    aia_test_dir=config_data['data']['aia_dir']+"/test",
-    sxr_train_dir=config_data['data']['sxr_dir']+"/train",
-    sxr_val_dir=config_data['data']['sxr_dir']+"/val",
-    sxr_test_dir=config_data['data']['sxr_dir']+"/test",
-    batch_size=config_data['batch_size'],
-    num_workers=min(8, os.cpu_count()),  # Limit workers to prevent shm issues
-    sxr_norm=sxr_norm,
-    wavelengths=training_wavelengths,
-    oversample=config_data['oversample'],
-    balance_strategy=config_data['balance_strategy'],
-)
-data_loader.setup()
-# Logger
-#wb_name = f"{instrument}_{n}" if len(combined_parameters) > 1 else "aia_sxr_model"
-wandb_logger = WandbLogger(
-    entity=config_data['wandb']['entity'],
-    project=config_data['wandb']['project'],
-    job_type=config_data['wandb']['job_type'],
-    tags=config_data['wandb']['tags'],
-    name=config_data['wandb']['run_name'],
-    notes=config_data['wandb']['notes'],
-    config=config_data
-)
-
-# Logging callback
-total_n_valid = len(data_loader.val_ds)
-plot_data = [data_loader.val_ds[i] for i in range(0, total_n_valid, max(1, total_n_valid // 4))]
-plot_samples = plot_data  # Keep as list of ((aia, sxr), target)
-#sxr_callback = SXRPredictionLogger(plot_samples)
-
-sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
-# Attention map callback - get patch size from config
-patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
-attention = AttentionMapCallback(patch_size=patch_size, use_local_attention=True)
-
-
 class PTHCheckpointCallback(Callback):
     """
     Custom PyTorch Lightning callback to save model checkpoints in `.pth` format.
@@ -208,65 +145,6 @@ class PTHCheckpointCallback(Callback):
 
 
 
-
-# Checkpoint callback
-checkpoint_callback = ModelCheckpoint(
-    dirpath=config_data['data']['checkpoints_dir'],
-    monitor='val_total_loss',
-    mode='min',
-    save_top_k=10,
-    filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}"
-)
-
-pth_callback = PTHCheckpointCallback(
-    dirpath=config_data['data']['checkpoints_dir'],
-    monitor='val_total_loss',
-    mode='min',
-    save_top_k=1,
-    filename_prefix=config_data['wandb']['run_name']
-)
-
-def process_batch(batch_data, sxr_norm, c_threshold, m_threshold, x_threshold):
-    """
-    Process a batch of SXR data to count flare occurrences in different intensity classes.
-
-    Parameters
-    ----------
-    batch_data : tuple
-        Tuple containing (batch, batch_idx).
-    sxr_norm : np.ndarray
-        Normalization parameters for SXR values.
-    c_threshold, m_threshold, x_threshold : float
-        Thresholds defining flare intensity categories.
-
-    Returns
-    -------
-    dict
-        Dictionary containing counts for quiet, C, M, and X class flares.
-    """
-    from forecasting.models.vit_patch_model import unnormalize_sxr
-    
-    batch, batch_idx = batch_data
-    _, sxr = batch
-    
-    # Unnormalize the SXR values
-    sxr_un = unnormalize_sxr(sxr, sxr_norm)
-    sxr_un_flat = sxr_un.view(-1).cpu().numpy()
-    
-    total = len(sxr_un_flat)
-    quiet_count = ((sxr_un_flat < c_threshold)).sum()
-    c_count = ((sxr_un_flat >= c_threshold) & (sxr_un_flat < m_threshold)).sum()
-    m_count = ((sxr_un_flat >= m_threshold) & (sxr_un_flat < x_threshold)).sum()
-    x_count = ((sxr_un_flat >= x_threshold)).sum()
-    
-    return {
-        'total': total,
-        'quiet_count': quiet_count,
-        'c_count': c_count,
-        'm_count': m_count,
-        'x_count': x_count,
-        'batch_idx': batch_idx
-    }
 
 def get_base_weights(data_loader, sxr_norm):
     """
@@ -353,94 +231,126 @@ def get_base_weights(data_loader, sxr_norm):
 
 
 
-base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
-model = ViTLocal(model_kwargs=config_data['vit_architecture'], sxr_norm = sxr_norm, base_weights=base_weights)
+if __name__ == '__main__':
+    # Parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-config', type=str, default='config.yaml', required=True, help='Path to config YAML.')
+    args = parser.parse_args()
 
+    # Load config with variable substitution
+    with open(args.config, 'r') as stream:
+        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
+    config_data = resolve_config_variables(config_data)
 
-# Set device based on config
-# Support both old 'gpu_id' and new 'gpu_ids' config keys for backward compatibility
-gpu_config = config_data.get('gpu_ids', config_data.get('gpu_id', 0))
+    print("Resolved paths:")
+    print(f"AIA dir: {config_data['data']['aia_dir']}")
+    print(f"SXR dir: {config_data['data']['sxr_dir']}")
+    print(f"Checkpoints dir: {config_data['data']['checkpoints_dir']}")
 
-if gpu_config == -1:
-    """
-    Use CPU for training if GPU config is set to -1.
-    """
-    # CPU only
-    accelerator = "cpu"
-    devices = 1
-    strategy = "auto"
-    print("Using CPU for training")
-elif gpu_config == "all":
-    """
-    Use all available GPUs if GPU config is set to 'all'.
-    """
-    # Use all available GPUs
-    if torch.cuda.is_available():
-        accelerator = "gpu"
-        devices = -1  # -1 means use all available GPUs
-        num_gpus = torch.cuda.device_count()
-        strategy = "auto"
-        print(f"Using all available GPUs ({num_gpus} GPUs)")
-        if num_gpus > 1:
-            print(f"Multi-GPU training with DDP: Effective batch size = {config_data['batch_size']} x {num_gpus} GPUs = {config_data['batch_size'] * num_gpus}")
+    sxr_norm = np.load(config_data['data']['sxr_norm_path'])
+    training_wavelengths = config_data['wavelengths']
+
+    # DataModule
+    data_loader = AIA_GOESDataModule(
+        aia_train_dir=config_data['data']['aia_dir'] + "/train",
+        aia_val_dir=config_data['data']['aia_dir'] + "/val",
+        aia_test_dir=config_data['data']['aia_dir'] + "/test",
+        sxr_train_dir=config_data['data']['sxr_dir'] + "/train",
+        sxr_val_dir=config_data['data']['sxr_dir'] + "/val",
+        sxr_test_dir=config_data['data']['sxr_dir'] + "/test",
+        batch_size=config_data['batch_size'],
+        num_workers=min(8, os.cpu_count()),
+        sxr_norm=sxr_norm,
+        wavelengths=training_wavelengths,
+        oversample=config_data['oversample'],
+        balance_strategy=config_data['balance_strategy'],
+    )
+    data_loader.setup()
+
+    # Logger
+    wandb_logger = WandbLogger(
+        entity=config_data['wandb']['entity'],
+        project=config_data['wandb']['project'],
+        job_type=config_data['wandb']['job_type'],
+        tags=config_data['wandb']['tags'],
+        name=config_data['wandb']['run_name'],
+        notes=config_data['wandb']['notes'],
+        config=config_data
+    )
+
+    # Callbacks
+    total_n_valid = len(data_loader.val_ds)
+    plot_samples = [data_loader.val_ds[i] for i in range(0, total_n_valid, max(1, total_n_valid // 4))]
+    sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
+    patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
+    attention = AttentionMapCallback(patch_size=patch_size, use_local_attention=True)
+
+    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+    model = ViTLocal(model_kwargs=config_data['vit_architecture'], sxr_norm=sxr_norm, base_weights=base_weights)
+
+    # Checkpoint callbacks
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=config_data['data']['checkpoints_dir'],
+        monitor='val_total_loss',
+        mode='min',
+        save_top_k=10,
+        filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}"
+    )
+    pth_callback = PTHCheckpointCallback(
+        dirpath=config_data['data']['checkpoints_dir'],
+        monitor='val_total_loss',
+        mode='min',
+        save_top_k=1,
+        filename_prefix=config_data['wandb']['run_name']
+    )
+
+    # Set device based on config
+    gpu_config = config_data.get('gpu_ids', config_data.get('gpu_id', 0))
+    if gpu_config == -1:
+        accelerator, devices, strategy = "cpu", 1, "auto"
+        print("Using CPU for training")
+    elif gpu_config == "all":
+        if torch.cuda.is_available():
+            accelerator, devices, strategy = "gpu", -1, "auto"
+            num_gpus = torch.cuda.device_count()
+            print(f"Using all available GPUs ({num_gpus} GPUs)")
+        else:
+            accelerator, devices, strategy = "cpu", 1, "auto"
+            print("No GPUs available, falling back to CPU")
+    elif isinstance(gpu_config, list):
+        if torch.cuda.is_available():
+            accelerator, devices, strategy = "gpu", gpu_config, "auto"
+            print(f"Using GPUs: {gpu_config}")
+        else:
+            accelerator, devices, strategy = "cpu", 1, "auto"
+            print("No GPUs available, falling back to CPU")
     else:
-        accelerator = "cpu"
-        devices = 1
-        strategy = "auto"
-        print("No GPUs available, falling back to CPU")
-elif isinstance(gpu_config, list):
-    """
-    Use specific GPU IDs if provided as a list.
-    """
-    # Multiple specific GPUs
-    if torch.cuda.is_available():
-        accelerator = "gpu"
-        devices = gpu_config
-        strategy = "auto"
-        print(f"Using GPUs: {gpu_config}")
-        if len(gpu_config) > 1:
-            print(f"Multi-GPU training with DDP: Effective batch size = {config_data['batch_size']} x {len(gpu_config)} GPUs = {config_data['batch_size'] * len(gpu_config)}")
-    else:
-        accelerator = "cpu"
-        devices = 1
-        strategy = "auto"
-        print("No GPUs available, falling back to CPU")
-else:
-    """
-    Use a single GPU or CPU based on availability.
-    """
-    # Single GPU (integer)
-    if torch.cuda.is_available():
-        accelerator = "gpu"
-        devices = [gpu_config]
-        strategy = "auto"
-        print(f"Using GPU {gpu_config}")
-    else:
-        accelerator = "cpu"
-        devices = 1
-        strategy = "auto"
-        print(f"GPU {gpu_config} not available, falling back to CPU")
+        if torch.cuda.is_available():
+            accelerator, devices, strategy = "gpu", [gpu_config], "auto"
+            print(f"Using GPU {gpu_config}")
+        else:
+            accelerator, devices, strategy = "cpu", 1, "auto"
+            print(f"GPU {gpu_config} not available, falling back to CPU")
 
-# Trainer
-trainer = Trainer(
-    default_root_dir=config_data['data']['checkpoints_dir'],
-    accelerator=accelerator,
-    devices=devices,
-    strategy=strategy,
-    max_epochs=config_data['epochs'],
-    callbacks=[attention, checkpoint_callback],
-    logger=wandb_logger,
-    log_every_n_steps=10,
-)
-trainer.fit(model, data_loader)
+    # Trainer
+    trainer = Trainer(
+        default_root_dir=config_data['data']['checkpoints_dir'],
+        accelerator=accelerator,
+        devices=devices,
+        strategy=strategy,
+        max_epochs=config_data['epochs'],
+        callbacks=[attention, checkpoint_callback],
+        logger=wandb_logger,
+        log_every_n_steps=10,
+    )
+    trainer.fit(model, data_loader)
 
-# Save final PyTorch checkpoint with model and state_dict
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-final_checkpoint_path = os.path.join(config_data['data']['checkpoints_dir'], f"{config_data['wandb']['run_name']}-final-{timestamp}.pth")
-torch.save({
-    'model': model,
-    'state_dict': model.state_dict()
-}, final_checkpoint_path)
-print(f"Saved final PyTorch checkpoint: {final_checkpoint_path}")
-# Finalize
-wandb.finish()
+    # Save final checkpoint
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    final_checkpoint_path = os.path.join(
+        config_data['data']['checkpoints_dir'],
+        f"{config_data['wandb']['run_name']}-final-{timestamp}.pth"
+    )
+    torch.save({'model': model, 'state_dict': model.state_dict()}, final_checkpoint_path)
+    print(f"Saved final PyTorch checkpoint: {final_checkpoint_path}")
+    wandb.finish()

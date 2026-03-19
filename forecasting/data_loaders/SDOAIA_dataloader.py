@@ -12,6 +12,16 @@ import glob
 import os
 
 
+class SXRLogNormTransform:
+    """Picklable SXR log-normalization transform (replaces T.Lambda for spawn compatibility)."""
+    def __init__(self, mean: float, std: float):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, x: float) -> float:
+        return (np.log10(x + 1e-8) - self.mean) / self.std
+
+
 class AIA_GOESDataset(torch.utils.data.Dataset):
     """
     PyTorch Dataset for loading paired AIA (EUV images) and GOES (SXR flux) data.
@@ -354,7 +364,7 @@ class AIA_GOESDataModule(LightningDataModule):
         self.train_ds = AIA_GOESDataset(
             aia_dir=self.aia_train_dir,
             sxr_dir=self.sxr_train_dir,
-            sxr_transform=T.Lambda(lambda x: (np.log10(x + 1e-8) - self.sxr_norm[0]) / self.sxr_norm[1]),
+            sxr_transform=SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1]),
             target_size=(512, 512),
             wavelengths=self.wavelengths,
             cadence=1,
@@ -368,7 +378,7 @@ class AIA_GOESDataModule(LightningDataModule):
         self.val_ds = AIA_GOESDataset(
             aia_dir=self.aia_val_dir,
             sxr_dir=self.sxr_val_dir,
-            sxr_transform=T.Lambda(lambda x: (np.log10(x + 1e-8) - self.sxr_norm[0]) / self.sxr_norm[1]),
+            sxr_transform=SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1]),
             target_size=(512, 512),
             wavelengths=self.wavelengths,
             cadence=1,
@@ -382,7 +392,7 @@ class AIA_GOESDataModule(LightningDataModule):
         self.test_ds = AIA_GOESDataset(
             aia_dir=self.aia_test_dir,
             sxr_dir=self.sxr_test_dir,
-            sxr_transform=T.Lambda(lambda x: (np.log10(x + 1e-8) - self.sxr_norm[0]) / self.sxr_norm[1]),
+            sxr_transform=SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1]),
             target_size=(512, 512),
             wavelengths=self.wavelengths,
             cadence=1,

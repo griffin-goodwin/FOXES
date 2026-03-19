@@ -1,0 +1,87 @@
+# =============================================================================
+# FOXES Pipeline Configuration
+# =============================================================================
+# Used by run_pipeline.py to run any combination of pipeline steps.
+#
+# Usage:
+#   python run_pipeline.py --config pipeline_config.yaml --steps all
+#   python run_pipeline.py --config pipeline_config.yaml --steps train,inference,flare_analysis
+#   python run_pipeline.py --list
+
+# -----------------------------------------------------------------------------
+# Shared date range (used by download_aia and download_sxr)
+# -----------------------------------------------------------------------------
+start_date: "2014-07-01 00:00:00"
+end_date:   "2014-07-08 00:00:00"
+
+# -----------------------------------------------------------------------------
+# AIA download  (step: download_aia)
+# -----------------------------------------------------------------------------
+aia:
+  download_dir: "/Volumes/T9/Data_FOXES/AIA_raw"
+  email: ""        # Must be registered at http://jsoc.stanford.edu
+  cadence: 1                    # Minutes between frames
+
+# -----------------------------------------------------------------------------
+# SXR download  (step: download_sxr)
+# -----------------------------------------------------------------------------
+sxr:
+  save_dir: "/Volumes/T9/Data_FOXES/SXR_raw"
+
+# -----------------------------------------------------------------------------
+# Preprocessing  (step: preprocess)
+# -----------------------------------------------------------------------------
+preprocess:
+  config: "data/pipeline_config.yaml"   # PipelineConfig for process_data_pipeline.py
+
+# -----------------------------------------------------------------------------
+# SXR normalization  (step: normalize)
+# -----------------------------------------------------------------------------
+normalize:
+  sxr_dir:     "/Volumes/T9/Data_FOXES/SXR_processed/train"
+  output_path: "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
+
+# -----------------------------------------------------------------------------
+# Train/val/test split  (step: split)
+# Runs split_data.py once for AIA and once for SXR.
+# -----------------------------------------------------------------------------
+split:
+  aia_input_dir: "/Volumes/T9/Data_FOXES/AIA_processed"  # splits into AIA_processed/train|val|test
+  sxr_input_dir: "/Volumes/T9/Data_FOXES/SXR_processed"  # splits into SXR_processed/train|val|test
+  train_start: "2014-07-01"
+  train_end:   "2014-07-05"
+  val_start:   "2014-07-06"
+  val_end:     "2014-07-07"
+  test_start:  "2014-07-08"
+  test_end:    "2025-12-31"
+
+# -----------------------------------------------------------------------------
+# Training  (step: train)
+# -----------------------------------------------------------------------------
+train:
+  config: "forecasting/training/train_config.yaml"
+  overrides:                          # Any key from train_config.yaml can go here
+    base_data_dir: "/Volumes/T9/Data_FOXES"
+    base_checkpoint_dir: "/Volumes/T9/Data_FOXES"
+    epochs: 150
+    batch_size: 6
+    wandb:
+      run_name: "pipeline-run"
+      entity: jayantbiradar619-university-of-arizona # Use your exact W&B username
+      project: Paper
+      job_type: training
+      tags:
+        - aia
+        - sxr
+        - regression
+      run_name: paper-8-patch-4ch
+      notes: Regression from AIA images to SXR images using ViTLocal model with 8x8 patches
+
+# -----------------------------------------------------------------------------
+# Inference & flare analysis  (steps: inference, flare_analysis)
+# -----------------------------------------------------------------------------
+inference:
+  config: "forecasting/inference/local_config.yaml"
+  overrides:                          # Any key from local_config.yaml can go here
+    paths:
+      data_dir: "/Volumes/T9/Data_FOXES"

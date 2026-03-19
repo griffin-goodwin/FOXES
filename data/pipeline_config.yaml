@@ -1,0 +1,47 @@
+# Data Processing Pipeline Configuration
+#
+# Usage: python process_data_pipeline.py --config pipeline_config.yaml
+#
+# Directory flow:
+#   AIA_raw        → euv_data_cleaning   → bad files moved to AIA_bad
+#   AIA_raw        → iti_data_processing → AIA_processed  (512x512 .npy)
+#   AIA_processed  ┐
+#                  ├─ align_data ──────→ SXR_processed  (xrsb_flux .npy per timestamp)
+#   SXR_raw/combined ┘                  AIA_missing     (AIA files with no SXR match)
+
+base_data_dir: /Volumes/T9/Data_FOXES
+
+euv:
+  input_folder:  /Volumes/T9/Data_FOXES/AIA_raw
+  bad_files_dir: /Volumes/T9/Data_FOXES/AIA_bad
+  wavelengths:
+    - 94
+    - 131
+    - 171
+    - 193
+    - 211
+    - 304
+    - 335
+
+iti:
+  input_folder:  /Volumes/T9/Data_FOXES/AIA_raw       # same as euv (bad files already moved out)
+  output_folder: /Volumes/T9/Data_FOXES/AIA_processed
+  wavelengths:
+    - 94
+    - 131
+    - 171
+    - 193
+    - 211
+    - 304
+    - 335
+
+alignment:
+  goes_data_dir:     /Volumes/T9/Data_FOXES/SXR_raw/combined  # output of sxr_downloader concat
+  aia_processed_dir: /Volumes/T9/Data_FOXES/AIA_processed     # must match iti.output_folder
+  output_sxr_dir:    /Volumes/T9/Data_FOXES/SXR_processed
+  aia_missing_dir:   /Volumes/T9/Data_FOXES/AIA_missing
+
+processing:
+  max_processes: null        # null = use all available cores
+  batch_size_multiplier: 4
+  min_batch_size: 1
