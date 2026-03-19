@@ -27,7 +27,7 @@ class SDODownloader:
         wavelengths (list): List of wavelengths to download.
         n_workers (int): Number of worker threads for parallel download.
     """
-    def __init__(self, base_path='/mnt/data/PAPER/SDOData', email=None, wavelengths=['94', '131', '171', '193', '211', '304'], n_workers=4, cadence=60):
+    def __init__(self, base_path='/mnt/data/PAPER/SDOData', email=None, wavelengths=['94', '131', '171', '193', '211', '304', '335'], n_workers=4, cadence=60):
         self.ds_path = base_path
         self.wavelengths = [str(wl) for wl in wavelengths]
         self.n_workers = n_workers
@@ -53,7 +53,11 @@ class SDODownloader:
             if os.path.exists(map_path):
                 return map_path
             # load map
+            if not segment or pd.isna(segment):
+                logging.error('Segment path is null for %s — data may not be in JSOC cache' % header.get('DATE__OBS'))
+                raise ValueError('Null segment path for %s' % header.get('DATE__OBS'))
             url = 'http://jsoc.stanford.edu' + segment
+            logging.info('Downloading: %s' % url)
             
             # Retry download with exponential backoff
             max_retries = 3
@@ -111,27 +115,20 @@ class SDODownloader:
         id = date.isoformat()
 
         logging.info('Start download: %s' % id)
-        # query Magnetogram
-        #time_param = '%sZ' % date.isoformat('_', timespec='seconds')
-        #ds_hmi = 'hmi.M_720s[%s]{magnetogram}' % time_param
-        #keys_hmi = self.drms_client.keys(ds_hmi)
-        #header_hmi, segment_hmi = self.drms_client.query(ds_hmi, key=','.join(keys_hmi), seg='magnetogram')
-        #if len(header_hmi) != 1 or np.any(header_hmi.QUALITY != 0):
-        #    self.fetchDataFallback(date)
-        #    return
 
         # query EUV
         time_param = '%sZ' % date.isoformat('_', timespec='seconds')
         ds_euv = 'aia.lev1_euv_12s[%s][%s]{image}' % (time_param, ','.join(self.wavelengths))
         keys_euv = self.drms_client.keys(ds_euv)
         header_euv, segment_euv = self.drms_client.query(ds_euv, key=','.join(keys_euv), seg='image')
-        if len(header_euv) != len(self.wavelengths) or np.any(header_euv.QUALITY != 0):
+        logging.info('Fast-path query returned %d rows (need %d), qualities: %s' % (
+            len(header_euv), len(self.wavelengths),
+            list(header_euv.QUALITY) if len(header_euv) > 0 else []))
+        if len(header_euv) != len(self.wavelengths) or np.any(header_euv.QUALITY.fillna(0) != 0):
             self.fetchDataFallback(date)
             return
 
         queue = []
-        #for (idx, h), s in zip(header_hmi.iterrows(), segment_hmi.magnetogram):
-        #    queue += [(h.to_dict(), s, date)]
         for (idx, h), s in zip(header_euv.iterrows(), segment_euv.image):
             queue += [(h.to_dict(), s, date)]
 
@@ -155,28 +152,6 @@ class SDODownloader:
         id = date.isoformat()
 
         logging.info('Fallback download: %s' % id)
-        # query Magnetogram
-        t = date - timedelta(hours=24)
-        ds_hmi = 'hmi.M_720s[%sZ/12h@720s]{magnetogram}' % t.replace(tzinfo=None).isoformat('_', timespec='seconds')
-        keys_hmi = self.drms_client.keys(ds_hmi)
-        header_tmp, segment_tmp = self.drms_client.query(ds_hmi, key=','.join(keys_hmi), seg='magnetogram')
-        assert len(header_tmp) != 0, 'No data found!'
-        date_str = header_tmp['DATE__OBS'].replace('MISSING', '').str.replace('60', '59')  # fix date format
-        date_diff = np.abs(pd.to_datetime(date_str).dt.tz_localize(None) - date)
-        # sort and filter
-        header_tmp['date_diff'] = date_diff
-        header_tmp.sort_values('date_diff')
-        segment_tmp['date_diff'] = date_diff
-        segment_tmp.sort_values('date_diff')
-        cond_tmp = header_tmp.QUALITY == 0
-        header_tmp = header_tmp[cond_tmp]
-        segment_tmp = segment_tmp[cond_tmp]
-        assert len(header_tmp) > 0, 'No valid quality flag found'
-        # replace invalid
-        header_hmi = header_tmp.iloc[0].drop('date_diff')
-        segment_hmi = segment_tmp.iloc[0].drop('date_diff')
-        ############################################################
-        # query EUV
         header_euv, segment_euv = [], []
         t = date - timedelta(hours=6)
         for wl in self.wavelengths:
@@ -184,21 +159,23 @@ class SDODownloader:
                 t.replace(tzinfo=None).isoformat('_', timespec='seconds'), wl)
             keys_euv = self.drms_client.keys(euv_ds)
             header_tmp, segment_tmp = self.drms_client.query(euv_ds, key=','.join(keys_euv), seg='image')
-            assert len(header_tmp) != 0, 'No data found!'
+            logging.info('Fallback query wl=%s returned %d rows' % (wl, len(header_tmp)))
+            assert len(header_tmp) != 0, 'No data found for wl=%s at %s' % (wl, id)
             date_str = header_tmp['DATE__OBS'].replace('MISSING', '').str.replace('60', '59')  # fix date format
             date_diff = (pd.to_datetime(date_str).dt.tz_localize(None) - date).abs()
             # sort and filter
             header_tmp['date_diff'] = date_diff
-            header_tmp.sort_values('date_diff')
             segment_tmp['date_diff'] = date_diff
-            segment_tmp.sort_values('date_diff')
-            cond_tmp = header_tmp.QUALITY == 0
-            header_tmp = header_tmp[cond_tmp]
-            segment_tmp = segment_tmp[cond_tmp]
-            assert len(header_tmp) > 0, 'No valid quality flag found'
-            # replace invalid
-            header_euv.append(header_tmp.iloc[0].drop('date_diff'))
-            segment_euv.append(segment_tmp.iloc[0].drop('date_diff'))
+            cond_tmp = (header_tmp.QUALITY == 0) | header_tmp.QUALITY.isna()
+            header_filtered = header_tmp[cond_tmp]
+            segment_filtered = segment_tmp[cond_tmp]
+            if len(header_filtered) > 0:
+                header_tmp = header_filtered
+                segment_tmp = segment_filtered
+            else:
+                logging.warning('No quality-0 EUV frames for wl=%s at %s — using closest available' % (wl, id))
+            header_euv.append(header_tmp.sort_values('date_diff').iloc[0].drop('date_diff'))
+            segment_euv.append(segment_tmp.sort_values('date_diff').iloc[0].drop('date_diff'))
 
         queue = []
         #queue += [(header_hmi.to_dict(), segment_hmi.magnetogram, date)]
@@ -218,8 +195,8 @@ if __name__ == '__main__':
     parser.add_argument('--download_dir', type=str, help='path to the download directory.')
     parser.add_argument('--email', type=str, help='registered email address for JSOC.')
     parser.add_argument('--start_date', type=str, help='start date in format YYYY-MM-DD.')
-    parser.add_argument('--end_date', type=str, help='end date in format YYYY-MM-DD.', required=False,
-                        default=str(datetime.now()).split(' ')[0])
+    parser.add_argument('--end_date', type=str, help='end date in format YYYY-MM-DD HH:MM:SS.', required=False,
+                        default=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     parser.add_argument('--cadence', type=int, help='cadence in minutes.', required=False, default=60)
 
     args = parser.parse_args()
@@ -228,7 +205,7 @@ if __name__ == '__main__':
     end_date = args.end_date
     cadence = args.cadence
 
-    [os.makedirs(os.path.join(download_dir, str(c)), exist_ok=True) for c in [94, 131, 171, 193, 211, 304]]
+    [os.makedirs(os.path.join(download_dir, str(c)), exist_ok=True) for c in [94, 131, 171, 193, 211, 304, 335]]
     downloader = SDODownloader(base_path=download_dir, email=args.email)
     start_date_datetime = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S")
     #end_date = datetime.now()
@@ -236,10 +213,10 @@ if __name__ == '__main__':
 
 
     #Skip over dates that already exist in the download directory
-    for d in [start_date_datetime + i * timedelta(minutes=1) for i in
-              range((end_date_datetime - start_date_datetime) // timedelta(minutes=1))]:
+    for d in [start_date_datetime + i * timedelta(minutes=cadence) for i in
+              range((end_date_datetime - start_date_datetime) // timedelta(minutes=cadence))]:
         #make sure the file exists in all wavelengths directories
-        for wl in [94, 131, 171, 193, 211, 304]:
+        for wl in [94, 131, 171, 193, 211, 304, 335]:
             if not os.path.exists(os.path.join(
                 download_dir, 
                 str(wl), 

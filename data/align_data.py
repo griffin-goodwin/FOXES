@@ -38,9 +38,8 @@ def load_config():
         'alignment': {
             'goes_data_dir': "/mnt/data/PAPER/GOES-timespan/combined",
             'aia_processed_dir': "/mnt/data/PAPER/SDOITI",
-            'output_sxr_a_dir': "/mnt/data/PAPER/GOES-SXR-A",
-            'output_sxr_b_dir': "/mnt/data/PAPER/GOES-SXR-B",
-            'aia_missing_dir': "/mnt/data/PAPER/AIA_ITI_MISSING"
+            'output_sxr_dir':  "/Volumes/T9/Data_FOXES/SXR_processed",
+            'aia_missing_dir': "/Volumes/T9/Data_FOXES/AIA_missing"
         },
         'processing': {
             'batch_size_multiplier': 4,
@@ -56,8 +55,7 @@ GOES_DATA_DIR = config['alignment']['goes_data_dir']
 AIA_PROCESSED_DIR = config['alignment']['aia_processed_dir']
 
 # Output directories
-OUTPUT_SXR_A_DIR = config['alignment']['output_sxr_a_dir']
-OUTPUT_SXR_B_DIR = config['alignment']['output_sxr_b_dir']
+OUTPUT_SXR_DIR = config['alignment']['output_sxr_dir']
 AIA_MISSING_DIR = config['alignment']['aia_missing_dir']
 
 # Processing configuration
@@ -136,7 +134,6 @@ def create_combined_lookup_table(goes_data_dict, target_timestamps):
     
     # For each target timestamp, average over all available instruments at that time
     for target_time in tqdm(target_times, desc="Building lookup table"):
-        sxr_a_values = []
         sxr_b_values = []
         available_instruments = []
 
@@ -144,22 +141,15 @@ def create_combined_lookup_table(goes_data_dict, target_timestamps):
             goes_data = goes_data_dict[g_number]
             if target_time in goes_data.index:
                 row = goes_data.loc[target_time]
-                sxr_a = row['xrsa_flux']
                 sxr_b = row['xrsb_flux']
-                # Only care about xrsb_flux for validity
                 if not pd.isna(sxr_b):
                     sxr_b_values.append(float(sxr_b))
-                    if not pd.isna(sxr_a):
-                        sxr_a_values.append(float(sxr_a))
                     available_instruments.append(f"GOES-{g_number}")
 
         if sxr_b_values:
-            avg_sxr_b = float(np.mean(sxr_b_values))
-            avg_sxr_a = float(np.mean(sxr_a_values)) if sxr_a_values else float('nan')
             lookup_data.append({
                 'timestamp': target_time.strftime('%Y-%m-%dT%H:%M:%S'),
-                'sxr_a': avg_sxr_a,
-                'sxr_b': avg_sxr_b,
+                'sxr_b': float(np.mean(sxr_b_values)),
                 'instrument': ",".join(available_instruments)
             })
     
@@ -179,21 +169,14 @@ def process_batch(batch_data):
     for data in batch_data:
         try:
             timestamp = data['timestamp']
-            sxr_a = data['sxr_a']
             sxr_b = data['sxr_b']
             instrument = data['instrument']
-            
-            # Create arrays
-            sxr_a_data = np.array([sxr_a], dtype=np.float32)
-            sxr_b_data = np.array([sxr_b], dtype=np.float32)
-            
-            # Save data to disk using configured directories
-            np.save(f"{OUTPUT_SXR_A_DIR}/{timestamp}.npy", sxr_a_data)
-            np.save(f"{OUTPUT_SXR_B_DIR}/{timestamp}.npy", sxr_b_data)
-            
+
+            np.save(f"{OUTPUT_SXR_DIR}/{timestamp}.npy", np.array([sxr_b], dtype=np.float32))
+
             successful_count += 1
             results.append((timestamp, True, f"Success using {instrument}"))
-            
+
         except Exception as e:
             failed_count += 1
             results.append((timestamp, False, f"Error processing timestamp {timestamp}: {e}"))
@@ -213,14 +196,12 @@ def main():
     print("=" * 60)
     print(f"GOES data directory: {GOES_DATA_DIR}")
     print(f"AIA processed directory: {AIA_PROCESSED_DIR}")
-    print(f"Output SXR-A directory: {OUTPUT_SXR_A_DIR}")
-    print(f"Output SXR-B directory: {OUTPUT_SXR_B_DIR}")
+    print(f"Output SXR directory: {OUTPUT_SXR_DIR}")
     print(f"AIA missing directory: {AIA_MISSING_DIR}")
     print("=" * 60)
     
     # Make output directories if they don't exist
-    os.makedirs(OUTPUT_SXR_A_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_SXR_B_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_SXR_DIR, exist_ok=True)
     os.makedirs(AIA_MISSING_DIR, exist_ok=True)
     
     # Load and prepare GOES data with optimizations

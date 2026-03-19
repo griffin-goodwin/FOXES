@@ -2,6 +2,7 @@
 sunpy[all]
 sunpy-soar
 astropy
+aiapy==0.6.4  # itipy 0.1.1 requires calibrate.util which was renamed in 0.7.0
 drms
 itipy
 
