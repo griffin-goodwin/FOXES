@@ -130,7 +130,7 @@ wandb_logger = WandbLogger(
     project=config_data['wandb']['project'],
     job_type=config_data['wandb']['job_type'],
     tags=config_data['wandb']['tags'],
-    name=config_data['wandb']['wb_name'],
+    name=config_data['wandb']['run_name'],
     notes=config_data['wandb']['notes'],
     config=config_data
 )
@@ -143,7 +143,7 @@ plot_samples = plot_data  # Keep as list of ((aia, sxr), target)
 
 sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
 # Attention map callback - get patch size from config
-patch_size = config_data.get('vit_custom', {}).get('patch_size', 16)
+patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
 attention = AttentionMapCallback(patch_size=patch_size, use_local_attention=True)
 
 
@@ -215,7 +215,7 @@ checkpoint_callback = ModelCheckpoint(
     monitor='val_total_loss',
     mode='min',
     save_top_k=10,
-    filename=f"{config_data['wandb']['wb_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}"
+    filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}"
 )
 
 pth_callback = PTHCheckpointCallback(
@@ -223,7 +223,7 @@ pth_callback = PTHCheckpointCallback(
     monitor='val_total_loss',
     mode='min',
     save_top_k=1,
-    filename_prefix=config_data['wandb']['wb_name']
+    filename_prefix=config_data['wandb']['run_name']
 )
 
 def process_batch(batch_data, sxr_norm, c_threshold, m_threshold, x_threshold):
@@ -293,7 +293,7 @@ def get_base_weights(data_loader, sxr_norm):
     m_threshold = 1e-5
     x_threshold = 1e-4
 
-    from forecasting.models.vit_patch_model import unnormalize_sxr
+    from forecasting.models.vit_patch_model_local import unnormalize_sxr
     
     quiet_count = 0
     c_count = 0
@@ -352,11 +352,10 @@ def get_base_weights(data_loader, sxr_norm):
     }
 
 
-if config_data['selected_model'] == 'ViTLocal':
-    base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
-    model = ViTLocal(model_kwargs=config_data['vit_custom'], sxr_norm = sxr_norm, base_weights=base_weights)
-else:
-    raise NotImplementedError(f"Architecture {config_data['selected_model']} not supported.")
+
+base_weights = get_base_weights(data_loader, sxr_norm) if config_data.get('calculate_base_weights', True) else None
+model = ViTLocal(model_kwargs=config_data['vit_architecture'], sxr_norm = sxr_norm, base_weights=base_weights)
+
 
 # Set device based on config
 # Support both old 'gpu_id' and new 'gpu_ids' config keys for backward compatibility
@@ -437,7 +436,7 @@ trainer.fit(model, data_loader)
 
 # Save final PyTorch checkpoint with model and state_dict
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-final_checkpoint_path = os.path.join(config_data['data']['checkpoints_dir'], f"{config_data['wandb']['wb_name']}-final-{timestamp}.pth")
+final_checkpoint_path = os.path.join(config_data['data']['checkpoints_dir'], f"{config_data['wandb']['run_name']}-final-{timestamp}.pth")
 torch.save({
     'model': model,
     'state_dict': model.state_dict()
