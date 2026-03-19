@@ -13,23 +13,46 @@ The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity
 
 **Team**: Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger, Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, Lorien Pratt
 
+---
+
 ## Repository Structure
 
 ```text
 FOXES
-├── data                # Data cleaning and preprocessing procedures
-├── download            # Datasets download methods (SDO, SXR, STEREO, Solar Orbiter, etc.)
-├── forecasting         # Main code directory for model forecasting
-│   ├── data_loaders    # AIA dataloader and sxr normalization procedure
-│   ├── inference       # Inference and evaluation scripts
-│   ├── models          # Vision Transformer model definitions
-│   └── training        # Training scripts and callbacks
-├── misc                # Personal utility scripts (gitignored)
-├── notebook_tests      # Visualization and testing notebooks
-├── Dockerfile          # Docker configuration for environment reproducibility
-├── foxes.yml           # Conda environment file
-└── requirements.txt    # Python dependencies
+├── data                        # Data cleaning and preprocessing
+│   ├── align_data.py           # Align AIA and SXR timestamps; save matched pairs
+│   ├── euv_data_cleaning.py    # EUV image quality filtering and cleaning
+│   ├── iti_data_processing.py  # ITI (image-to-image translation) preprocessing
+│   ├── process_data_pipeline.py# End-to-end preprocessing orchestrator
+│   ├── split_data.py           # Split processed data into train/val/test by date
+│   ├── sxr_data_processing.py  # Combine raw GOES .nc files into per-satellite CSVs
+│   ├── sxr_normalization.py    # Compute log-normalization stats (mean/std) on SXR
+│   ├── pipeline_config.py      # Dataclass config for process_data_pipeline.py
+│   └── pipeline_config.yaml    # YAML config for process_data_pipeline.py
+├── download                    # Dataset download utilities
+│   ├── download_sdo.py         # Download SDO/AIA EUV images from JSOC
+│   └── sxr_downloader.py       # Download GOES SXR flux data
+├── forecasting                 # Model training and inference
+│   ├── data_loaders
+│   │   ├── SDOAIA_dataloader.py# PyTorch Lightning DataModule for AIA+SXR
+│   │   └── patch_flux_dataloader.py
+│   ├── inference
+│   │   ├── inference.py        # Batch inference; writes predictions.csv
+│   │   ├── evaluation.py       # Compute metrics and generate evaluation plots
+│   │   ├── flare_analysis.py   # Detect, track, and match flares; generate plots
+│   │   ├── local_config.yaml   # Config for inference.py and flare_analysis.py
+│   │   └── evaluation_config.yaml # Config for evaluation.py
+│   ├── models
+│   │   └── vit_patch_model_local.py  # ViTLocal: Vision Transformer with patch flux heads
+│   └── training
+│       ├── train.py            # Train the ViTLocal model
+│       └── train_config.yaml   # Training hyperparameters and data paths
+├── pipeline_config.yaml        # Top-level pipeline orchestration config
+├── run_pipeline.py             # End-to-end pipeline orchestrator
+└── requirements.txt            # Python dependencies
 ```
+
+---
 
 ## Setup
 
@@ -43,7 +66,7 @@ cd FOXES
 
 **Option A — pip:**
 ```bash
-conda create -n foxes python=3.11 -y
+conda create -n foxes python=3.14 -y
 conda activate foxes
 pip install -r requirements.txt
 ```
@@ -54,13 +77,105 @@ conda env create -f foxes.yml
 conda activate foxes
 ```
 
-### 4) Docker Setup (Optional)
-For a containerized environment, refer to [DOCKER_SETUP.md](DOCKER_SETUP.md) and [QUICKSTART_DOCKER.md](QUICKSTART_DOCKER.md).
+---
+
+## Running the Pipeline
+
+FOXES uses a single orchestrator script (`run_pipeline.py`) and a top-level config (`pipeline_config.yaml`) to run any combination of pipeline steps in order.
+
+### Pipeline Steps
+
+| # | Step | Description |
+|---|------|-------------|
+| 1 | `download_aia` | Download SDO/AIA EUV images from JSOC |
+| 2 | `download_sxr` | Download GOES SXR flux data |
+| 3 | `combine_sxr` | Combine raw GOES `.nc` files into per-satellite CSVs |
+| 4 | `preprocess` | EUV cleaning, ITI processing, and AIA/SXR alignment |
+| 5 | `split` | Split AIA and SXR data into train/val/test by date range |
+| 6 | `normalize` | Compute SXR log-normalization statistics (mean/std) |
+| 7 | `train` | Train the ViTLocal solar flare forecasting model |
+| 8 | `inference` | Run batch inference and save a predictions CSV |
+| 9 | `evaluate` | Compute metrics and generate evaluation plots |
+| 10 | `flare_analysis` | Detect, track, and match flares; generate plots/movies |
+
+### Usage
+
+```bash
+# List all available steps
+python run_pipeline.py --list
+
+# Run the full pipeline
+python run_pipeline.py --config pipeline_config.yaml --steps all
+
+# Run specific steps
+python run_pipeline.py --config pipeline_config.yaml --steps train,inference,evaluate
+
+# Force re-run of preprocessing even if outputs already exist
+python run_pipeline.py --config pipeline_config.yaml --steps preprocess --force
+```
+
+### Configuration
+
+Edit `pipeline_config.yaml` to set data paths, date ranges, and hyperparameters. Each step has its own section, and an `overrides` block lets you override values from the step's base config without editing it directly.
+
+```yaml
+# Example: override training hyperparameters from the top-level config
+train:
+  config: "forecasting/training/train_config.yaml"
+  overrides:
+    epochs: 150
+    batch_size: 6
+
+# Example: override inference data paths
+inference:
+  config: "forecasting/inference/local_config.yaml"
+  overrides:
+    data:
+      checkpoint_path: "/path/to/your/checkpoint.ckpt"
+    output_path: "/path/to/predictions.csv"
+```
+
+Steps can also be run individually by calling their scripts directly:
+
+```bash
+python forecasting/training/train.py -config forecasting/training/train_config.yaml
+python forecasting/inference/inference.py -config forecasting/inference/local_config.yaml
+python forecasting/inference/evaluation.py -config forecasting/inference/evaluation_config.yaml
+```
+
+---
+
+## Data Directory Layout
+
+After preprocessing and splitting, data should be organized as follows:
+
+```text
+/Volumes/T9/Data_FOXES/
+├── AIA_raw/                    # Raw downloaded AIA FITS files
+├── AIA_processed/              # ITI-processed AIA .npy arrays
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── SXR_raw/                    # Raw GOES .nc files
+│   └── combined/               # Per-satellite combined CSVs (from combine_sxr step)
+├── SXR_processed/              # Aligned SXR .npy scalars (xrsb_flux, one per timestamp)
+│   ├── train/
+│   ├── val/
+│   ├── test/
+│   └── normalized_sxr.npy      # Log-normalization stats [mean, std]
+└── inference/
+    ├── predictions.csv          # Model output from inference step
+    ├── weights/                 # Per-image attention maps (optional)
+    ├── flux/                    # Map of flux contributions from each patch (optional)
+    └── evaluation/              # Metrics and plots from evaluation step
+```
+
+---
 
 ## Citation
 If you use this code or data in your work, please cite:
 
-```aiexclude
+```bibtex
 @software{FOXES,
     title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
     institution     = {Frontier Development Lab (FDL)},
