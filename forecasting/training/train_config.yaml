@@ -16,10 +16,10 @@ selected_model: "ViTLocal"
 batch_size:    6
 epochs:        150
 oversample: false
-balance_strategy: "upsample_minority"
+balance_strategy: ""
 calculate_base_weights: false  # Whether to calculate class-based weights for loss function
 
-vit_custom:
+vit_architecture:
     embed_dim: 256
     num_channels: 7
     num_classes: 1
@@ -29,7 +29,7 @@ vit_custom:
     num_heads: 8
     num_layers: 8
     dropout: 0.1
-    lr: 0.0001
+    learning_rate: 0.0001
 
 
 # Data paths (automatically constructed from base directories)
@@ -51,5 +51,5 @@ wandb:
     - aia
     - sxr
     - regression
-  wb_name: paper-8-patch-4ch
+  run_name: paper-8-patch-4ch
   notes: Regression from AIA images to SXR images using ViTLocal model with 8x8 patches

@@ -327,7 +327,7 @@ class AIA_GOESDataModule(LightningDataModule):
     """
 
     def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,
-                 sxr_norm, batch_size=64, num_workers=4, wavelengths=[94, 131, 171, 193, 211, 304],
+                 sxr_norm, batch_size=64, num_workers=4, wavelengths=[94, 131, 171, 193, 211, 304, 335],
                  cadence=1, reference_time=None, only_prediction=False, oversample=False,
                  balance_strategy='upsample_minority'):
         super().__init__()
