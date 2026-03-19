@@ -74,7 +74,6 @@ train:
         - aia
         - sxr
         - regression
-      run_name: paper-8-patch-4ch
       notes: Regression from AIA images to SXR images using ViTLocal model with 8x8 patches
 
 # -----------------------------------------------------------------------------
@@ -83,5 +82,31 @@ train:
 inference:
   config: "forecasting/inference/local_config.yaml"
   overrides:                          # Any key from local_config.yaml can go here
+    data:
+      aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed"
+      sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed"
+      sxr_norm_path:   "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
+      checkpoint_path: "/Volumes/T9/FOXES_Misc/final_checkpoint/paper-8-patch-weights-epoch=100-val_total_loss=0.0048.ckpt"  # update to actual checkpoint
+    output_path: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
     paths:
-      data_dir: "/Volumes/T9/Data_FOXES"
+      data_dir:        "/Volumes/T9/Data_FOXES"
+      predictions_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+      aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/val"
+
+# -----------------------------------------------------------------------------
+# Evaluation  (step: evaluate)
+# -----------------------------------------------------------------------------
+evaluate:
+  config: "forecasting/inference/evaluation_config.yaml"
+  overrides:                          # Any key from evaluation_config.yaml can go here
+    model_predictions:
+      main_model_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+    data:
+      aia_dir:     "/Volumes/T9/Data_FOXES/AIA_processed/val"
+      weight_path: "/Volumes/T9/Data_FOXES/inference/weights"
+    evaluation:
+      output_dir:  "/Volumes/T9/Data_FOXES/inference/evaluation"
+    time_range:
+      start_time:       "2023-01-01T00:00:00"
+      end_time:         "2023-12-31T23:59:59"
+      interval_minutes: 60

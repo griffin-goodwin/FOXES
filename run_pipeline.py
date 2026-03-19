@@ -84,6 +84,7 @@ STEP_ORDER = [
     "normalize",
     "train",
     "inference",
+    "evaluate",
     "flare_analysis",
 ]
 
@@ -119,6 +120,10 @@ STEP_INFO = {
     "inference": {
         "description": "Run batch inference and save predictions CSV",
         "script": ROOT / "forecasting" / "inference" / "inference.py",
+    },
+    "evaluate": {
+        "description": "Compute metrics and generate evaluation plots from predictions CSV",
+        "script": ROOT / "forecasting" / "inference" / "evaluation.py",
     },
     "flare_analysis": {
         "description": "Detect, track, and match flares; generate plots/movies",
@@ -232,6 +237,15 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
         config_path = inf["config"]
         if inf.get("overrides"):
             config_path = str(write_merged_config(config_path, inf["overrides"], "inference_config"))
+        return [base + ["-config", config_path]]
+
+    if step == "evaluate":
+        if not require(["config"], "evaluate"):
+            return None
+        ev = cfg["evaluate"]
+        config_path = ev["config"]
+        if ev.get("overrides"):
+            config_path = str(write_merged_config(config_path, ev["overrides"], "evaluate_config"))
         return [base + ["-config", config_path]]
 
     if step == "flare_analysis":

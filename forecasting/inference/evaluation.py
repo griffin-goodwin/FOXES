@@ -900,7 +900,7 @@ class SolarFlareEvaluator:
 
                 sxr_ax.set_xlim([pd.to_datetime(timestamp) - pd.Timedelta(hours=4),
                                  pd.to_datetime(timestamp) + pd.Timedelta(hours=4)])
-                sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
+                #sxr_ax.set_ylim([5e-7, 5e-4])  # Set y-limits for SXR data
                 sxr_ax.set_ylabel(r'SXR Flux (W/m$^2$)', fontsize=12, fontfamily='Barlow',
                                   color=('white' if is_dark else 'black'))
                 sxr_ax.set_xlabel('Time', fontsize=12, fontfamily='Barlow', color=('white' if is_dark else 'black'))
