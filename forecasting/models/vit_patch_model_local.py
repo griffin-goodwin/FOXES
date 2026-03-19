@@ -23,10 +23,11 @@ class ViTLocal(pl.LightningModule):
     def __init__(self, model_kwargs, sxr_norm, base_weights=None):
         super().__init__()
         self.model_kwargs = model_kwargs
-        self.lr = model_kwargs['learning_rate']
+        self.lr = model_kwargs.get('learning_rate', model_kwargs.get('lr', 1e-4))
         self.save_hyperparameters()
         filtered_kwargs = dict(model_kwargs)
         filtered_kwargs.pop('learning_rate', None)
+        filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformerLocal(**filtered_kwargs)
         self.base_weights = base_weights

@@ -1,21 +1,49 @@
 # =============================================================================
-# Flare Analysis Configuration
+# FOXES Inference + Flare Analysis Configuration
 # =============================================================================
-# Unified config for FOXES flare detection, tracking, and HEK catalog matching
+# Shared config for inference.py and flare_analysis.py
 #
-# Usage: python flare_analysis.py --config flare_analysis_config.yaml
+# Usage:
+#   python inference.py      -config local_config.yaml
+#   python flare_analysis.py --config local_config.yaml
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Data Paths
+# Inference (inference.py)
+# -----------------------------------------------------------------------------
+model: "ViTLocal"
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+SolO: "false"
+Stereo: "false"
+prediction_only: "false"
+
+data:
+  aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed"
+  sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed"
+  sxr_norm_path:   "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
+  checkpoint_path: "/Volumes/T9/Data_FOXES/checkpoints/best.ckpt"  # update to actual checkpoint
+
+output_path: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+weight_path: "/Volumes/T9/Data_FOXES/inference/weights/"
+flux_path:   "/Volumes/T9/Data_FOXES/inference/flux/"
+
+model_params:
+  input_size: 512
+  patch_size: 8
+  batch_size: 10
+  no_weights: false
+  no_flux:    false
+
+# -----------------------------------------------------------------------------
+# Flare Analysis (flare_analysis.py)
 # -----------------------------------------------------------------------------
 paths:
-  data_dir: "/Volumes/T9/FOXES_Data"
-  flux_path: "/Volumes/T9/batch_results/vit/flux"
-  aia_path: "/Volumes/T9/FOXES_Data/AIA"
-  predictions_csv: "/Volumes/T9/batch_results/vit/vit_predictions_all.csv"
-  hek_catalog: null # null to auto-fetch
-  output_dir: "/Volumes/T9/flux_output"  # Directory for plots and movies
+  data_dir:        "/Volumes/T9/Data_FOXES"
+  flux_path:       "/Volumes/T9/Data_FOXES/inference/flux"
+  aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/val"
+  predictions_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+  hek_catalog: null
+  output_dir:      "/Volumes/T9/Data_FOXES/inference/output"
 
 # -----------------------------------------------------------------------------
 # Time Range

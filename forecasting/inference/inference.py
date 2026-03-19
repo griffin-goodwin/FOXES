@@ -209,11 +209,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 del flux_contributions
                 flux_contributions = None
             
-            # Force garbage collection and clear GPU cache after EVERY batch
-            # This is critical - memory accumulates between batches otherwise
-            gc.collect()  # Force Python garbage collection
-            torch.cuda.empty_cache()  # Clear PyTorch's GPU cache
-            torch.cuda.synchronize()  # Wait for all operations to complete before clearing
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
@@ -335,7 +334,7 @@ def load_model_from_config(config_data):
     if ".ckpt" in checkpoint_path:
         # Lightning checkpoint format
         if model_type.lower() == 'vitlocal':
-            model = ViTLocal.load_from_checkpoint(checkpoint_path, map_location=load_device)
+            model = ViTLocal.load_from_checkpoint(checkpoint_path, map_location=load_device, weights_only=False)
         else:
             try:
                 model_class = getattr(models, model_type)
@@ -418,7 +417,7 @@ def main():
         print("  Note: This saves ~3GB per batch by not computing attention weights.")
     else:
         print("Will save attention weights during inference.")
-        print("\n💡 Memory note:")
+        print("\n Memory note:")
         print("   - Attention weights from all layers use significant GPU memory")
         print("   - For ViT with 8 layers, 8 heads, 4096 patches: ~3GB+ per batch with attention!")
         print("   - If you get OOM errors, set no_weights=true to skip attention saving\n")
