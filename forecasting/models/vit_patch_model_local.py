@@ -23,13 +23,12 @@ class ViTLocal(pl.LightningModule):
     def __init__(self, model_kwargs, sxr_norm, base_weights=None):
         super().__init__()
         self.model_kwargs = model_kwargs
-        self.lr = model_kwargs['lr']
+        self.lr = model_kwargs['learning_rate']
         self.save_hyperparameters()
         filtered_kwargs = dict(model_kwargs)
-        filtered_kwargs.pop('lr', None)
+        filtered_kwargs.pop('learning_rate', None)
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformerLocal(**filtered_kwargs)
-        # Set the base weights based on the number of samples in each class within training data
         self.base_weights = base_weights
         self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=self.base_weights)
         self.sxr_norm = sxr_norm

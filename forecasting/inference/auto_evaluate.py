@@ -168,7 +168,7 @@ def create_inference_config(checkpoint_path, model_name, base_data_dir="/mnt/dat
             'no_flux': False,  # Set to False to save flux contributions (uses more memory)
             'patch_size': 8
         },
-        'vit_custom': {
+        'vit_architecture': {
             'embed_dim': 256,
             'hidden_dim': 1024,
             'num_channels': 7,
