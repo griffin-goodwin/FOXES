@@ -106,7 +106,7 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
                 continue
 
             if valid_samples and (
-                    timestamp_dt - pd.to_datetime(valid_samples[-1])).total_seconds() < self.cadence.total_seconds():
+                    timestamp_dt - pd.to_datetime(_normalize_timestamp(valid_samples[-1]))).total_seconds() < self.cadence.total_seconds():
                 continue
 
             sxr_path = self.sxr_dir / f"{timestamp}.npy"
