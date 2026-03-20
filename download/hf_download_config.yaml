@@ -1,0 +1,53 @@
+# =============================================================================
+# HuggingFace Dataset Download Configuration
+# =============================================================================
+# Used by hugging_face_data_download.py to pull FOXES data from HF Hub
+# and reconstruct the local AIA / SXR directory layout expected by the pipeline.
+#
+# Usage:
+#   python download/hugging_face_data_download.py \
+#       --config download/hf_download_config.yaml
+
+# -----------------------------------------------------------------------------
+# Source
+# -----------------------------------------------------------------------------
+repo_id: "griffingoodwin04/FOXES"
+
+# -----------------------------------------------------------------------------
+# Output — files will be saved as:
+#   {aia_dir}/{local_split}/{filename}   ("validation" maps to local dir "val")
+#   {sxr_dir}/{local_split}/{filename}
+# -----------------------------------------------------------------------------
+aia_dir: "/Volumes/T9/AIA_hg_processed"
+sxr_dir: "/Volumes/T9/SXR_hg_processed"
+
+# -----------------------------------------------------------------------------
+# Splits to download  (any subset of: train, validation, test)
+# -----------------------------------------------------------------------------
+splits:
+  - train
+  - validation
+  - test
+
+# -----------------------------------------------------------------------------
+# Subsampling  (set subsample: true to download a random subset)
+# -----------------------------------------------------------------------------
+subsample: true
+subsample_seed: 42
+
+# Number of samples per split when subsampling.
+# Set to null to use a fraction instead.
+subsample_n: 10          # e.g. 1000  — exact count
+subsample_frac: 0.1      # used only when subsample_n is null  (0.0–1.0)
+
+# shuffle buffer: rows held in memory before sampling begins.
+# Larger = better randomness but more rows pre-fetched before first save.
+# Rule of thumb: set to ~3x subsample_n, or ~500 for frac-based sampling.
+# Only used when subsample: true.
+shuffle_buffer_size: 10
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
+num_workers: 8     # parallel threads for disk writes (I/O bound, so > CPU count is fine)
+print_every: 5     # log progress every N rows submitted
