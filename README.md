@@ -31,7 +31,9 @@ FOXES
 │   └── pipeline_config.yaml     # YAML config for process_data_pipeline.py
 ├── download                     # Dataset download utilities
 │   ├── download_sdo.py          # Download SDO/AIA EUV images from JSOC
-│   └── sxr_downloader.py        # Download GOES SXR flux data
+│   ├── sxr_downloader.py        # Download GOES SXR flux data
+│   ├── hugging_face_data_download.py  # Download pre-processed data from HuggingFace Hub
+│   └── hf_download_config.yaml  # Config for HuggingFace downloader
 ├── forecasting                  # Model training and inference
 │   ├── data_loaders
 │   │   ├── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
@@ -85,18 +87,19 @@ FOXES uses a single orchestrator script (`run_pipeline.py`) and a top-level conf
 
 ### Pipeline Steps
 
-| # | Step | Description |
-|---|------|-------------|
-| 1 | `download_aia` | Download SDO/AIA EUV images from JSOC |
-| 2 | `download_sxr` | Download GOES SXR flux data |
-| 3 | `combine_sxr` | Combine raw GOES `.nc` files into per-satellite CSVs |
-| 4 | `preprocess` | EUV cleaning, ITI processing, and AIA/SXR alignment |
-| 5 | `split` | Split AIA and SXR data into train/val/test by date range |
-| 6 | `normalize` | Compute SXR log-normalization statistics (mean/std) |
-| 7 | `train` | Train the ViTLocal solar flare forecasting model |
-| 8 | `inference` | Run batch inference and save a predictions CSV |
-| 9 | `evaluate` | Compute metrics and generate evaluation plots |
-| 10 | `flare_analysis` | Detect, track, and match flares; generate plots/movies |
+| # | Step | Description                                                                    |
+|---|------|--------------------------------------------------------------------------------|
+| 0 | `hf_download` | Download pre-processed, pre-split data from HuggingFace *(replaces steps 1–6)* |
+| 1 | `download_aia` | Download SDO/AIA EUV images from JSOC                                          |
+| 2 | `download_sxr` | Download GOES SXR flux data                                                    |
+| 3 | `combine_sxr` | Combine raw GOES `.nc` files into per-satellite CSVs                           |
+| 4 | `preprocess` | EUV cleaning, ITI processing, and AIA/SXR alignment                            |
+| 5 | `split` | Split AIA and SXR data into train/val/test by date range                       |
+| 6 | `normalize` | Compute SXR log-normalization statistics (mean/std)                            |
+| 7 | `train` | Train the ViTLocal solar flare forecasting model                               |
+| 8 | `inference` | Run batch inference and save a predictions CSV                                 |
+| 9 | `evaluate` | Compute metrics and generate evaluation plots                                  |
+| 10 | `flare_analysis` | Detect, track, and match flares; generate plots/movies                         |
 
 ### Usage
 
@@ -104,14 +107,44 @@ FOXES uses a single orchestrator script (`run_pipeline.py`) and a top-level conf
 # List all available steps
 python run_pipeline.py --list
 
-# Run the full pipeline
+# Run the full pipeline (from raw data)
 python run_pipeline.py --config pipeline_config.yaml --steps all
+
+# Quick-start: download pre-processed data from HuggingFace, then train
+python run_pipeline.py --config pipeline_config.yaml --steps hf_download,train,inference,evaluate
 
 # Run specific steps
 python run_pipeline.py --config pipeline_config.yaml --steps train,inference,evaluate
 
 # Force re-run of preprocessing even if outputs already exist
 python run_pipeline.py --config pipeline_config.yaml --steps preprocess --force
+```
+
+### Downloading Data from HuggingFace
+
+The `hf_download` step pulls pre-processed, pre-split AIA and SXR data directly from the [FOXES HuggingFace dataset](https://huggingface.co/datasets/griffingoodwin04/FOXES-Data), skipping the raw download, preprocessing, and split steps entirely. Configure it via `download/hf_download_config.yaml`:
+
+```yaml
+repo_id: "griffingoodwin04/FOXES"
+aia_dir: "/Volumes/T9/AIA_hg_processed"   # where AIA .npy files land
+sxr_dir: "/Volumes/T9/SXR_hg_processed"   # where SXR .npy files land
+splits:
+  - train
+  - validation   # maps to local "val/" directory
+  - test
+
+# Optional: download a random subset instead of the full dataset
+subsample: false
+subsample_n: 1000          # exact count per split (or use subsample_frac)
+subsample_frac: 0.1        # fraction per split, used when subsample_n is null
+shuffle_buffer_size: 500   # rows buffered before sampling; larger = more random
+
+num_workers: 8             # parallel disk-write threads
+```
+
+Run the downloader standalone:
+```bash
+python download/hugging_face_data_download.py --config download/hf_download_config.yaml
 ```
 
 ### Configuration
@@ -150,7 +183,7 @@ python forecasting/inference/evaluation.py -config forecasting/inference/evaluat
 After preprocessing and splitting, data should be organized as follows:
 
 ```text
-/Volumes/T9/Data_FOXES/
+/your/data/dir/FOXES/
 ├── AIA_raw/                    # Raw downloaded AIA FITS files
 ├── AIA_processed/              # ITI-processed AIA .npy arrays
 │   ├── train/
