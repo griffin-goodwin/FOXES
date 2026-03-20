@@ -1,3 +1,28 @@
+---
+license: mit
+task_categories:
+  - image-to-image
+  - time-series-forecasting
+tags:
+  - solar
+  - heliophysics
+  - astronomy
+  - AIA
+  - SDO
+  - EUV
+  - SXR
+  - GOES
+  - flare
+  - space-weather
+pretty_name: "FOXES: Framework for Operational X-ray Emission Synthesis"
+size_categories:
+  - 100K<n<1M
+language:
+  - en
+datasets:
+  - griffingoodwin04/FOXES-Data
+---
+
 # FOXES: A Framework For Operational X-ray Emission Synthesis
 
 This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab 2025!
@@ -125,21 +150,36 @@ python run_pipeline.py --config pipeline_config.yaml --steps preprocess --force
 The `hf_download` step pulls pre-processed, pre-split AIA and SXR data directly from the [FOXES HuggingFace dataset](https://huggingface.co/datasets/griffingoodwin04/FOXES-Data), skipping the raw download, preprocessing, and split steps entirely. Configure it via `download/hf_download_config.yaml`:
 
 ```yaml
+# Source
 repo_id: "griffingoodwin04/FOXES"
-aia_dir: "/Volumes/T9/AIA_hg_processed"   # where AIA .npy files land
-sxr_dir: "/Volumes/T9/SXR_hg_processed"   # where SXR .npy files land
+
+# Output — AIA and SXR .npy files are saved under these directories
+# "validation" maps to a local "val/" folder to match the rest of the pipeline
+aia_dir: "/Volumes/T9/AIA_hg_processed"
+sxr_dir: "/Volumes/T9/SXR_hg_processed"
+
+# Splits to download (any subset of: train, validation, test)
 splits:
   - train
-  - validation   # maps to local "val/" directory
+  - validation
   - test
 
-# Optional: download a random subset instead of the full dataset
+# Subsampling — set subsample: true to download a random subset
 subsample: false
-subsample_n: 1000          # exact count per split (or use subsample_frac)
-subsample_frac: 0.1        # fraction per split, used when subsample_n is null
-shuffle_buffer_size: 500   # rows buffered before sampling; larger = more random
+subsample_seed: 42
+subsample_n: 1000    # exact count per split; set to null to use subsample_frac instead
+subsample_frac: 0.1  # fraction per split, used only when subsample_n is null
 
-num_workers: 8             # parallel disk-write threads
+# Shuffle buffer: rows held in memory before sampling begins.
+# Larger = better randomness but more data pre-fetched before the first file is saved.
+# Rule of thumb: ~3x subsample_n, or ~500 for frac-based sampling.
+shuffle_buffer_size: 500
+
+# Parallel disk-write threads (I/O bound, so > CPU count is fine)
+num_workers: 8
+
+# Log progress every N rows submitted
+print_every: 500
 ```
 
 Run the downloader standalone:
