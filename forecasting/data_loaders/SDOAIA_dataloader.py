@@ -12,6 +12,14 @@ import glob
 import os
 
 
+def _normalize_timestamp(ts: str) -> str:
+    """Normalize timestamp strings with underscores instead of colons (cross-platform filenames)."""
+    if 'T' in ts:
+        date_part, time_part = ts.split('T', 1)
+        return f"{date_part}T{time_part.replace('_', ':')}"
+    return ts
+
+
 class SXRLogNormTransform:
     """Picklable SXR log-normalization transform (replaces T.Lambda for spawn compatibility)."""
     def __init__(self, mean: float, std: float):
@@ -85,7 +93,7 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
         valid_samples = []
         for f in aia_files:
             timestamp = f.stem
-            timestamp_dt = pd.to_datetime(timestamp)
+            timestamp_dt = pd.to_datetime(_normalize_timestamp(timestamp))
 
             if self.reference_time is None:
                 self.reference_time = timestamp_dt

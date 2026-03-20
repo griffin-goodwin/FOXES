@@ -5,6 +5,14 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+
+def _normalize_timestamp(ts: str) -> str:
+    """Normalize timestamp strings with underscores instead of colons (cross-platform filenames)."""
+    if 'T' in ts:
+        date_part, time_part = ts.split('T', 1)
+        return f"{date_part}T{time_part.replace('_', ':')}"
+    return ts
+
 def split_data(input_folder, output_dir, data_type, flare_events_csv=None, repartition=False, 
                train_start=None, train_end=None, val_start=None, val_end=None, 
                test_start=None, test_end=None, use_buffer_strategy=False, copy_files=False):
@@ -138,7 +146,7 @@ def split_data(input_folder, output_dir, data_type, flare_events_csv=None, repar
             
         try:
             # Extract timestamp from filename (assuming format like "2012-01-01T00:00:00.npy")
-            file_time = pd.to_datetime(file.split(".")[0])
+            file_time = pd.to_datetime(_normalize_timestamp(file.split(".")[0]))
         except ValueError:
             print(f"Skipping file {file}: Invalid timestamp format")
             skipped_count += 1
