@@ -9,6 +9,14 @@
 #   python run_pipeline.py --list
 
 # -----------------------------------------------------------------------------
+# HuggingFace download  (step: hf_download)
+# Downloads pre-processed, pre-split AIA + SXR data from HF Hub.
+# Use this instead of download_aia + download_sxr + preprocess + split.
+# -----------------------------------------------------------------------------
+hf_download:
+  config: "download/hf_download_config.yaml"   # points to hf_download_config.yaml
+
+# -----------------------------------------------------------------------------
 # Shared date range (used by download_aia and download_sxr)
 # -----------------------------------------------------------------------------
 start_date: "2014-07-01 00:00:00"
@@ -86,12 +94,13 @@ inference:
       aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed"
       sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed"
       sxr_norm_path:   "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
-      checkpoint_path: "/Volumes/T9/FOXES_Misc/final_checkpoint/paper-8-patch-weights-epoch=100-val_total_loss=0.0048.ckpt"  # update to actual checkpoint
+      checkpoint_path: "/Users/griffingoodwin/Downloads/FOXES_Model_Checkpoint.ckpt"  # update to actual checkpoint
     output_path: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+    prediction_only: "false"
     paths:
       data_dir:        "/Volumes/T9/Data_FOXES"
       predictions_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
-      aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/val"
+      aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/test"
 
 # -----------------------------------------------------------------------------
 # Evaluation  (step: evaluate)

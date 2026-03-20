@@ -4,6 +4,7 @@ FOXES End-to-End Pipeline Orchestrator
 
 Runs any combination of pipeline steps in order:
 
+  0. hf_download    - Download processed+split data from HuggingFace (replaces steps 1-5)
   1. download_aia   - Download SDO/AIA EUV images from JSOC (download/download_sdo.py)
   2. download_sxr   - Download GOES SXR flux data (download/sxr_downloader.py)
   3. combine_sxr    - Combine raw GOES .nc files into per-satellite CSVs (data/sxr_data_processing.py)
@@ -76,6 +77,7 @@ def write_merged_config(base_path: str, overrides: dict, out_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 STEP_ORDER = [
+    "hf_download",
     "download_aia",
     "download_sxr",
     "combine_sxr",
@@ -89,6 +91,10 @@ STEP_ORDER = [
 ]
 
 STEP_INFO = {
+    "hf_download": {
+        "description": "Download processed+split AIA/SXR data from HuggingFace Hub (replaces download→preprocess→split)",
+        "script": ROOT / "download" / "hugging_face_data_download.py",
+    },
     "download_aia": {
         "description": "Download SDO/AIA EUV images from JSOC",
         "script": ROOT / "download" / "download_sdo.py",
@@ -150,6 +156,11 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
             log.error(f"pipeline_config.yaml missing required keys: {[prefix + k for k in missing]}")
             return False
         return True
+
+    if step == "hf_download":
+        hf = cfg.get("hf_download", {})
+        config_path = hf.get("config", "download/hf_download_config.yaml")
+        return [[sys.executable, str(STEP_INFO[step]["script"]), "--config", config_path]]
 
     if step == "download_aia":
         if not require(["download_dir", "email"], "aia") or not require(["start_date"]):
