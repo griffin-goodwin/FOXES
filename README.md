@@ -1,6 +1,6 @@
 # FOXES: A Framework For Operational X-ray Emission Synthesis
 
-This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab 2025.
+This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab 2025!
 
 Model / Data:
 
