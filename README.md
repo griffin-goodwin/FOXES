@@ -19,37 +19,37 @@ The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity
 
 ```text
 FOXES
-├── data                        # Data cleaning and preprocessing
-│   ├── align_data.py           # Align AIA and SXR timestamps; save matched pairs
-│   ├── euv_data_cleaning.py    # EUV image quality filtering and cleaning
-│   ├── iti_data_processing.py  # ITI (image-to-image translation) preprocessing
-│   ├── process_data_pipeline.py# End-to-end preprocessing orchestrator
-│   ├── split_data.py           # Split processed data into train/val/test by date
-│   ├── sxr_data_processing.py  # Combine raw GOES .nc files into per-satellite CSVs
-│   ├── sxr_normalization.py    # Compute log-normalization stats (mean/std) on SXR
-│   ├── pipeline_config.py      # Dataclass config for process_data_pipeline.py
-│   └── pipeline_config.yaml    # YAML config for process_data_pipeline.py
-├── download                    # Dataset download utilities
-│   ├── download_sdo.py         # Download SDO/AIA EUV images from JSOC
-│   └── sxr_downloader.py       # Download GOES SXR flux data
-├── forecasting                 # Model training and inference
+├── data                         # Data cleaning and preprocessing
+│   ├── align_data.py            # Align AIA and SXR timestamps; save matched pairs
+│   ├── euv_data_cleaning.py     # EUV image quality filtering and cleaning
+│   ├── iti_data_processing.py   # ITI (image-to-image translation) preprocessing
+│   ├── process_data_pipeline.py # End-to-end preprocessing orchestrator
+│   ├── split_data.py            # Split processed data into train/val/test by date
+│   ├── sxr_data_processing.py   # Combine raw GOES .nc files into per-satellite CSVs
+│   ├── sxr_normalization.py     # Compute log-normalization stats (mean/std) on SXR
+│   ├── pipeline_config.py       # Dataclass config for process_data_pipeline.py
+│   └── pipeline_config.yaml     # YAML config for process_data_pipeline.py
+├── download                     # Dataset download utilities
+│   ├── download_sdo.py          # Download SDO/AIA EUV images from JSOC
+│   └── sxr_downloader.py        # Download GOES SXR flux data
+├── forecasting                  # Model training and inference
 │   ├── data_loaders
-│   │   ├── SDOAIA_dataloader.py# PyTorch Lightning DataModule for AIA+SXR
+│   │   ├── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
 │   │   └── patch_flux_dataloader.py
 │   ├── inference
-│   │   ├── inference.py        # Batch inference; writes predictions.csv
-│   │   ├── evaluation.py       # Compute metrics and generate evaluation plots
-│   │   ├── flare_analysis.py   # Detect, track, and match flares; generate plots
-│   │   ├── local_config.yaml   # Config for inference.py and flare_analysis.py
-│   │   └── evaluation_config.yaml # Config for evaluation.py
+│   │   ├── inference.py         # Batch inference; writes predictions.csv
+│   │   ├── evaluation.py        # Compute metrics and generate evaluation plots
+│   │   ├── flare_analysis.py    # Detect, track, and match flares; generate plots
+│   │   ├── local_config.yaml    # Config for inference.py and flare_analysis.py
+│   │   └── evaluation_config.yaml  # Config for evaluation.py
 │   ├── models
-│   │   └── vit_patch_model_local.py  # ViTLocal: Vision Transformer with patch flux heads
+│   │   └── vit_patch_model_local.py   # ViTLocal: Vision Transformer with patch flux heads
 │   └── training
-│       ├── train.py            # Train the ViTLocal model
-│       └── train_config.yaml   # Training hyperparameters and data paths
-├── pipeline_config.yaml        # Top-level pipeline orchestration config
-├── run_pipeline.py             # End-to-end pipeline orchestrator
-└── requirements.txt            # Python dependencies
+│       ├── train.py             # Train the ViTLocal model
+│       └── train_config.yaml    # Training hyperparameters and data paths
+├── pipeline_config.yaml         # Top-level pipeline orchestration config
+├── run_pipeline.py              # End-to-end pipeline orchestrator
+└── requirements.txt             # Python dependencies
 ```
 
 ---
