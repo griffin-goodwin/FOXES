@@ -88,12 +88,40 @@ def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
 
         for pq_file in parquet_files:
             table = pq.read_table(pq_file, columns=["filename", "aia_stack", "sxr_value"])
+            n_rows = len(table)
 
-            for i in range(len(table)):
-                row = table.slice(i, 1)
-                filename = row["filename"][0].as_py()
-                aia_arr = np.array(row["aia_stack"][0].as_py(), dtype=np.float32)
-                sxr_arr = np.array(row["sxr_value"][0].as_py(), dtype=np.float32)
+            # Extract all columns in bulk — avoids creating a new Arrow Table per
+            # row (table.slice) and per-row .as_py() calls on large nested arrays.
+            filenames = table.column("filename").to_pylist()
+
+            # Fast path: flatten nested fixed-size list columns directly to numpy,
+            # then reshape. Avoids any Python-level looping over array elements.
+            # Falls back to to_pylist() if the column type doesn't support it.
+            def _to_numpy_bulk(col, n):
+                chunk = col.combine_chunks()
+                vals = chunk
+                while hasattr(vals, "values"):
+                    vals = vals.values
+                arr = vals.to_numpy(zero_copy_only=False).astype(np.float32)
+                return arr.reshape(n, arr.size // n)
+
+            try:
+                aia_bulk = _to_numpy_bulk(table.column("aia_stack"), n_rows)
+                use_bulk_aia = True
+            except Exception:
+                aia_pylist = table.column("aia_stack").to_pylist()
+                use_bulk_aia = False
+
+            try:
+                sxr_bulk = _to_numpy_bulk(table.column("sxr_value"), n_rows)
+                use_bulk_sxr = True
+            except Exception:
+                sxr_pylist = table.column("sxr_value").to_pylist()
+                use_bulk_sxr = False
+
+            for i, filename in enumerate(filenames):
+                aia_arr = aia_bulk[i] if use_bulk_aia else np.array(aia_pylist[i], dtype=np.float32)
+                sxr_arr = sxr_bulk[i] if use_bulk_sxr else np.array(sxr_pylist[i], dtype=np.float32)
 
                 fut = pool.submit(_write_arrays, filename, aia_arr, sxr_arr,
                                   aia_split_dir, sxr_split_dir)
