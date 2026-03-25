@@ -200,12 +200,25 @@ def main():
         parser.error("Provide --aia_dir and --sxr_dir, or --config with those keys set.")
 
     if args.parquet_root:
+        # Allow both HF names ("validation") and local aliases ("val")
+        LOCAL_TO_HF = {v: k for k, v in HF_TO_LOCAL.items()}  # {"val": "validation"}
         splits = [s.strip() for s in args.splits.split(",")]
         for split in splits:
             split_dir = os.path.join(args.parquet_root, split)
             if not os.path.isdir(split_dir):
-                print(f"[warn] Split dir not found, skipping: {split_dir}")
-                continue
+                # Try the alias (e.g. "val" if "validation" was requested, or vice versa)
+                alias = HF_TO_LOCAL.get(split) or LOCAL_TO_HF.get(split)
+                if alias:
+                    alt_dir = os.path.join(args.parquet_root, alias)
+                    if os.path.isdir(alt_dir):
+                        print(f"[info] Using '{alias}/' for split '{split}'")
+                        split_dir = alt_dir
+                    else:
+                        print(f"[warn] Split dir not found, skipping: {split_dir}")
+                        continue
+                else:
+                    print(f"[warn] Split dir not found, skipping: {split_dir}")
+                    continue
             convert_split(split_dir, split, aia_dir, sxr_dir, num_workers, args.print_every,
                           delete_after=args.delete)
     elif args.parquet_dir:
