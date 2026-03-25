@@ -95,15 +95,24 @@ def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
             filenames = table.column("filename").to_pylist()
 
             # Fast path: flatten nested fixed-size list columns directly to numpy,
-            # then reshape. Avoids any Python-level looping over array elements.
+            # then reshape to (n, *element_shape). Avoids per-row Python overhead.
             # Falls back to to_pylist() if the column type doesn't support it.
             def _to_numpy_bulk(col, n):
                 chunk = col.combine_chunks()
+                # Walk the PyArrow type to recover the per-element shape
+                shape = []
+                t = chunk.type
+                while hasattr(t, "value_type"):
+                    if hasattr(t, "list_size"):   # FixedSizeList
+                        shape.append(t.list_size)
+                    t = t.value_type
+                # Walk the values to get the raw flat buffer
                 vals = chunk
                 while hasattr(vals, "values"):
                     vals = vals.values
                 arr = vals.to_numpy(zero_copy_only=False).astype(np.float32)
-                return arr.reshape(n, arr.size // n)
+                elem_shape = tuple(shape) if shape else (arr.size // n,)
+                return arr.reshape(n, *elem_shape)
 
             try:
                 aia_bulk = _to_numpy_bulk(table.column("aia_stack"), n_rows)
