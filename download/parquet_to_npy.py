@@ -61,7 +61,7 @@ def _write_arrays(filename: str, aia_arr: np.ndarray, sxr_arr: np.ndarray,
 
 
 def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
-                  num_workers: int = 8, print_every: int = 500):
+                  num_workers: int = 8, print_every: int = 500, delete_after: bool = False):
     local_split = HF_TO_LOCAL.get(hf_split, hf_split)
     aia_split_dir = os.path.join(aia_base, local_split)
     sxr_split_dir = os.path.join(sxr_base, local_split)
@@ -119,12 +119,14 @@ def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
                 sxr_pylist = table.column("sxr_value").to_pylist()
                 use_bulk_sxr = False
 
+            file_futures = []
             for i, filename in enumerate(filenames):
                 aia_arr = aia_bulk[i] if use_bulk_aia else np.array(aia_pylist[i], dtype=np.float32)
                 sxr_arr = sxr_bulk[i] if use_bulk_sxr else np.array(sxr_pylist[i], dtype=np.float32)
 
                 fut = pool.submit(_write_arrays, filename, aia_arr, sxr_arr,
                                   aia_split_dir, sxr_split_dir)
+                file_futures.append(fut)
                 futures[fut] = submitted
                 submitted += 1
 
@@ -144,6 +146,13 @@ def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
                         f"{rate:.1f} rows/sec",
                         flush=True,
                     )
+
+            # Wait for all writes from this file to finish before deleting it
+            if delete_after:
+                for fut in as_completed(file_futures):
+                    pass
+                pq_file.unlink()
+                print(f"  Deleted {pq_file.name}", flush=True)
 
         for fut in as_completed(futures):
             if fut.result():
@@ -177,6 +186,8 @@ def main():
                         help="Parallel write threads (default: from config or 8)")
     parser.add_argument("--print_every", type=int, default=500,
                         help="Log progress every N rows")
+    parser.add_argument("--delete", action="store_true",
+                        help="Delete each parquet file after its rows are fully written to disk")
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else {}
@@ -195,11 +206,13 @@ def main():
             if not os.path.isdir(split_dir):
                 print(f"[warn] Split dir not found, skipping: {split_dir}")
                 continue
-            convert_split(split_dir, split, aia_dir, sxr_dir, num_workers, args.print_every)
+            convert_split(split_dir, split, aia_dir, sxr_dir, num_workers, args.print_every,
+                          delete_after=args.delete)
     elif args.parquet_dir:
         if not args.split:
             parser.error("--split is required when using --parquet_dir")
-        convert_split(args.parquet_dir, args.split, aia_dir, sxr_dir, num_workers, args.print_every)
+        convert_split(args.parquet_dir, args.split, aia_dir, sxr_dir, num_workers, args.print_every,
+                      delete_after=args.delete)
     else:
         parser.error("Provide either --parquet_dir + --split, or --parquet_root")
 

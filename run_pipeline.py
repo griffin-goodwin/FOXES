@@ -228,6 +228,8 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
             cmd += ["--splits", p2n["splits"]]
         if p2n.get("num_workers"):
             cmd += ["--num_workers", str(p2n["num_workers"])]
+        if p2n.get("delete_after"):
+            cmd += ["--delete"]
         return [cmd]
 
     if step == "download_aia":
