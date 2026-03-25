@@ -106,6 +106,7 @@ def write_merged_config(base_path: str, overrides: dict, out_name: str) -> Path:
 
 STEP_ORDER = [
     "hf_download",
+    "parquet_to_npy",
     "download_aia",
     "download_sxr",
     "combine_sxr",
@@ -124,6 +125,10 @@ STEP_INFO = {
     "hf_download": {
         "description": "Download processed+split AIA/SXR data from HuggingFace Hub (replaces download→preprocess→split)",
         "script": ROOT / "download" / "hugging_face_data_download.py",
+    },
+    "parquet_to_npy": {
+        "description": "Convert locally-downloaded HF parquet files to .npy (skips network download)",
+        "script": ROOT / "download" / "parquet_to_npy.py",
     },
     "download_aia": {
         "description": "Download SDO/AIA EUV images from JSOC",
@@ -199,6 +204,31 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
         hf = cfg.get("hf_download", {})
         config_path = hf.get("config", "download/hf_download_config.yaml")
         return [[sys.executable, str(STEP_INFO[step]["script"]), "--config", config_path]]
+
+    if step == "parquet_to_npy":
+        p2n = cfg.get("parquet_to_npy", {})
+        cmd = [sys.executable, str(STEP_INFO[step]["script"])]
+        if p2n.get("config"):
+            cmd += ["--config", p2n["config"]]
+        if p2n.get("parquet_root"):
+            cmd += ["--parquet_root", p2n["parquet_root"]]
+        elif p2n.get("parquet_dir"):
+            if not p2n.get("split"):
+                log.error("pipeline_config.yaml parquet_to_npy.split is required when parquet_dir is set")
+                return None
+            cmd += ["--parquet_dir", p2n["parquet_dir"], "--split", p2n["split"]]
+        else:
+            log.error("pipeline_config.yaml parquet_to_npy requires parquet_root or parquet_dir")
+            return None
+        if p2n.get("aia_dir"):
+            cmd += ["--aia_dir", p2n["aia_dir"]]
+        if p2n.get("sxr_dir"):
+            cmd += ["--sxr_dir", p2n["sxr_dir"]]
+        if p2n.get("splits"):
+            cmd += ["--splits", p2n["splits"]]
+        if p2n.get("num_workers"):
+            cmd += ["--num_workers", str(p2n["num_workers"])]
+        return [cmd]
 
     if step == "download_aia":
         if not require(["download_dir", "email"], "aia") or not require(["start_date"]):

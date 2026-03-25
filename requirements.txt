@@ -37,3 +37,5 @@ imageio-ffmpeg
 tqdm
 wandb
 PyYAML
+huggingface_hub
+datasets
