@@ -58,7 +58,8 @@ FOXES
 │   ├── download_sdo.py          # Download SDO/AIA EUV images from JSOC
 │   ├── sxr_downloader.py        # Download GOES SXR flux data
 │   ├── hugging_face_data_download.py  # Download pre-processed data from HuggingFace Hub
-│   └── hf_download_config.yaml  # Config for HuggingFace downloader
+│   ├── parquet_to_npy.py        # Convert locally-downloaded HF parquet files to .npy
+│   └── hf_download_config.yaml  # Config for HuggingFace downloader and parquet_to_npy
 ├── forecasting                  # Model training and inference
 │   ├── data_loaders
 │   │   ├── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
@@ -115,6 +116,7 @@ FOXES uses a single orchestrator script (`run_pipeline.py`) and a top-level conf
 | # | Step | Description                                                                    |
 |---|------|--------------------------------------------------------------------------------|
 | 0 | `hf_download` | Download pre-processed, pre-split data from HuggingFace *(replaces steps 1–6)* |
+| 0b | `parquet_to_npy` | Convert already-downloaded HF parquet files to `.npy` *(skips network download)* |
 | 1 | `download_aia` | Download SDO/AIA EUV images from JSOC                                          |
 | 2 | `download_sxr` | Download GOES SXR flux data                                                    |
 | 3 | `combine_sxr` | Combine raw GOES `.nc` files into per-satellite CSVs                           |
@@ -137,6 +139,9 @@ python run_pipeline.py --config pipeline_config.yaml --steps all
 
 # Quick-start: download pre-processed data from HuggingFace, then train
 python run_pipeline.py --config pipeline_config.yaml --steps hf_download,train,inference,evaluate
+
+# Already have parquet files locally? Convert them to .npy, then train
+python run_pipeline.py --config pipeline_config.yaml --steps parquet_to_npy,train,inference,evaluate
 
 # Run specific steps
 python run_pipeline.py --config pipeline_config.yaml --steps train,inference,evaluate
@@ -185,6 +190,32 @@ print_every: 500
 Run the downloader standalone:
 ```bash
 python download/hugging_face_data_download.py --config download/hf_download_config.yaml
+```
+
+### Converting Local Parquet Files to .npy
+
+If you've already downloaded the HuggingFace parquet files (e.g., via `huggingface-cli` or the HF web UI), use `parquet_to_npy.py` to convert them directly — no network connection needed. The output is identical to what `hf_download` produces.
+
+```bash
+# All splits at once — parquet_root should contain train/, validation/, test/ subdirs
+python download/parquet_to_npy.py \
+    --parquet_root /path/to/parquet \
+    --config download/hf_download_config.yaml
+
+# Single split
+python download/parquet_to_npy.py \
+    --parquet_dir /path/to/parquet/train \
+    --split train \
+    --aia_dir /Volumes/T9/AIA_hg_processed \
+    --sxr_dir /Volumes/T9/SXR_hg_processed
+```
+
+Configure it via `pipeline_config.yaml` to use it as a pipeline step:
+
+```yaml
+parquet_to_npy:
+  config: "download/hf_download_config.yaml"  # provides aia_dir, sxr_dir, num_workers
+  parquet_root: "/path/to/your/parquet"        # dir with train/, validation/, test/ subdirs
 ```
 
 ### Configuration

@@ -25,6 +25,24 @@ hf_download:
   config: "download/hf_download_config.yaml"
 
 # -----------------------------------------------------------------------------
+# Local parquet → .npy  (step: parquet_to_npy)
+# Use this if you've already downloaded HF parquet files and want to skip the
+# network step. Point parquet_root at a directory with split subdirs
+# (train/, validation/, test/) or use parquet_dir + split for a single split.
+# aia_dir / sxr_dir default to the values in hf_download_config.yaml if
+# --config is also provided; override here to use different paths.
+# -----------------------------------------------------------------------------
+parquet_to_npy:
+  config: "download/hf_download_config.yaml"   # provides aia_dir, sxr_dir, num_workers
+  parquet_root: ""   # root dir containing train/, validation/, test/ subdirs
+  # parquet_dir: ""  # alternative: single split dir (also set split: below)
+  # split: "train"
+  # aia_dir: "${base_dir}/AIA_hg_processed"    # override config if needed
+  # sxr_dir: "${base_dir}/SXR_hg_processed"
+  # splits: "train,validation,test"            # which subdirs to process
+  # num_workers: 8
+
+# -----------------------------------------------------------------------------
 # Shared date range (used by download_aia and download_sxr)
 # -----------------------------------------------------------------------------
 start_date: "2014-07-01 00:00:00"
