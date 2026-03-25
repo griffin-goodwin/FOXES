@@ -156,3 +156,10 @@ wandb/
 .claude/
 Untracked/
 foxes.yml
+.git-backup
+/forecasting/training/convert_flux_to_npy.py
+/forecasting/inference/extract_patch_flux.py
+/.merged_train_config.yaml
+/.merged_inference_config.yaml
+/.merged_evaluate_config.yaml
+.npz

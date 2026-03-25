@@ -63,7 +63,7 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
         Strategy for balancing dataset classes.
     """
 
-    def __init__(self, aia_dir, sxr_dir, wavelengths=[94, 131, 171, 193, 211, 304], sxr_transform=None,
+    def __init__(self, aia_dir, sxr_dir, wavelengths=[94, 131, 171, 193, 211, 304, 335], sxr_transform=None,
                  target_size=(512, 512), cadence=1, reference_time=None, only_prediction=False, oversample=False,
                  flare_threshold=1e-5, balance_strategy='upsample_minority'):
         self.aia_dir = Path(aia_dir).resolve()
@@ -309,6 +309,130 @@ class AIA_GOESDataset(torch.utils.data.Dataset):
         """
         timestamp = self.samples[idx]
         return timestamp
+
+
+class NoisyAIA_GOESDataset(AIA_GOESDataset):
+    """
+    Ablation dataset that applies Gaussian noise to specific AIA wavelength channels.
+
+    Inherits all behavior from AIA_GOESDataset and injects additive Gaussian noise
+    on the specified wavelengths after loading, enabling channel-wise ablation studies.
+
+    Parameters
+    ----------
+    noisy_wavelengths : list of int
+        Subset of wavelengths to corrupt with noise (e.g. [171, 193]).
+        Must be a subset of the `wavelengths` argument.
+    noise_std : float or dict
+        Standard deviation of the Gaussian noise. If a float, the same std is
+        applied to all noisy channels. If a dict mapping wavelength -> std, each
+        channel gets its own scale.
+    *args, **kwargs
+        Forwarded to AIA_GOESDataset.
+    """
+
+    def __init__(self, *args, noisy_wavelengths, noise_std=1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.noisy_wavelengths = noisy_wavelengths
+        # Build a per-channel std lookup
+        if isinstance(noise_std, dict):
+            self.noise_std = noise_std
+        else:
+            self.noise_std = {w: noise_std for w in noisy_wavelengths}
+
+        invalid = set(noisy_wavelengths) - set(self.wavelengths)
+        if invalid:
+            raise ValueError(f"noisy_wavelengths {invalid} not in dataset wavelengths {self.wavelengths}")
+
+    def __getitem__(self, idx):
+        aia_img, sxr_val = super().__getitem__(idx)  # (H, W, C)
+
+        for wav in self.noisy_wavelengths:
+            c = self.wavelengths.index(wav)
+            std = self.noise_std[wav]
+            noise = torch.randn_like(aia_img[..., c]) * std
+            aia_img[..., c] = aia_img[..., c] + noise
+
+        return aia_img, sxr_val
+
+
+class NoisyAIA_GOESDataModule(LightningDataModule):
+    """
+    DataModule for the Gaussian-noise ablation study.
+
+    Wraps NoisyAIA_GOESDataset for test/val splits while keeping training
+    clean (or optionally noisy too). Noise is applied only at evaluation time
+    by default so the pre-trained model is evaluated without retraining.
+
+    Parameters
+    ----------
+    noisy_wavelengths : list of int
+        Wavelengths to corrupt during evaluation.
+    noise_std : float or dict
+        Noise standard deviation(s); see NoisyAIA_GOESDataset.
+    apply_noise_to_train : bool, optional
+        If True, also corrupt the training split (default: False).
+    All other parameters match AIA_GOESDataModule.
+    """
+
+    def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir,
+                 sxr_train_dir, sxr_val_dir, sxr_test_dir,
+                 sxr_norm, noisy_wavelengths, noise_std=1.0,
+                 apply_noise_to_train=False,
+                 batch_size=64, num_workers=4,
+                 wavelengths=[94, 131, 171, 193, 211, 304, 335],
+                 cadence=1, reference_time=None):
+        super().__init__()
+        self.aia_train_dir = aia_train_dir
+        self.aia_val_dir = aia_val_dir
+        self.aia_test_dir = aia_test_dir
+        self.sxr_train_dir = sxr_train_dir
+        self.sxr_val_dir = sxr_val_dir
+        self.sxr_test_dir = sxr_test_dir
+        self.sxr_norm = sxr_norm
+        self.noisy_wavelengths = noisy_wavelengths
+        self.noise_std = noise_std
+        self.apply_noise_to_train = apply_noise_to_train
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.wavelengths = wavelengths
+        self.cadence = cadence
+        self.reference_time = reference_time
+
+    def _make_dataset(self, aia_dir, sxr_dir, noisy):
+        cls = NoisyAIA_GOESDataset if noisy else AIA_GOESDataset
+        kwargs = dict(
+            aia_dir=aia_dir,
+            sxr_dir=sxr_dir,
+            sxr_transform=SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1]),
+            target_size=(512, 512),
+            wavelengths=self.wavelengths,
+            cadence=self.cadence,
+            reference_time=self.reference_time,
+        )
+        if noisy:
+            kwargs["noisy_wavelengths"] = self.noisy_wavelengths
+            kwargs["noise_std"] = self.noise_std
+        return cls(**kwargs)
+
+    def setup(self, stage=None):
+        self.train_ds = self._make_dataset(
+            self.aia_train_dir, self.sxr_train_dir, noisy=self.apply_noise_to_train
+        )
+        self.val_ds = self._make_dataset(self.aia_val_dir, self.sxr_val_dir, noisy=True)
+        self.test_ds = self._make_dataset(self.aia_test_dir, self.sxr_test_dir, noisy=True)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=self.batch_size,
+                          shuffle=True, num_workers=self.num_workers, prefetch_factor=4)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.batch_size,
+                          shuffle=False, num_workers=self.num_workers, prefetch_factor=4)
+
+    def test_dataloader(self):
+        return DataLoader(self.test_ds, batch_size=self.batch_size,
+                          shuffle=False, num_workers=self.num_workers, prefetch_factor=1)
 
 
 class AIA_GOESDataModule(LightningDataModule):

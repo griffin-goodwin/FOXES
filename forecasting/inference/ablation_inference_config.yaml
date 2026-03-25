@@ -1,0 +1,62 @@
+# =============================================================================
+# FOXES Ablation Inference Configuration
+# =============================================================================
+# Used by ablation_inference.py to run Gaussian noise channel-masking ablation.
+#
+# Usage:
+#   python ablation_inference.py -config ablation_inference_config.yaml
+#
+# Variables
+# ---------
+# Define top-level string keys and reference them anywhere with ${key}.
+
+base_dir:   "/Volumes/T9/FOXES_Data"
+checkpoint: "/Users/griffingoodwin/Downloads/FOXES_Model_Checkpoint.ckpt"
+
+model: "ViTLocal"
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+prediction_only: "false"
+
+data:
+  aia_dir:         "${base_dir}/AIA_processed/val"
+  sxr_dir:         "${base_dir}/SXR_processed/val"
+  sxr_norm_path:   "${base_dir}/SXR_processed/normalized_sxr.npy"
+  checkpoint_path: "${checkpoint}"
+
+# Output directory — each condition saves <label>.csv here
+output_dir: "${base_dir}/inference/ablation"
+
+model_params:
+  input_size: 512
+  patch_size: 8
+  batch_size: 10
+  no_weights: true   # skip attention saving for speed
+  no_flux:    true
+
+# -----------------------------------------------------------------------------
+# Ablation conditions
+# -----------------------------------------------------------------------------
+# noise_std: standard deviation of Gaussian noise applied in normalized tensor space.
+# Each condition names a wavelength subset to corrupt; empty list = clean baseline.
+# You can also pass a per-wavelength dict, e.g. {171: 0.5, 193: 2.0}
+ablation:
+  noise_std: 1.0
+  conditions:
+    - label: baseline
+      wavelengths: []
+    - label: ablate_94
+      wavelengths: [94]
+    - label: ablate_131
+      wavelengths: [131]
+    - label: ablate_171
+      wavelengths: [171]
+    - label: ablate_193
+      wavelengths: [193]
+    - label: ablate_211
+      wavelengths: [211]
+    - label: ablate_304
+      wavelengths: [304]
+    - label: ablate_335
+      wavelengths: [335]
+    - label: ablate_all
+      wavelengths: [94, 131, 171, 193, 211, 304, 335]
