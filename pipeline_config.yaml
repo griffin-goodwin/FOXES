@@ -41,6 +41,7 @@ parquet_to_npy:
   # sxr_dir: "${base_dir}/SXR_hg_processed"
   # splits: "train,validation,test"            # which subdirs to process
   # num_workers: 8
+  # delete_after: true                         # delete each parquet file once written
 
 # -----------------------------------------------------------------------------
 # Shared date range (used by download_aia and download_sxr)
