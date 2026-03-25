@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +47,33 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+
+def resolve_variables(cfg: dict) -> dict:
+    """
+    Resolve ${variable} placeholders in a config dict.
+
+    Top-level string keys whose values don't themselves contain placeholders
+    are treated as variables. Substitution is applied recursively to all
+    string values in the config.
+    """
+    variables = {k: v for k, v in cfg.items()
+                 if isinstance(v, str) and '${' not in v}
+
+    def substitute(obj):
+        if isinstance(obj, dict):
+            return {k: substitute(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [substitute(item) for item in obj]
+        elif isinstance(obj, str):
+            for match in re.finditer(r'\$\{([^}]+)\}', obj):
+                var = match.group(1)
+                if var in variables:
+                    obj = obj.replace(f'${{{var}}}', variables[var])
+            return obj
+        return obj
+
+    return substitute(cfg)
+
 
 def deep_merge(base: dict, overrides: dict) -> dict:
     """Recursively merge overrides into base, modifying base in-place."""
@@ -88,6 +116,8 @@ STEP_ORDER = [
     "inference",
     "evaluate",
     "flare_analysis",
+    "ablation",
+    "spatial_performance",
 ]
 
 STEP_INFO = {
@@ -134,6 +164,14 @@ STEP_INFO = {
     "flare_analysis": {
         "description": "Detect, track, and match flares; generate plots/movies",
         "script": ROOT / "forecasting" / "inference" / "flare_analysis.py",
+    },
+    "ablation": {
+        "description": "Run Gaussian noise channel-masking ablation study on pretrained model",
+        "script": ROOT / "forecasting" / "inference" / "ablation_inference.py",
+    },
+    "spatial_performance": {
+        "description": "Generate flux-weighted spatial error heatmap on the solar disk",
+        "script": ROOT / "analysis" / "spatial_performance.py",
     },
 }
 
@@ -268,6 +306,26 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
             config_path = str(write_merged_config(config_path, inf["overrides"], "inference_config"))
         return [base + ["--config", config_path]]
 
+    if step == "ablation":
+        if not require(["config"], "ablation"):
+            return None
+        abl = cfg["ablation"]
+        config_path = abl["config"]
+        if abl.get("overrides"):
+            config_path = str(write_merged_config(config_path, abl["overrides"], "ablation_config"))
+        return [base + ["-config", config_path]]
+
+    if step == "spatial_performance":
+        sp = cfg.get("spatial_performance", {})
+        cmd = base[:]
+        if sp.get("flux_dir"):
+            cmd += ["--flux_dir", sp["flux_dir"]]
+        if sp.get("predictions_csv"):
+            cmd += ["--predictions_csv", sp["predictions_csv"]]
+        if sp.get("out_dir"):
+            cmd += ["--out_dir", sp["out_dir"]]
+        return [cmd]
+
     return [base]
 
 
@@ -338,6 +396,7 @@ def main():
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
+    cfg = resolve_variables(cfg)
 
     # Resolve step list
     if args.steps.strip().lower() == "all":
