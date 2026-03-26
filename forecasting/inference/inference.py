@@ -86,8 +86,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     pin_memory = config_data.get('pin_memory', True) if config_data else True
     
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
-                       pin_memory=pin_memory, shuffle=False,
-                       persistent_workers=num_workers > 0)
+                       pin_memory=pin_memory, shuffle=False)
     
     # Load SXR normalization only if path is provided and not empty
     sxr_norm = None
@@ -355,8 +354,12 @@ def load_model_from_config(config_data):
 
     model.eval()
 
-    if n_gpus > 1:
+    if (config_data.get('multi_gpu', False)
+            and torch.cuda.is_available()
+            and torch.cuda.device_count() > 1):
+        n_gpus = torch.cuda.device_count()
         model = torch.nn.DataParallel(model)
+        print(f"Using DataParallel across {n_gpus} GPUs")
 
     return model
 
