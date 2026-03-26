@@ -33,6 +33,9 @@ model_params:
   no_weights: true   # skip attention saving for speed
   no_flux:    true
 
+num_workers: 8
+pin_memory:  true
+
 # -----------------------------------------------------------------------------
 # Ablation conditions
 # -----------------------------------------------------------------------------
