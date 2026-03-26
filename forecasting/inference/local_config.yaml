@@ -34,6 +34,9 @@ model_params:
   no_weights: false
   no_flux:    false
 
+num_workers: 8   # DataLoader workers — increase if GPU utilization is low
+pin_memory:  true
+
 # -----------------------------------------------------------------------------
 # Flare Analysis (flare_analysis.py)
 # -----------------------------------------------------------------------------
