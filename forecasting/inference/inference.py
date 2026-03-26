@@ -101,20 +101,21 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     # All models are ViTLocal with localized attention (no CLS token)
     grid_h, grid_w = input_size // patch_size, input_size // patch_size
     
+    use_amp = data_device.type == 'cuda'
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             aia_imgs = batch[0]
             sxr = batch[1]
             aia_imgs = aia_imgs.to(data_device, non_blocking=True)
 
-            # Call model
+            # Call model — use AMP for faster inference on Tensor Core GPUs (V100, A100)
             # CRITICAL: ViTLocal defaults to return_attention=True, which uses massive memory
             # Only compute attention weights if we're saving them (save_weights=True)
-            if save_weights:
-                pred = model(aia_imgs, return_attention=True)
-            else:
-                # Explicitly disable attention computation - this saves ~3GB per batch!
-                pred = model(aia_imgs, return_attention=False)
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
+                if save_weights:
+                    pred = model(aia_imgs, return_attention=True)
+                else:
+                    pred = model(aia_imgs, return_attention=False)
 
             # Extract outputs (ViTLocal returns tuple of (predictions, attention_weights, flux_contributions) when return_attention=True)
             if isinstance(pred, tuple) and len(pred) >= 3:
@@ -211,7 +212,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 flux_contributions = None
             
             # Only clear cache occasionally — doing it every batch stalls the GPU pipeline
-            if batch_idx % 50 == 0:
+            if batch_idx % 2 == 0:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
