@@ -34,8 +34,10 @@ model_params:
   no_weights: false
   no_flux:    false
 
-num_workers: 8   # DataLoader workers — increase if GPU utilization is low
+num_workers: 8    # set to 0 to disable multiprocessing (useful for debugging stalls)
 pin_memory:  true
+use_amp:     false  # set true to enable FP16 autocast (faster on A100, may OOM on V100)
+multi_gpu:   false  # set true to use all available GPUs via DataParallel
 
 # -----------------------------------------------------------------------------
 # Flare Analysis (flare_analysis.py)

@@ -33,8 +33,10 @@ model_params:
   no_weights: true   # skip attention saving for speed
   no_flux:    true
 
-num_workers: 8
+num_workers: 8    # set to 0 to disable multiprocessing (useful for debugging stalls)
 pin_memory:  true
+use_amp:     false  # set true to enable FP16 autocast (faster on A100, may OOM on V100)
+multi_gpu:   false  # set true to use all available GPUs via DataParallel
 
 # -----------------------------------------------------------------------------
 # Ablation conditions
