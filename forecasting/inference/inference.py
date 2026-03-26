@@ -212,10 +212,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 flux_contributions = None
             
             # Only clear cache occasionally — doing it every batch stalls the GPU pipeline
-            if batch_idx % 2 == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+            #if batch_idx % 2 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
