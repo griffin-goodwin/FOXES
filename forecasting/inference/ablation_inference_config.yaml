@@ -41,12 +41,11 @@ multi_gpu:   false  # set true to use all available GPUs via DataParallel
 # -----------------------------------------------------------------------------
 # Ablation conditions
 # -----------------------------------------------------------------------------
-# noise_std: standard deviation of Gaussian noise applied in normalized tensor space.
+# noise_std: scale factor applied to each channel's per-image std.
 # Each condition names a wavelength subset to corrupt; empty list = clean baseline.
 # You can also pass a per-wavelength dict, e.g. {171: 0.5, 193: 2.0}
-ablation:
-  noise_std: 1.0
-  conditions:
+noise_std: 1.0
+conditions:
     - label: baseline
       wavelengths: []
     - label: ablate_94
