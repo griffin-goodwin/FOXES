@@ -334,7 +334,9 @@ class NoisyAIA_GOESDataset(AIA_GOESDataset):
     def __init__(self, *args, noisy_wavelengths, noise_std=1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.noisy_wavelengths = noisy_wavelengths
-        # Build a per-channel std lookup
+        # noise_std is a scale factor applied to each channel's per-image std,
+        # so noise magnitude is relative to that image's own signal variability.
+        # A value of 1.0 means noise std == channel std (SNR ~ 1).
         if isinstance(noise_std, dict):
             self.noise_std = noise_std
         else:
@@ -349,9 +351,12 @@ class NoisyAIA_GOESDataset(AIA_GOESDataset):
 
         for wav in self.noisy_wavelengths:
             c = self.wavelengths.index(wav)
-            std = self.noise_std[wav]
-            noise = torch.randn_like(aia_img[..., c]) * std
-            aia_img[..., c] = aia_img[..., c] + noise
+            scale = self.noise_std[wav]
+            # Per-image noise: scale factor * this channel's own std so that
+            # noise magnitude tracks the signal variability in each image.
+            channel_std = aia_img[..., c].std()
+            noise = torch.randn_like(aia_img[..., c]) * (scale * channel_std)
+            aia_img[..., c] = (aia_img[..., c] + noise).clamp(-1.0, 1.0)
 
         return aia_img, sxr_val
 
