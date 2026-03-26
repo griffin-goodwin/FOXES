@@ -121,7 +121,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             # Fall back to single GPU for batches smaller than n_gpus to avoid
             # DataParallel crashing when some replicas receive empty inputs.
             active_model = (base_model
-                            if use_multi_gpu and aia_imgs.shape[0] < n_gpus
+                            if isinstance(model, torch.nn.DataParallel) and aia_imgs.shape[0] < n_gpus
                             else model)
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
                 if save_weights:
