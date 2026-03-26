@@ -162,12 +162,11 @@ def main():
     sys.modules['models'] = models
 
     model_params = config_data.get('model_params', {})
-    ablation_cfg = config_data.get('ablation', {})
-    noise_std = ablation_cfg.get('noise_std', 1.0)
-    conditions = ablation_cfg.get('conditions', [])
+    noise_std = config_data.get('noise_std', 1.0)
+    conditions = config_data.get('conditions', [])
 
     if not conditions:
-        raise ValueError("No ablation conditions defined in config under 'ablation.conditions'.")
+        raise ValueError("No ablation conditions defined in config under 'conditions'.")
 
     output_dir = Path(config_data['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)

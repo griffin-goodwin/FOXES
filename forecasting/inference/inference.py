@@ -86,7 +86,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     pin_memory = config_data.get('pin_memory', True) if config_data else True
     
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
-                       pin_memory=pin_memory, shuffle=False)
+                       pin_memory=pin_memory, shuffle=False,
+                       multiprocessing_context='spawn' if num_workers > 0 else None)
     
     # Load SXR normalization only if path is provided and not empty
     sxr_norm = None
@@ -102,7 +103,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     
     use_amp = (data_device.type == 'cuda'
                and config_data.get('use_amp', False) if config_data else False)
-    with torch.no_grad():
+    try:
+      with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             aia_imgs = batch[0]
             sxr = batch[1]
@@ -217,6 +219,11 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+    finally:
+        # Explicitly shut down DataLoader workers so they don't linger into the
+        # next condition and exhaust shared memory / semaphore limits.
+        del loader
+        gc.collect()
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
