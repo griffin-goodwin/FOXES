@@ -99,20 +99,20 @@ def convert_split(parquet_dir: str, hf_split: str, aia_base: str, sxr_base: str,
             # Falls back to to_pylist() if the column type doesn't support it.
             def _to_numpy_bulk(col, n):
                 chunk = col.combine_chunks()
-                # Walk the PyArrow type to recover the per-element shape
+                # Walk the array levels to recover per-element shape.
+                # FixedSizeList exposes list_size directly; regular List
+                # (which HF uses even for fixed-size arrays) stores a uniform
+                # stride in its offsets buffer — both give the same answer.
                 shape = []
-                t = chunk.type
-                while hasattr(t, "value_type"):
-                    if hasattr(t, "list_size"):   # FixedSizeList
-                        shape.append(t.list_size)
-                    t = t.value_type
-                # Walk the values to get the raw flat buffer
                 vals = chunk
                 while hasattr(vals, "values"):
+                    if hasattr(vals, "list_size"):   # FixedSizeList
+                        shape.append(vals.list_size)
+                    elif hasattr(vals, "offsets"):   # List — stride from offsets
+                        shape.append(vals.offsets[1].as_py())
                     vals = vals.values
                 arr = vals.to_numpy(zero_copy_only=False).astype(np.float32)
-                elem_shape = tuple(shape) if shape else (arr.size // n,)
-                return arr.reshape(n, *elem_shape)
+                return arr.reshape(n, *shape) if shape else arr.reshape(n, arr.size // n)
 
             try:
                 aia_bulk = _to_numpy_bulk(table.column("aia_stack"), n_rows)
