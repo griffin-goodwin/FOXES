@@ -85,6 +85,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     num_workers = config_data.get('num_workers', 4) if config_data else 4
     pin_memory = config_data.get('pin_memory', True) if config_data else True
     
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    use_multi_gpu = str(config_data.get('multi_gpu', False) if config_data else False).lower() == 'true'
+    # Unwrapped model used as fallback for batches smaller than n_gpus
+    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
                        pin_memory=pin_memory, shuffle=False,
                        multiprocessing_context='spawn' if num_workers > 0 else None)
@@ -114,11 +118,16 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             # FP16 on V100 can spike peak memory due to FP32 fallbacks in attention.
             # CRITICAL: ViTLocal defaults to return_attention=True, which uses massive memory
             # Only compute attention weights if we're saving them (save_weights=True)
+            # Fall back to single GPU for batches smaller than n_gpus to avoid
+            # DataParallel crashing when some replicas receive empty inputs.
+            active_model = (base_model
+                            if use_multi_gpu and aia_imgs.shape[0] < n_gpus
+                            else model)
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
                 if save_weights:
-                    pred = model(aia_imgs, return_attention=True)
+                    pred = active_model(aia_imgs, return_attention=True)
                 else:
-                    pred = model(aia_imgs, return_attention=False)
+                    pred = active_model(aia_imgs, return_attention=False)
 
             # Extract outputs (ViTLocal returns tuple of (predictions, attention_weights, flux_contributions) when return_attention=True)
             if isinstance(pred, tuple) and len(pred) >= 3:
@@ -361,12 +370,14 @@ def load_model_from_config(config_data):
 
     model.eval()
 
-    if (config_data.get('multi_gpu', False)
-            and torch.cuda.is_available()
-            and torch.cuda.device_count() > 1):
+    raw_multi_gpu = config_data.get('multi_gpu', False) if config_data else False
+    use_multi_gpu = (str(raw_multi_gpu).lower() == 'true'
+                     and torch.cuda.is_available()
+                     and torch.cuda.device_count() > 1)
+    if use_multi_gpu:
         n_gpus = torch.cuda.device_count()
         model = torch.nn.DataParallel(model)
-        print(f"Using DataParallel across {n_gpus} GPUs")
+        print(f"Using DataParallel across {n_gpus} GPUs — ensure batch_size >= {n_gpus}")
 
     return model
 
