@@ -331,7 +331,7 @@ def load_model_from_config(config_data):
     if torch.cuda.is_available():
         load_device = torch.device('cuda:0')
         n_gpus = torch.cuda.device_count()
-        print(f"Using {n_gpus} GPU(s) for inference")
+        print(f"Using GPU(s) for inference")
     else:
         load_device = torch.device('cpu')
         n_gpus = 0
