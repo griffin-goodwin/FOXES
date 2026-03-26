@@ -85,8 +85,9 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     num_workers = config_data.get('num_workers', 4) if config_data else 4
     pin_memory = config_data.get('pin_memory', True) if config_data else True
     
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, 
-                       pin_memory=pin_memory, shuffle=False)
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,
+                       pin_memory=pin_memory, shuffle=False,
+                       persistent_workers=num_workers > 0)
     
     # Load SXR normalization only if path is provided and not empty
     sxr_norm = None
@@ -209,10 +210,11 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 del flux_contributions
                 flux_contributions = None
             
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+            # Only clear cache occasionally — doing it every batch stalls the GPU pipeline
+            if batch_idx % 50 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
 
 def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
