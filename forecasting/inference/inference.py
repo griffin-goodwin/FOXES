@@ -328,12 +328,14 @@ def load_model_from_config(config_data):
 
     print(f"Loading {model_type} model...")
 
-    # Use GPU 0 by default, or CPU if no GPU available
+    # Use GPU(s) if available
     if torch.cuda.is_available():
         load_device = torch.device('cuda:0')
-        print("Using GPU 0 for inference")
+        n_gpus = torch.cuda.device_count()
+        print(f"Using {n_gpus} GPU(s) for inference")
     else:
         load_device = torch.device('cpu')
+        n_gpus = 0
         print("Using CPU for inference")
 
     if ".ckpt" in checkpoint_path:
@@ -352,7 +354,10 @@ def load_model_from_config(config_data):
         model = model.to(load_device)
 
     model.eval()
-    
+
+    if n_gpus > 1:
+        model = torch.nn.DataParallel(model)
+
     return model
 
 
