@@ -101,14 +101,16 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     # All models are ViTLocal with localized attention (no CLS token)
     grid_h, grid_w = input_size // patch_size, input_size // patch_size
     
-    use_amp = data_device.type == 'cuda'
+    use_amp = (data_device.type == 'cuda'
+               and config_data.get('use_amp', False) if config_data else False)
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
             aia_imgs = batch[0]
             sxr = batch[1]
             aia_imgs = aia_imgs.to(data_device, non_blocking=True)
 
-            # Call model — use AMP for faster inference on Tensor Core GPUs (V100, A100)
+            # Call model — optionally use AMP (set use_amp: true in config).
+            # FP16 on V100 can spike peak memory due to FP32 fallbacks in attention.
             # CRITICAL: ViTLocal defaults to return_attention=True, which uses massive memory
             # Only compute attention weights if we're saving them (save_weights=True)
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
