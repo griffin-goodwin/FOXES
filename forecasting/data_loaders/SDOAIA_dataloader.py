@@ -354,8 +354,9 @@ class NoisyAIA_GOESDataset(AIA_GOESDataset):
             scale = self.noise_std[wav]
             # Per-image noise: scale factor * this channel's own std so that
             # noise magnitude tracks the signal variability in each image.
-            channel_std = aia_img[..., c].std()
-            noise = torch.randn_like(aia_img[..., c]) * (scale * channel_std)
+            #channel_std = aia_img[..., c].std()
+            #noise = torch.randn_like(aia_img[..., c]) * (scale * channel_std)
+            noise = torch.randn_like(aia_img[..., c]) * scale
             aia_img[..., c] = (aia_img[..., c] + noise).clamp(-1.0, 1.0)
 
         return aia_img, sxr_val
