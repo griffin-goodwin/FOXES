@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from matplotlib.colors import LogNorm
 from tqdm import tqdm
 from pathlib import Path
 from cmap import Colormap
@@ -39,17 +41,16 @@ FLUX_DIR        = "/Volumes/T9/FOXES_Data/flux/"
 PREDICTIONS_CSV = "/Volumes/T9/FOXES_Misc/batch_results/vit/vit_predictions_test.csv"
 OUT_DIR         = Path(__file__).parent
 GRID_SIZE       = 64    # 512px / 8px patch size
-BIN_SIZE        = 1     # downsample factor (1 = full 64×64 resolution)
+BIN_SIZE        = 1    # downsample factor (1 = full 64×64 resolution)
 CROP_FACTOR     = 1.1   # AIA images cropped at 1.1 solar radii
 SOLAR_RADIUS_PATCHES = (GRID_SIZE / 2) / CROP_FACTOR   # ≈ 29.1 patches
 
-# Only patches above this percentile (per flux map) contribute.
-# 0 = include all non-zero patches.
-FLUX_THRESHOLD_PERCENTILE = 0
+# Patches beyond ±PATCH_CROP_RADIUS from center (in original 64×64 patch units) are masked.
+PATCH_CROP_RADIUS = 19
 
 # Percentile cap for colorbar scaling (applied to non-NaN values).
 # e.g. 99 clips the top 1% of values so detail in the bulk is visible.
-VMAX_PERCENTILE = 99.9
+VMAX_PERCENTILE = 99
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,16 +84,21 @@ def load_predictions(predictions_csv: str) -> pd.DataFrame:
 
 # NOTE: module-level for ProcessPoolExecutor (spawn on macOS)
 def _accumulate_flux_map(args):
-    fpath, log_abs_error, log_error, threshold_pct = args
+    fpath, log_abs_error, log_error, bin_size = args
     fmap = np.load(fpath).astype(np.float64)
+
     active = fmap[fmap > 0]
     if active.size == 0:
         return None
-    if threshold_pct > 0:
-        thresh = np.percentile(active, threshold_pct)
-        fmap = np.where(fmap >= thresh, fmap, 0.0)
-    else:
-        fmap = np.where(fmap > 0, fmap, 0.0)
+
+    fmap = np.where(fmap > 0, fmap, 0.0)
+
+    # Spatially bin before normalization — sum preserves relative log-flux within each bin
+    if bin_size > 1:
+        h, w = fmap.shape
+        bh, bw = h // bin_size, w // bin_size
+        fmap = fmap[:bh * bin_size, :bw * bin_size].reshape(bh, bin_size, bw, bin_size).sum(axis=(1, 3))
+
     total = fmap.sum()
     if total == 0:
         return None
@@ -100,18 +106,26 @@ def _accumulate_flux_map(args):
     return fmap * log_abs_error, fmap * log_error, fmap
 
 
+def _crop_mask(shape: tuple, bin_size: int, radius: int = PATCH_CROP_RADIUS) -> np.ndarray:
+    """True for patches within ±radius original-grid patches from center (y-axis only)."""
+    n = shape[0]
+    r_binned = radius / bin_size
+    cy = (n - 1) / 2
+    y = np.ogrid[:n, :n][0]
+    return np.abs(y - cy) <= r_binned
+
 def compute_flux_weighted_errors(flux_dir: str, df: pd.DataFrame, cache_path: Path,
-                                  threshold_pct: int = FLUX_THRESHOLD_PERCENTILE) -> dict:
-    cache_path = cache_path.with_stem(f"{cache_path.stem}_t{threshold_pct}")
+                                  bin_size: int = BIN_SIZE) -> dict:
+    cache_path = cache_path.with_stem(f"{cache_path.stem}_b{bin_size}")
 
     if cache_path.exists():
         print(f"Loading cached flux-weighted error maps from {cache_path}")
         data = np.load(cache_path)
-        result = {}
         n = float(data['count'])
-        w = data['weight']
-        mae  = np.where(w > 0, data['mae_sum']  / n, np.nan) if n > 0 else np.full_like(w, np.nan)
-        bias = np.where(w > 0, data['bias_sum'] / n, np.nan) if n > 0 else np.full_like(w, np.nan)
+        w    = data['flux_distribution']
+        mask = _crop_mask(w.shape, bin_size)
+        mae  = np.where(mask, data['mae_sum'] / w, np.nan) if n > 0 else np.full_like(w, np.nan)
+        bias = np.where(mask, data['bias_sum'] / w, np.nan) if n > 0 else np.full_like(w, np.nan)
         return mae, bias, w
 
     lookup = {}
@@ -119,11 +133,12 @@ def compute_flux_weighted_errors(flux_dir: str, df: pd.DataFrame, cache_path: Pa
         key = pd.Timestamp(row['timestamp']).floor('s').isoformat()
         lookup[key] = (float(row['log_abs_error']), float(row['log_error']))
 
-    shape = (GRID_SIZE, GRID_SIZE)
-    mae_sum  = np.zeros(shape)
-    bias_sum = np.zeros(shape)
-    weight   = np.zeros(shape)
-    count    = 0
+    binned_grid = GRID_SIZE // bin_size
+    shape = (binned_grid, binned_grid)
+    mae_sum           = np.zeros(shape)
+    bias_sum          = np.zeros(shape)
+    flux_distribution = np.zeros(shape)
+    count             = 0
 
     files = sorted([os.path.join(flux_dir, f)
                     for f in os.listdir(flux_dir) if f.endswith('.npy')])
@@ -136,7 +151,7 @@ def compute_flux_weighted_errors(flux_dir: str, df: pd.DataFrame, cache_path: Pa
         if ts_key not in lookup:
             continue
         abs_err, err = lookup[ts_key]
-        args_list.append((fpath, abs_err, err, threshold_pct))
+        args_list.append((fpath, abs_err, err, bin_size))
 
     print(f"Matched {len(args_list)} / {len(files)} flux maps")
 
@@ -149,18 +164,19 @@ def compute_flux_weighted_errors(flux_dir: str, df: pd.DataFrame, cache_path: Pa
             if result is None:
                 continue
             mae_c, bias_c, flux_c = result
-            mae_sum  += mae_c
-            bias_sum += bias_c
-            weight   += flux_c
-            count    += 1
+            mae_sum          += mae_c
+            bias_sum         += bias_c
+            flux_distribution += flux_c
+            count            += 1
 
     np.savez(cache_path, mae_sum=mae_sum, bias_sum=bias_sum,
-             weight=weight, count=np.array(count))
+             flux_distribution=flux_distribution, count=np.array(count))
     print(f"Saved → {cache_path}")
 
-    mae  = np.where(weight > 0, mae_sum  / count, np.nan) if count > 0 else np.full(shape, np.nan)
-    bias = np.where(weight > 0, bias_sum / count, np.nan) if count > 0 else np.full(shape, np.nan)
-    return mae, bias, weight
+    mask = _crop_mask(shape, bin_size)
+    mae  = np.where(mask, mae_sum  / flux_distribution, np.nan) if count > 0 else np.full(shape, np.nan)
+    bias = np.where(mask, bias_sum / flux_distribution, np.nan) if count > 0 else np.full(shape, np.nan)
+    return mae, bias, flux_distribution
 
 
 # ---------------------------------------------------------------------------
@@ -184,13 +200,14 @@ def plot_flux_weighted_heatmap(mae_grid: np.ndarray, bias_grid: np.ndarray,
     text_color = "#111111"
     theta      = np.linspace(0, 2 * np.pi, 300)
 
-    mae_b    = _bin_grid(mae_grid, bin_size)
-    bias_b   = _bin_grid(bias_grid, bin_size)
-    weight_b = _bin_grid(weight_grid, bin_size)
-    n_bins   = mae_b.shape[0]
-    cy, cx   = n_bins / 2, n_bins / 2
+    # Grids are already pre-binned during accumulation — use directly
+    mae_b  = mae_grid
+    bias_b = bias_grid
+    n_bins = mae_b.shape[0]
+    cy, cx = n_bins / 2, n_bins / 2
 
-    r_limb       = SOLAR_RADIUS_PATCHES / bin_size
+    # Solar limb radius in binned-patch units
+    r_limb = SOLAR_RADIUS_PATCHES / bin_size
 
     mae_vmax  = np.nanpercentile(mae_b, vmax_pct)
     mae_norm  = plt.Normalize(vmin=0, vmax=mae_vmax)
@@ -199,8 +216,8 @@ def plot_flux_weighted_heatmap(mae_grid: np.ndarray, bias_grid: np.ndarray,
     bias_norm = plt.Normalize(vmin=-bias_cap, vmax=bias_cap)
 
     panels = [
-        (mae_b,   r"Flux-Weighted MAE (log$_{10}$ Space)",  Colormap('cmocean:thermal').to_mpl(),  mae_norm),
-        (bias_b,  r"Flux-Weighted MBE (log$_{10}$ Space)",  Colormap('cmasher:fusion_r').to_mpl(), bias_norm),
+        (mae_b,   r"Normalized Flux-Weighted MAE",  Colormap('cmocean:thermal').to_mpl(),  mae_norm),
+        (bias_b,  r"Normalized Flux-Weighted MBE",  Colormap('cmasher:fusion_r').to_mpl(), bias_norm),
         # (np.log10(np.where(weight_b > 0, weight_b, np.nan)),
         #           r"log$_{10}$ Accumulated Flux",                 "viridis", None),
     ]
@@ -210,8 +227,8 @@ def plot_flux_weighted_heatmap(mae_grid: np.ndarray, bias_grid: np.ndarray,
 
     for ax, (grid, title, cmap, norm) in zip(axes, panels):
         im = ax.imshow(grid, origin="lower", cmap=cmap, norm=norm,
-                       interpolation="bilinear", extent=[0, n_bins, 0, n_bins])
-        cbar = fig.colorbar(im, ax=ax, shrink=0.82)
+                       interpolation="bicubic", extent=[0, n_bins, 0, n_bins])
+        cbar = fig.colorbar(im, ax=ax, shrink=0.82,norm=LogNorm(vmin=0, vmax=mae_vmax),)
         cbar.ax.tick_params(labelsize=9, colors=text_color)
         def _fmt(x, _):
             m, e = f"{x:.2e}".split("e")
@@ -232,7 +249,7 @@ def plot_flux_weighted_heatmap(mae_grid: np.ndarray, bias_grid: np.ndarray,
         ax.set_xticks(tick_bins); ax.set_xticklabels(tick_labels)
         ax.set_yticks(tick_bins); ax.set_yticklabels(tick_labels)
 
-        ax.set_title(title, fontsize=10, color=text_color, fontfamily="Barlow")
+        ax.set_title(title, fontsize=10, color=text_color, fontfamily="Barlow",)
         ax.set_xlabel("Solar X (ViT Patches From Center)", fontsize=9,
                       color=text_color, fontfamily="Barlow")
         ax.set_ylabel("Solar Y (ViT Patches From Center)", fontsize=9,
