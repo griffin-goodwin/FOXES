@@ -44,6 +44,11 @@ The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity
 
 ```text
 FOXES
+├── analysis                     # Post-inference analysis scripts
+│   ├── flux_map_analysis.py     # Detect, track, and visualize active regions from flux maps
+│   ├── flux_map_config.yaml     # Config for flux_map_analysis.py
+│   ├── spatial_performance.py   # Flux-weighted spatial error heatmap on the solar disk
+│   └── ablation_analysis.py     # Ablation study visualization
 ├── data                         # Data cleaning and preprocessing
 │   ├── align_data.py            # Align AIA and SXR timestamps; save matched pairs
 │   ├── euv_data_cleaning.py     # EUV image quality filtering and cleaning
@@ -67,8 +72,7 @@ FOXES
 │   ├── inference
 │   │   ├── inference.py         # Batch inference; writes predictions.csv
 │   │   ├── evaluation.py        # Compute metrics and generate evaluation plots
-│   │   ├── flare_analysis.py    # Detect, track, and match flares; generate plots
-│   │   ├── local_config.yaml    # Config for inference.py and flare_analysis.py
+│   │   ├── local_config.yaml    # Config for inference.py
 │   │   └── evaluation_config.yaml  # Config for evaluation.py
 │   ├── models
 │   │   └── vit_patch_model_local.py   # ViTLocal: Vision Transformer with patch flux heads
@@ -126,7 +130,9 @@ FOXES uses a single orchestrator script (`run_pipeline.py`) and a top-level conf
 | 7 | `train` | Train the ViTLocal solar flare forecasting model                               |
 | 8 | `inference` | Run batch inference and save a predictions CSV                                 |
 | 9 | `evaluate` | Compute metrics and generate evaluation plots                                  |
-| 10 | `flare_analysis` | Detect, track, and match flares; generate plots/movies                         |
+| 10 | `ablation` | Run channel-masking ablation study on a pretrained model                       |
+| 11 | `spatial_performance` | Generate flux-weighted spatial error heatmap on the solar disk            |
+| 12 | `flux_map_analysis` | Detect and track active regions from flux maps; render frames and a movie  |
 
 ### Usage
 
@@ -245,6 +251,7 @@ Steps can also be run individually by calling their scripts directly:
 python forecasting/training/train.py -config forecasting/training/train_config.yaml
 python forecasting/inference/inference.py -config forecasting/inference/local_config.yaml
 python forecasting/inference/evaluation.py -config forecasting/inference/evaluation_config.yaml
+python analysis/flux_map_analysis.py --config analysis/flux_map_config.yaml
 ```
 
 ---
