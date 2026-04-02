@@ -44,12 +44,12 @@ data:
     "${base_checkpoint_dir}/new-checkpoint/"
 
 wandb:
-  entity: jayantbiradar619-university-of-arizona # Use your exact W&B username
-  project: Paper
+  entity: ""  # Set to your W&B username or team name
+  project: FOXES
   job_type: training
   tags:
     - aia
     - sxr
     - regression
-  run_name: paper-8-patch-4ch
-  notes: Regression from AIA images to SXR images using ViTLocal model with 8x8 patches
+  run_name: run_1
+  notes: AIA to SXR translation
