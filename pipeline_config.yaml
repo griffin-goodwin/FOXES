@@ -5,7 +5,7 @@
 #
 # Usage:
 #   python run_pipeline.py --config pipeline_config.yaml --steps all
-#   python run_pipeline.py --config pipeline_config.yaml --steps train,inference,flare_analysis
+#   python run_pipeline.py --config pipeline_config.yaml --steps train,inference,flux_map_analysis
 #   python run_pipeline.py --list
 #
 # Variables
@@ -151,6 +151,23 @@ spatial_performance:
   flux_dir:        "${base_dir}/flux"
   predictions_csv: "${base_dir}/inference/predictions.csv"
   out_dir:         "${base_dir}/inference/spatial_performance"
+
+# -----------------------------------------------------------------------------
+# Flux map analysis  (step: flux_map_analysis)
+# Detects and tracks active regions from per-patch flux contribution maps,
+# renders side-by-side AIA + SXR frames, and stitches them into a movie.
+# -----------------------------------------------------------------------------
+flux_map_analysis:
+  config: "analysis/flux_map_config.yaml"
+  # overrides:                        # uncomment to override config values
+  #   paths:
+  #     flux_path:       "${base_dir}/flux"
+  #     aia_path:        "${base_dir}/AIA_processed"
+  #     predictions_csv: "${base_dir}/inference/predictions.csv"
+  #     output_dir:      "${base_dir}/inference/flux_map_analysis"
+  #   time_range:
+  #     start: null      # null = full predictions CSV range
+  #     end:   null
 
 # -----------------------------------------------------------------------------
 # Evaluation  (step: evaluate)

@@ -1,0 +1,67 @@
+# =============================================================================
+# Flare Analysis Configuration
+# =============================================================================
+# Usage: python analysis/flux_map_analysis.py --config analysis/flux_map_config.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
+paths:
+  flux_path:        "/Volumes/T9/FOXES_Data/flux"
+  aia_path:         "/Volumes/T9/FOXES_Data/AIA_processed"
+  predictions_csv:  "/Volumes/T9/FOXES_Misc/batch_results/vit/vit_predictions_test.csv"
+  output_dir:       "/Volumes/T9/FOXES_Data/flare_analysis"
+
+# -----------------------------------------------------------------------------
+# Time Range  (null = use full predictions CSV range)
+# -----------------------------------------------------------------------------
+time_range:
+  start: "2024-03-23T00:00:00"   # e.g. "2024-03-23T00:00:00"
+  end:   "2024-03-23T3:00:00"
+
+# -----------------------------------------------------------------------------
+# Detection
+# -----------------------------------------------------------------------------
+detection:
+  min_flux_threshold:                    1.0e-7   # W/m² — patches below this are ignored
+  threshold_std_multiplier:              4.0      # flux mask: mean + N*std
+  spatial_smoothing_sigma:               1.0      # Gaussian pre-smoothing (patches, 0 = off)
+  radial_expansion_threshold_percentile: 30.0     # flood-fill growth cutoff percentile
+  peak_neighborhood_sizes:               [10, 15, 20, 25]  # multi-scale local-max windows
+  peak_min_scale_agreement:              2       # peaks must appear at N scales
+  peak_scale_tolerance:                  10        # patch-distance to count as "same peak"
+  min_peak_distance:                     5       # min patches between distinct peaks
+
+# -----------------------------------------------------------------------------
+# Grid / Patch Parameters
+# -----------------------------------------------------------------------------
+grid:
+  grid_size:   [64, 64]
+  patch_size:  8
+  input_size:  512
+
+# -----------------------------------------------------------------------------
+# Region Tracking
+# -----------------------------------------------------------------------------
+tracking:
+  max_tracking_distance: 10     # max patch-distance between frames to link regions
+  flux_ratio_weight:     0    # weight of flux-ratio term in linking score
+  size_ratio_weight:     0    # weight of size-ratio term in linking score
+  distance_weight:       1.0    # weight of spatial distance in linking score
+  age_bonus_weight:      2.0    # bias toward established tracks (scales 1/(1+age))
+  cadence_seconds:       60.0   # expected data cadence
+  max_gap_frames:        15     # frames a track can go undetected before expiring
+
+# -----------------------------------------------------------------------------
+# Movie / Output
+# -----------------------------------------------------------------------------
+movie:
+  create_movie:             true
+  plot_window_hours:        2.0    # SXR plot time window around current frame
+  fps:                      30.0
+  frame_interval_minutes:   1.0    # one frame per minute of data
+  num_workers:              8
+  dpi:                      75.0
+  frame_format:             "jpg"  # "jpg" (fast) or "png" (quality)
+  jpeg_quality:             90

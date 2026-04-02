@@ -46,7 +46,7 @@ CROP_FACTOR     = 1.1   # AIA images cropped at 1.1 solar radii
 SOLAR_RADIUS_PATCHES = (GRID_SIZE / 2) / CROP_FACTOR   # ≈ 29.1 patches
 
 # Patches beyond ±PATCH_CROP_RADIUS from center (in original 64×64 patch units) are masked.
-PATCH_CROP_RADIUS = 19
+PATCH_CROP_RADIUS = 24
 
 # Percentile cap for colorbar scaling (applied to non-NaN values).
 # e.g. 99 clips the top 1% of values so detail in the bulk is visible.

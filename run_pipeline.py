@@ -13,12 +13,12 @@ Runs any combination of pipeline steps in order:
   6. normalize      - Compute SXR normalization stats on train split (data/sxr_normalization.py)
   7. train          - Train the ViTLocal forecasting model (forecasting/training/train.py)
   8. inference      - Run batch inference on val/test data (forecasting/inference/inference.py)
-  9. flare_analysis - Detect, track, and match flares (forecasting/inference/flare_analysis.py)
+  9. flux_map_analysis - Detect, track, and match flares (analysis/flux_map_analysis.py)
 
 Usage:
   python run_pipeline.py --list
   python run_pipeline.py --config pipeline_config.yaml --steps all
-  python run_pipeline.py --config pipeline_config.yaml --steps train,inference,flare_analysis
+  python run_pipeline.py --config pipeline_config.yaml --steps train,inference
 """
 
 import argparse
@@ -116,9 +116,9 @@ STEP_ORDER = [
     "train",
     "inference",
     "evaluate",
-    "flare_analysis",
     "ablation",
     "spatial_performance",
+    "flux_map_analysis",
 ]
 
 STEP_INFO = {
@@ -166,10 +166,6 @@ STEP_INFO = {
         "description": "Compute metrics and generate evaluation plots from predictions CSV",
         "script": ROOT / "forecasting" / "inference" / "evaluation.py",
     },
-    "flare_analysis": {
-        "description": "Detect, track, and match flares; generate plots/movies",
-        "script": ROOT / "forecasting" / "inference" / "flare_analysis.py",
-    },
     "ablation": {
         "description": "Run Gaussian noise channel-masking ablation study on pretrained model",
         "script": ROOT / "forecasting" / "inference" / "ablation_inference.py",
@@ -177,6 +173,10 @@ STEP_INFO = {
     "spatial_performance": {
         "description": "Generate flux-weighted spatial error heatmap on the solar disk",
         "script": ROOT / "analysis" / "spatial_performance.py",
+    },
+    "flux_map_analysis": {
+        "description": "Detect and track active regions from flux maps; render per-frame movie",
+        "script": ROOT / "analysis" / "flux_map_analysis.py",
     },
 }
 
@@ -329,15 +329,6 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
             config_path = str(write_merged_config(config_path, ev["overrides"], "evaluate_config"))
         return [base + ["-config", config_path]]
 
-    if step == "flare_analysis":
-        if not require(["config"], "inference"):
-            return None
-        inf = cfg["inference"]
-        config_path = inf["config"]
-        if inf.get("overrides"):
-            config_path = str(write_merged_config(config_path, inf["overrides"], "inference_config"))
-        return [base + ["--config", config_path]]
-
     if step == "ablation":
         if not require(["config"], "ablation"):
             return None
@@ -357,6 +348,15 @@ def build_commands(step: str, cfg: dict, force: bool) -> list[list[str]] | None:
         if sp.get("out_dir"):
             cmd += ["--out_dir", sp["out_dir"]]
         return [cmd]
+
+    if step == "flux_map_analysis":
+        if not require(["config"], "flux_map_analysis"):
+            return None
+        fma = cfg["flux_map_analysis"]
+        config_path = fma["config"]
+        if fma.get("overrides"):
+            config_path = str(write_merged_config(config_path, fma["overrides"], "flux_map_analysis_config"))
+        return [base + ["--config", config_path]]
 
     return [base]
 
@@ -398,7 +398,7 @@ def list_steps():
         print(f"  {i}. {step:<16} {STEP_INFO[step]['description']}")
     print()
     print("Use --steps all to run every step, or comma-separate specific steps.")
-    print("Example: --steps train,inference,flare_analysis\n")
+    print("Example: --steps train,inference\n")
 
 
 def main():
