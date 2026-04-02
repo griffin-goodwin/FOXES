@@ -39,7 +39,7 @@ def setup_barlow_font():
         else:
             # Try alternative approach - directly specify font file
             barlow_path = '/usr/share/fonts/truetype/barlow/Barlow-Regular.ttf'
-            barlow_path2 = '/Users/griffingoodwin/Library/Fonts/Barlow-Regular.otf'
+            barlow_path2 = os.path.expanduser('~/Library/Fonts/Barlow-Regular.otf')
             if os.path.exists(barlow_path):
                 # Add the font file directly to matplotlib
                 fm.fontManager.addfont(barlow_path)
