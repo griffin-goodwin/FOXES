@@ -47,8 +47,7 @@ FOXES
 ├── analysis                     # Post-inference analysis scripts
 │   ├── flux_map_analysis.py     # Detect, track, and visualize active regions from flux maps
 │   ├── flux_map_config.yaml     # Config for flux_map_analysis.py
-│   ├── spatial_performance.py   # Flux-weighted spatial error heatmap on the solar disk
-│   └── ablation_analysis.py     # Ablation study visualization
+│   └── spatial_performance.py   # Flux-weighted spatial error heatmap on the solar disk
 ├── data                         # Data cleaning and preprocessing
 │   ├── align_data.py            # Align AIA and SXR timestamps; save matched pairs
 │   ├── euv_data_cleaning.py     # EUV image quality filtering and cleaning
@@ -67,8 +66,7 @@ FOXES
 │   └── hf_download_config.yaml  # Config for HuggingFace downloader and parquet_to_npy
 ├── forecasting                  # Model training and inference
 │   ├── data_loaders
-│   │   ├── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
-│   │   └── patch_flux_dataloader.py
+│   │   └── SDOAIA_dataloader.py # PyTorch Lightning DataModule for AIA+SXR
 │   ├── inference
 │   │   ├── inference.py         # Batch inference; writes predictions.csv
 │   │   ├── evaluation.py        # Compute metrics and generate evaluation plots
