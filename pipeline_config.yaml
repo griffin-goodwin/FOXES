@@ -14,7 +14,7 @@
 # Change base_dir or checkpoint once and every path updates automatically.
 
 base_dir:   "/Volumes/T9/FOXES_Data"
-checkpoint: "/Users/griffingoodwin/Downloads/FOXES_Model_Checkpoint.ckpt"
+checkpoint: ""  # Path to your model checkpoint (.ckpt)
 
 # -----------------------------------------------------------------------------
 # HuggingFace download  (step: hf_download)
@@ -102,7 +102,7 @@ train:
     batch_size: 6
     wandb:
       run_name: "pipeline-run"
-      entity: jayantbiradar619-university-of-arizona
+      entity: ""  # Set to your W&B username or team name
       project: Paper
       job_type: training
       tags:

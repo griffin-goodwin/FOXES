@@ -11,7 +11,7 @@
 # Define top-level string keys and reference them anywhere with ${key}.
 
 base_dir:   "/Volumes/T9/FOXES_Data"
-checkpoint: "/Users/griffingoodwin/Downloads/FOXES_Model_Checkpoint.ckpt"
+checkpoint: ""  # Path to your model checkpoint (.ckpt)
 
 model: "ViTLocal"
 wavelengths: [94, 131, 171, 193, 211, 304, 335]

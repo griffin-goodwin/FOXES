@@ -35,10 +35,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from forecasting.inference.evaluation import setup_barlow_font
 
 # ---------------------------------------------------------------------------
-# Paths — edit here
+# Paths — override via CLI args or environment variables
 # ---------------------------------------------------------------------------
-FLUX_DIR        = "/Volumes/T9/FOXES_Data/flux/"
-PREDICTIONS_CSV = "/Volumes/T9/FOXES_Misc/batch_results/vit/vit_predictions_test.csv"
+FLUX_DIR        = os.environ.get("FOXES_FLUX_DIR", "")
+PREDICTIONS_CSV = os.environ.get("FOXES_PREDICTIONS_CSV", "")
 OUT_DIR         = Path(__file__).parent
 GRID_SIZE       = 64    # 512px / 8px patch size
 BIN_SIZE        = 1    # downsample factor (1 = full 64×64 resolution)
