@@ -51,6 +51,8 @@ FOXES
 ├── analysis                     # Post-inference analysis scripts
 │   ├── flux_map_analysis.py     # Detect, track, and visualize active regions from flux maps
 │   ├── flux_map_config.yaml     # Config for flux_map_analysis.py
+│   ├── extract_flux_maps.py     # Extract flux maps for AIA data
+│   ├── extract_flux_maps_config.yaml  #Config for extracting flux maps 
 │   └── spatial_performance.py   # Flux-weighted spatial error heatmap on the solar disk
 ├── data                         # Data cleaning and preprocessing
 │   ├── align_data.py            # Align AIA and SXR timestamps; save matched pairs
