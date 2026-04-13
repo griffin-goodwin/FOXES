@@ -16,4 +16,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push --force-with-lease https://griffingoodwin04:$HF_TOKEN@huggingface.co/griffingoodwin04/FOXES main
+          git push --force https://griffingoodwin04:$HF_TOKEN@huggingface.co/griffingoodwin04/FOXES main:main
