@@ -1,0 +1,48 @@
+# =============================================================================
+# Extract Flux Maps Configuration
+# =============================================================================
+# Scans a processed AIA directory for .npy files within a time range and
+# runs the trained ViTLocal model to produce per-patch flux contribution maps.
+#
+# Output: one CSV file per timestamp in output_dir, named by the AIA filename
+# stem (e.g. "2023-08-01T12:00:00"), containing a 64x64 grid of patch-level
+# flux contribution values. This matches the format produced by inference.py.
+#
+# Usage:
+#   python analysis/extract_flux_maps.py --config analysis/extract_flux_maps_config.yaml
+#
+#   # Override time range on the command line:
+#   python analysis/extract_flux_maps.py --config analysis/extract_flux_maps_config.yaml \
+#       --start 2023-08-01T00:00:00 --end 2023-08-03T00:00:00
+
+# -----------------------------------------------------------------------------
+# Paths
+# -----------------------------------------------------------------------------
+aia_dir:         "/Volumes/T9/FOXES_Data/AIA_processed"
+checkpoint_path: "/Volumes/T9/FOXES_Data/FOXES_Model_Checkpoint.ckpt"
+output_dir:      "/Volumes/T9/FOXES_Data/new_flux"
+
+# -----------------------------------------------------------------------------
+# Time Range
+# Leave start/end as null to process all available AIA files.
+# -----------------------------------------------------------------------------
+time_range:
+  start: "2013-04-28T00:00:00"
+  end:   "2013-04-29T00:00:00"
+
+# -----------------------------------------------------------------------------
+# Model Parameters
+# These must match the checkpoint used above.
+# -----------------------------------------------------------------------------
+model:
+  wavelengths: [94, 131, 171, 193, 211, 304, 335]
+  input_size:  512   # pixels (AIA image resolution fed to model)
+  patch_size:  8     # pixels per patch → 64x64 patch grid
+
+# -----------------------------------------------------------------------------
+# Inference Parameters
+# -----------------------------------------------------------------------------
+inference:
+  batch_size:    10    # samples per forward pass (reduce if OOM)
+  num_workers:   8     # DataLoader worker processes (0 = main process only)
+  skip_existing: true  # skip timestamps where a flux map CSV already exists
