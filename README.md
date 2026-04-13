@@ -25,6 +25,10 @@ datasets:
 
 # FOXES: A Framework For Operational X-ray Emission Synthesis
 
+<p align="center">
+  <img src="foxes_logo.png" alt="FOXES Logo" width="300"/>
+</p>
+
 This repository contains the code and resources for **FOXES**, a project developed as part of the _**Frontier Development Lab**_'s Heliolab 2025!
 
 Model / Data:
