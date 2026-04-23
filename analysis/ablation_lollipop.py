@@ -99,7 +99,7 @@ if __name__ == "__main__":
 
     # ── Plot ───────────────────────────────────────────────────────────────────────
     n_rows = len(df)
-    fig, ax = plt.subplots(figsize=(11, 0.6 * n_rows + 1.5))
+    fig, ax = plt.subplots(figsize=(11, 0.3 * n_rows + 1.5))
     #ax.set_facecolor("#FAFAFA")
     fig.patch.set_facecolor("#FFFFFF")
 

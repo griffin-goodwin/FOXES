@@ -18,8 +18,8 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 prediction_only: "false"
 
 data:
-  aia_dir:         "${base_dir}/AIA_processed/val"
-  sxr_dir:         "${base_dir}/SXR_processed/val"
+  aia_dir:         "${base_dir}/AIA_processed/test"
+  sxr_dir:         "${base_dir}/SXR_processed/test"
   sxr_norm_path:   "${base_dir}/SXR_processed/normalized_sxr.npy"
   checkpoint_path: "${checkpoint}"
 
