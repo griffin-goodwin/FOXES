@@ -45,7 +45,7 @@ multi_gpu:   false  # set true to use all available GPUs via DataParallel
 paths:
   data_dir:        "/Volumes/T9/Data_FOXES"
   flux_path:       "/Volumes/T9/Data_FOXES/inference/flux"
-  aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/val"
+  aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/test"
   predictions_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
   hek_catalog: null
   output_dir:      "/Volumes/T9/Data_FOXES/inference/output"
