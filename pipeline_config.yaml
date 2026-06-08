@@ -14,7 +14,7 @@
 # Change base_dir or checkpoint once and every path updates automatically.
 
 base_dir:   "/Volumes/T9/FOXES_Data"
-checkpoint: ""  # Path to your model checkpoint (.ckpt)
+checkpoint: "/Volumes/T9/new-checkpoint/pipeline-run-epoch=102-val_total_loss=0.0060.ckpt"  # Path to your model checkpoint (.ckpt)
 
 # -----------------------------------------------------------------------------
 # HuggingFace download  (step: hf_download)
@@ -176,9 +176,9 @@ evaluate:
   config: "forecasting/inference/evaluation_config.yaml"
   overrides:
     model_predictions:
-      main_model_csv: "${base_dir}/inference/predictions.csv"
+      main_model_csv: "/Volumes/T9/predictions.csv"
     data:
-      aia_dir:     "${base_dir}/AIA_processed/val"
+      aia_dir:     "${base_dir}/AIA_processed/test"
       weight_path: "${base_dir}/inference/weights"
     evaluation:
       output_dir:  "${base_dir}/inference/evaluation"
