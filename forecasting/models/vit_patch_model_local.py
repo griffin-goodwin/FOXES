@@ -141,6 +141,8 @@ class VisionTransformerLocal(nn.Module):
             patch_size,
             num_patches,
             dropout,
+            mask_mode='inverted',
+            local_window=9,
 
     ):
         """Vision Transformer that outputs flux contributions per patch.
@@ -156,6 +158,12 @@ class VisionTransformerLocal(nn.Module):
             num_patches: Maximum number of patches an image can have
             dropout: Amount of dropout to apply in the feed-forward network and
                       on the input encoding
+            mask_mode: Self-attention masking. 'inverted' (default) reproduces the
+                      original released model exactly; 'local' is true local
+                      attention; 'none' is full global attention. See
+                      InvertedAttentionBlock.
+            local_window: Side length (in patches) of the local neighbourhood used
+                      by the 'inverted' and 'local' masks.
 
         """
         super().__init__()
@@ -165,8 +173,11 @@ class VisionTransformerLocal(nn.Module):
         # Layers/Networks
         self.input_layer = nn.Linear(num_channels * (patch_size ** 2), embed_dim)
 
+        self.mask_mode = mask_mode
+        self.local_window = local_window
         self.transformer_blocks = nn.ModuleList([
-            InvertedAttentionBlock(embed_dim, hidden_dim, num_heads, num_patches, dropout=dropout)
+            InvertedAttentionBlock(embed_dim, hidden_dim, num_heads, num_patches,
+                                   dropout=dropout, local_window=local_window, mask_mode=mask_mode)
             for _ in range(num_layers)
         ])
 
@@ -241,6 +252,15 @@ class VisionTransformerLocal(nn.Module):
         # Callback expects (outputs, attention_weights, _)
         return global_flux_raw, attention_weights
 
+    def set_mask_mode(self, mask_mode, local_window=None):
+        """Override the attention mask in every block (e.g. to ablate a loaded
+        checkpoint). Normal checkpoint loading keeps each block's saved mask."""
+        self.mask_mode = mask_mode
+        if local_window is not None:
+            self.local_window = local_window
+        for block in self.transformer_blocks:
+            block.set_mask_mode(mask_mode, local_window=local_window)
+
 
 class AttentionBlock(nn.Module):
     def __init__(self, embed_dim, hidden_dim, num_heads, dropout=0.0):
@@ -283,12 +303,40 @@ class AttentionBlock(nn.Module):
 
 
 class InvertedAttentionBlock(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, num_heads, num_patches, dropout=0.0, local_window=9):
+    """Transformer block whose self-attention can be masked in three ways.
+
+    mask_mode (passed through from the model config):
+      'inverted' - ORIGINAL FOXES behaviour and the default, so released
+                   checkpoints reproduce exactly. The boolean mask marks LOCAL
+                   pairs as True, and nn.MultiheadAttention treats True as
+                   "blocked", so nearby patches are blocked and every patch
+                   attends only to DISTANT patches. (This is the flipped
+                   local-attention syntax the model was actually trained with.)
+      'local'    - Correct local attention: block everything OUTSIDE the local
+                   window, so each patch attends only to its neighbours.
+      'none'     - No mask at all; full global attention.
+
+    The mask is registered as a PERSISTENT buffer, so it travels inside the
+    checkpoint. Loading restores the exact mask a model was trained with -- the
+    original inverted mask, or any hand-edited mask from past experiments --
+    regardless of the mask_mode passed at construction. mask_mode/local_window
+    only decide the mask for a *fresh* model; to deliberately change the mask of
+    an already-loaded checkpoint (e.g. for an ablation), call set_mask_mode().
+    """
+
+    VALID_MASK_MODES = ('inverted', 'local', 'none')
+
+    def __init__(self, embed_dim, hidden_dim, num_heads, num_patches, dropout=0.0,
+                 local_window=9, mask_mode='inverted'):
         super().__init__()
+        if mask_mode not in self.VALID_MASK_MODES:
+            raise ValueError('mask_mode must be one of %s, got %r'
+                             % (self.VALID_MASK_MODES, mask_mode))
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.local_window = local_window
         self.num_patches = num_patches
+        self.mask_mode = mask_mode
         self.layer_norm_1 = nn.LayerNorm(embed_dim)
         self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=False)
         self.layer_norm_2 = nn.LayerNorm(embed_dim)
@@ -300,35 +348,54 @@ class InvertedAttentionBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Pre-compute attention mask for local interactions
-        self.register_buffer('attention_mask', self._create_inverted_attention_mask())
+        # Persistent: the mask is saved with the weights so every checkpoint
+        # reproduces exactly what it trained with. None => no masking ('none').
+        self.register_buffer('attention_mask', self._build_attention_mask())
 
-    def _create_inverted_attention_mask(self):
-        """Create attention mask for local interactions only"""
-        # This creates a mask where only distant patches can attend to each other
+    def _build_attention_mask(self):
+        """Boolean attn_mask for nn.MultiheadAttention (True == position blocked).
+        """
+        if self.mask_mode == 'none':
+            return None
+        grid_size = int(math.sqrt(self.num_patches))
+        idx = torch.arange(self.num_patches)
+        rows = (idx // grid_size).to(torch.int16)
+        cols = (idx % grid_size).to(torch.int16)
+        r = self.local_window // 2
+        # local[i, j] True when patches i and j are within the local window.
+        local = (((rows[:, None] - rows[None, :]).abs() <= r) &
+                 ((cols[:, None] - cols[None, :]).abs() <= r))
+        # 'inverted' blocks the local neighbourhood (original); 'local' blocks its
+        # complement so attention stays inside the neighbourhood.
+        return local if self.mask_mode == 'inverted' else ~local
 
-        num_patches = self.num_patches
-        grid_size = int(math.sqrt(num_patches))
+    def set_mask_mode(self, mask_mode, local_window=None):
+        """Rebuild the attention mask in place, overriding whatever is currently
+        set (including a mask restored from a checkpoint).
 
-        # Create mask for patches only: [num_patches, num_patches]
-        mask = torch.zeros(num_patches, num_patches)
-
-        # Patches can only attend to nearby patches
-        for i in range(num_patches):
-            row_i, col_i = i // grid_size, i % grid_size
-            for j in range(num_patches):
-                row_j, col_j = j // grid_size, j % grid_size
-                # Only allow attention if patches are within local_window distance
-                if abs(row_i - row_j) <= self.local_window // 2 and abs(col_i - col_j) <= self.local_window // 2:
-                    mask[i, j] = 1
-
-        return mask.bool()
+        Use this to deliberately change a trained model's mask -- e.g. to ablate a
+        released checkpoint under 'none' or 'local'. Loading a checkpoint normally
+        keeps its own saved mask; this is the explicit opt-out.
+        """
+        if mask_mode not in self.VALID_MASK_MODES:
+            raise ValueError('mask_mode must be one of %s, got %r'
+                             % (self.VALID_MASK_MODES, mask_mode))
+        self.mask_mode = mask_mode
+        if local_window is not None:
+            self.local_window = local_window
+        mask = self._build_attention_mask()
+        if mask is not None:
+            try:
+                mask = mask.to(self.attention_mask.device)
+            except AttributeError:  # current buffer is None ('none' mode)
+                mask = mask.to(next(self.parameters()).device)
+        self.attention_mask = mask
 
     def forward(self, x, return_attention=False):
         inp_x = self.layer_norm_1(x)
 
         if return_attention:
-            # Apply local attention mask
+            # attention_mask is None for mask_mode='none' -> standard full attention.
             attn_output, attn_weights = self.attn(
                 inp_x, inp_x, inp_x,
                 attn_mask=self.attention_mask,
