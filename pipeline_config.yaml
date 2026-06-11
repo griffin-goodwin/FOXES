@@ -14,7 +14,7 @@
 # Change base_dir or checkpoint once and every path updates automatically.
 
 base_dir:   "/Volumes/T9/FOXES_Data"
-checkpoint: "/Volumes/T9/new-checkpoint/pipeline-run-epoch=102-val_total_loss=0.0060.ckpt"  # Path to your model checkpoint (.ckpt)
+checkpoint: "/Volumes/T9/global_checkpoints/pipeline-run-epoch=109-val_total_loss=0.0047-maskmode-none.ckpt"  # Path to your model checkpoint (.ckpt)
 
 # -----------------------------------------------------------------------------
 # HuggingFace download  (step: hf_download)

@@ -30,6 +30,11 @@ vit_architecture:
     num_layers: 8
     dropout: 0.1
     learning_rate: 0.0001
+    # Self-attention masking. Omit (or 'inverted') to reproduce the released model,
+    # which trained with the flipped local-attention syntax (each patch attends to
+    # DISTANT patches). 'local' = true local attention; 'none' = full global attention.
+    # mask_mode: inverted   # one of: inverted | local | none
+    # local_window: 9       # neighbourhood side length (patches) for inverted/local
 
 
 # Data paths (automatically constructed from base directories)
