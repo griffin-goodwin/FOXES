@@ -161,3 +161,14 @@ foxes.yml
 /.merged_inference_config.yaml
 /.merged_evaluate_config.yaml
 .npz
+.merged_ablation_config.yaml
+2024-04-11_16-17.png
+ablation_lollipop.png
+pipeline_config.yaml
+testing.ipynb
+analysis/ablation_lollipop.png
+analysis/ablation_lollipop.psd
+analysis/performance_heatmap_all.png
+download/download_flares.py
+download/test_download_sdo.py
+forecasting/models/test_vit_mask.py
