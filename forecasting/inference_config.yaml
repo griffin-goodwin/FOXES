@@ -1,166 +1,44 @@
 # =============================================================================
-# FOXES Inference + Flare Analysis Configuration
+# FOXES Inference Configuration
 # =============================================================================
-# Shared config for inference.py and flare_analysis.py
+# Used by inference.py to run a trained ViTLocal checkpoint over a folder of
+# AIA data and write out SXR predictions (+ optional attention/flux maps).
 #
 # Usage:
-#   python inference.py      -config local_config.yaml
-#   python flare_analysis.py --config local_config.yaml
+#   python forecasting/inference.py -config forecasting/inference_config.yaml
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Inference (inference.py)
-# -----------------------------------------------------------------------------
-model: "ViTLocal"
 wavelengths: [94, 131, 171, 193, 211, 304, 335]
-SolO: "false"
-Stereo: "false"
+
+# Set to "true" if you only have AIA images and no ground-truth SXR to compare
+# against (e.g. running on new/live data). When true, data.sxr_dir is ignored.
 prediction_only: "false"
 
 data:
-  aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed"
-  sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed"
+  # Point these directly at the folder of .npy files you want to run the model
+  # on — no special subfolder naming (e.g. "test/") is required or assumed.
+  aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed/test"
+  sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed/test"   # ignored if prediction_only: "true"
   sxr_norm_path:   "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
   checkpoint_path: "/Volumes/T9/Data_FOXES/checkpoints/best.ckpt"  # update to actual checkpoint
 
 output_path: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+
+# Per-sample attention weights (64x64 CSV per timestamp). Set model_params.no_weights: true to skip.
 weight_path: "/Volumes/T9/Data_FOXES/inference/weights/"
+
+# Per-patch flux contribution maps (64x64 CSV per timestamp) — saved automatically
+# during inference whenever flux_path is set and model_params.no_flux is false (default).
 flux_path:   "/Volumes/T9/Data_FOXES/inference/flux/"
 
 model_params:
   input_size: 512
   patch_size: 8
   batch_size: 10
-  no_weights: false
-  no_flux:    false
+  no_weights: true   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
+  no_flux:    false   # true = skip saving flux contribution maps
 
 num_workers: 8    # set to 0 to disable multiprocessing (useful for debugging stalls)
 pin_memory:  true
 use_amp:     false  # set true to enable FP16 autocast (faster on A100, may OOM on V100)
 multi_gpu:   false  # set true to use all available GPUs via DataParallel
-
-# -----------------------------------------------------------------------------
-# Flare Analysis (flare_analysis.py)
-# -----------------------------------------------------------------------------
-paths:
-  data_dir:        "/Volumes/T9/Data_FOXES"
-  flux_path:       "/Volumes/T9/Data_FOXES/inference/flux"
-  aia_path:        "/Volumes/T9/Data_FOXES/AIA_processed/test"
-  predictions_csv: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
-  hek_catalog: null
-  output_dir:      "/Volumes/T9/Data_FOXES/inference/output"
-
-# -----------------------------------------------------------------------------
-# Time Range
-# -----------------------------------------------------------------------------
-time_range:
-  start: "2023-08-01T00:00:00"
-  end: "2023-08-10T04:00:00"
-  auto_fetch_hek: true
-
-# -----------------------------------------------------------------------------
-# Detection Parameters
-# -----------------------------------------------------------------------------
-detection:
-  # Minimum GOES class for catalog (filters weak events)
-  min_goes_class: "B1.0"
-  
-  # Flux threshold for flaring regions ()
-  min_flux_threshold: 0.000000001  # 1e-9
-  
-  # Peak/region detection parameters
-  threshold_std_multiplier: 3  # For initial flux mask (higher = stricter)
-  
-  
-  # Spatial smoothing (reduces noise, stabilizes region boundaries)
-  spatial_smoothing_sigma: 2    # Gaussian sigma for smoothing (0 = disabled)
-  
-  # Radial expansion from peaks (regions grow outward until flux drops)
-  radial_expansion_threshold_percentile: 50  # Percentile of flux values for growth cutoff (0-100)
-  
-  # Peak stability filters
-  min_peak_distance: 0  # Minimum patches between peaks; closer peaks merge (0 = disabled)
-  
-  # Multi-scale peak detection (handles ARs of different sizes)
-  # Note: All sizes are in PATCHES on the 64x64 grid, not image pixels
-  peak_neighborhood_size: null      # Local max window size (patches)
-  peak_neighborhood_sizes: [4, 8, 12, 16, 20]  # Kernel sizes in patches
-  peak_min_scale_agreement: 3  # Peak must appear at this many scales to be kept
-  peak_scale_tolerance: 3  # Patch tolerance for matching peaks across scales
-  
-  # HEK matching
-  hek_match_window_minutes: 5.0
-
-# -----------------------------------------------------------------------------
-# Peak Detection (within tracks)
-# -----------------------------------------------------------------------------
-# Controls how flare peaks are identified within tracked regions
-peak_detection:
-  height_multiplier: 1.5      # Peak must be this multiple of baseline
-  baseline_window: 30        # Rolling window size for adaptive baseline (number of points)
-  baseline_quantile: 0.1    # Quantile for baseline (0.1 = 10th percentile, lower = stricter)
-  min_peak_separation_minutes: 15 # Minimum time between peaks
-  validation_window: 10       # Number of points to check on each side of peak for validation
-  validation_min_lower_before: 5   # Minimum lower points required BEFORE peak (rise phase)
-  validation_min_lower_after: 5    # Minimum lower points required AFTER peak (decay phase)
-
-# -----------------------------------------------------------------------------
-# Region Tracking
-# -----------------------------------------------------------------------------
-tracking:
-  max_tracking_distance: 10       # Max pixel distance between frames
-  distance_weight: 1.0          # Weight for spatial distance in tracking
-  flux_ratio_weight: 1.0          # Weight for flux similarity in tracking
-  size_ratio_weight: 0.5          # Weight for size similarity in tracking
-# -----------------------------------------------------------------------------
-# Event Quality Filters
-# -----------------------------------------------------------------------------
-quality:
-  cadence_seconds: 60.0           # Expected data cadence
-  max_gap_minutes: 30.0           # Max gap within a sequence
-  min_duration_minutes: 5.0       # Minimum event duration
-  min_samples: 6                  # Minimum frames in event
-
-# -----------------------------------------------------------------------------
-# Grid / Patch Parameters
-# -----------------------------------------------------------------------------
-grid:
-  grid_size: [64, 64]
-  patch_size: 8
-  input_size: 512
-
-# -----------------------------------------------------------------------------
-# HEK-Only Event Filtering
-# -----------------------------------------------------------------------------
-# Controls which HEK events (not matched to FOXES) are reported/plotted
-# Only events with adequate FOXES data coverage are included
-hek_coverage:
-  coverage_window_minutes: 30.0   # Time window (±minutes) around HEK peak
-  max_gap_minutes: 10.0           # Max gap to nearest FOXES data point
-  min_points_around_peak: 3       # Min points required BEFORE and AFTER peak
-
-# -----------------------------------------------------------------------------
-# Simultaneous Flare Detection
-# -----------------------------------------------------------------------------
-simultaneous_detection:
-  enabled: true  # Enable detection of simultaneous flares
-  threshold: 5e-6  # Flux threshold for simultaneous flare detection
-  sequence_window_hours: 1.0  # Time window for detecting flare sequences
-
-# -----------------------------------------------------------------------------
-# Output Options
-# -----------------------------------------------------------------------------
-output:
-  create_plots: false
-  plot_window_hours: 2.0
-
-# -----------------------------------------------------------------------------
-# Movie Generation
-# -----------------------------------------------------------------------------
-movie:
-  create_movie: true  # Create movie visualization
-  fps: 30.0  # Frames per second for movie
-  frame_interval_minutes: 30  # Time between frames (minutes)
-  num_workers: 20  # Number of parallel workers for frame generation
-  dpi: 400                    # DPI for frames (lower = faster, 75 is good for video)
-  frame_format: "png"         # "jpg" (faster) or "png" (higher quality, slower)

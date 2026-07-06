@@ -2,9 +2,9 @@
 Inference Script for Solar Flare Prediction Models
 =================================================
 
-This script performs automated inference on solar flare prediction datasets using trained models such as
-Vision Transformers (ViT, ViT-Patch, ViT-Local), HybridIrradianceModel, or LinearIrradianceModel.
-It computes soft X-ray (SXR) predictions, saves attention weights, flux contributions, and final outputs.
+Runs a trained ViTLocal checkpoint over a folder of AIA data. Computes soft
+X-ray (SXR) predictions, and saves attention weights, flux contributions, and
+final outputs.
 
 The workflow includes:
 - Loading configuration parameters from a YAML file.
@@ -32,12 +32,11 @@ from torch.nn import HuberLoss
 from tqdm import tqdm
 
 # Add project root to Python path
-PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from forecasting.data_loaders.SDOAIA_dataloader import AIA_GOESDataset
-import forecasting.models as models
-from forecasting.models.vit_patch_model_local import ViTLocal
+from forecasting.dataset import AIA_GOESDataset
+from forecasting.model import ViTLocal
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -339,30 +338,20 @@ def load_model_from_config(config_data):
         Loaded model ready for inference.
     """
     checkpoint_path = config_data['data']['checkpoint_path']
-    model_type = config_data['model']
 
-    print(f"Loading {model_type} model...")
+    print("Loading ViTLocal model...")
 
     # Use GPU(s) if available
     if torch.cuda.is_available():
         load_device = torch.device('cuda:0')
-        n_gpus = torch.cuda.device_count()
         print(f"Using GPU(s) for inference")
     else:
         load_device = torch.device('cpu')
-        n_gpus = 0
         print("Using CPU for inference")
 
     if ".ckpt" in checkpoint_path:
         # Lightning checkpoint format
-        if model_type.lower() == 'vitlocal':
-            model = ViTLocal.load_from_checkpoint(checkpoint_path, map_location=load_device, weights_only=False)
-        else:
-            try:
-                model_class = getattr(models, model_type)
-                model = model_class.load_from_checkpoint(checkpoint_path, map_location=load_device)
-            except AttributeError:
-                raise ValueError(f"Unknown model type: {model_type}.")
+        model = ViTLocal.load_from_checkpoint(checkpoint_path, map_location=load_device, weights_only=False)
     else:
         state = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
         model = state['model']
@@ -428,7 +417,6 @@ def main():
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
 
     config_data = resolve_config_variables(config_data)
-    sys.modules['models'] = models
 
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)
@@ -466,20 +454,11 @@ def main():
     print("Loading dataset...")
     # Check if running in prediction-only mode
     prediction_only = config_data.get('prediction_only', 'false').lower() == 'true'
-    
-    if config_data['SolO'] == "true":
-        dataset = AIA_GOESDataset(aia_dir=config_data['SolO_data']['solo_img_dir'],
-                                  sxr_dir=config_data['SolO_data']['sxr_dir'],
-                                  wavelengths=[94, 131], only_prediction=True)
-    elif config_data['Stereo'] == "true":
-        dataset = AIA_GOESDataset(aia_dir=config_data['Stereo_data']['stereo_img_dir'],
-                                  sxr_dir=config_data['Stereo_data']['sxr_dir'],
-                                  wavelengths=[171, 193, 211, 304], only_prediction=True)
-    else:
-        dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir']+'/test/',
-                                  sxr_dir=config_data['data']['sxr_dir']+'/test/',
-                                  wavelengths=config_data['wavelengths'],
-                                  only_prediction=prediction_only)
+
+    dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'],
+                              sxr_dir=config_data['data'].get('sxr_dir') if not prediction_only else None,
+                              wavelengths=config_data['wavelengths'],
+                              only_prediction=prediction_only)
 
     times = dataset.samples
     
