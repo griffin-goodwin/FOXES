@@ -17,25 +17,25 @@ prediction_only: "false"
 data:
   # Point these directly at the folder of .npy files you want to run the model
   # on — no special subfolder naming (e.g. "test/") is required or assumed.
-  aia_dir:         "/Volumes/T9/Data_FOXES/AIA_processed/test"
-  sxr_dir:         "/Volumes/T9/Data_FOXES/SXR_processed/test"   # ignored if prediction_only: "true"
-  sxr_norm_path:   "/Volumes/T9/Data_FOXES/SXR_processed/normalized_sxr.npy"
-  checkpoint_path: "/Volumes/T9/Data_FOXES/checkpoints/best.ckpt"  # update to actual checkpoint
+  aia_dir:         "/Volumes/T9/FOXES_Data/test_aia/"   # ignored if prediction_only: "true"
+  sxr_dir:         "/Volumes/T9/FOXES_Data/test_sxr"   # ignored if prediction_only: "true"
+  sxr_norm_path:   "/Volumes/T9/FOXES_Data/SXR_processed/normalized_sxr.npy"
+  checkpoint_path: "/Volumes/T9/FOXES_Data/FOXES_Model_Checkpoint.ckpt"  # update to actual checkpoint
 
-output_path: "/Volumes/T9/Data_FOXES/inference/predictions.csv"
+output_path: "/Volumes/T9/FOXES_Data/inference/predictions_test.csv"
 
 # Per-sample attention weights (64x64 CSV per timestamp). Set model_params.no_weights: true to skip.
-weight_path: "/Volumes/T9/Data_FOXES/inference/weights/"
+weight_path: "/Volumes/T9/FOXES_Data/inference/weights_test/"
 
 # Per-patch flux contribution maps (64x64 CSV per timestamp) — saved automatically
 # during inference whenever flux_path is set and model_params.no_flux is false (default).
-flux_path:   "/Volumes/T9/Data_FOXES/inference/flux/"
+flux_path:   "/Volumes/T9/FOXES_Data/inference/flux_test/"
 
 model_params:
   input_size: 512
   patch_size: 8
   batch_size: 10
-  no_weights: true   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
+  no_weights: false   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
   no_flux:    false   # true = skip saving flux contribution maps
 
 num_workers: 8    # set to 0 to disable multiprocessing (useful for debugging stalls)
