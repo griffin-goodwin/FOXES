@@ -1,0 +1,42 @@
+# =============================================================================
+# FOXES Dataset Build Configuration
+# =============================================================================
+# Turns raw AIA FITS + raw GOES XRS data into the paired .npy layout that
+# forecasting/dataset.py expects.
+#
+# Usage: python data/build_dataset.py -config data/build_dataset_config.yaml
+# =============================================================================
+
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+
+aia:
+  raw_dir:        "/path/to/AIA_raw"       # raw FITS from download/download_sdo.py
+  bad_files_dir:  "/path/to/AIA_bad"       # bad-timestamp FITS get moved here
+  processed_dir:  "/path/to/AIA_processed" # paired 512x512 .npy stacks
+
+sxr:
+  raw_dir:      "/path/to/GOES_raw"        # raw netCDF from download/sxr_downloader.py
+  combined_dir: "/path/to/GOES_combined"   # one interpolated CSV per satellite
+
+output:
+  sxr_dir:         "/path/to/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
+  aia_missing_dir: "/path/to/AIA_missing"   # AIA files with no matching SXR value
+
+processing:
+  max_processes: null    # cap worker processes; null = use all CPUs
+  batch_size_multiplier: 4
+  min_batch_size: 1
+
+# Which build steps to run, in order. Set any to false to skip it (e.g. if
+# you already ran that step and are re-running after fixing a later one).
+steps:
+  clean_aia:   true   # drop AIA FITS files with a bad DATE-OBS timestamp
+  convert_aia: true   # raw AIA FITS -> paired .npy stacks
+  combine_sxr: true   # combine raw multi-satellite GOES files into per-satellite CSVs
+  align:       true   # match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
+
+# Optional — only needed if you're training, not for running inference
+# against a released checkpoint.
+sxr_normalization:
+  compute:     false
+  output_path: "/path/to/normalized_sxr.npy"

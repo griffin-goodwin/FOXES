@@ -24,7 +24,6 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 import os
 import yaml
 import torch.nn.functional as F
@@ -35,7 +34,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from forecasting.dataset import AIA_GOESDataset
+from forecasting.dataset import AIAGOESDataset
 from forecasting.model import ViTLocal
 
 
@@ -176,8 +175,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                                 if config_data and 'weight_path' in config_data and global_idx < len(times):
                                     weight_dir = Path(config_data['weight_path'])
                                     weight_dir.mkdir(parents=True, exist_ok=True)
-                                    weight_file = os.path.join(config_data['weight_path'], f"{times[global_idx]}")
-                                    np.savetxt(weight_file, weight_data, delimiter=",")
+                                    weight_file = os.path.join(config_data['weight_path'], f"{times[global_idx]}.npy")
+                                    np.save(weight_file, weight_data)
                     except Exception as e:
                         weight_data = np.zeros((grid_h, grid_w))
                 
@@ -193,8 +192,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                         if config_data and 'flux_path' in config_data and global_idx < len(times):
                             flux_dir = Path(config_data['flux_path'])
                             flux_dir.mkdir(parents=True, exist_ok=True)
-                            flux_file = config_data['flux_path'] + f"{times[global_idx]}"
-                            np.savetxt(flux_file, flux_data, delimiter=",")
+                            flux_file = os.path.join(config_data['flux_path'], f"{times[global_idx]}.npy")
+                            np.save(flux_file, flux_data)
                         
                         del flux_contrib, flux_contrib_map
                     except Exception:
@@ -232,95 +231,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
         # next condition and exhaust shared memory / semaphore limits.
         del loader
         gc.collect()
-
-
-def save_batch_flux_contributions(batch_flux_contributions, batch_idx, batch_size, times, flux_path, sxr_norm=None):
-    """
-    Save all flux contributions in a batch efficiently using parallel threads.
-
-    Parameters
-    ----------
-    batch_flux_contributions : list of np.ndarray
-        List of flux contribution maps for each sample.
-    batch_idx : int
-        Batch index.
-    batch_size : int
-        Number of samples per batch.
-    times : list of str
-        Corresponding timestamps.
-    flux_path : str
-        Directory path to save flux files.
-    sxr_norm : np.ndarray, optional
-        Normalization constants for unnormalization.
-    """
-    flux_dir = Path(flux_path)
-    flux_dir.mkdir(parents=True, exist_ok=True)
-
-    def save_single_flux(args):
-        flux_contrib, filepath = args
-        np.savetxt(filepath, flux_contrib, delimiter=",")
-
-    save_args = []
-    for i, flux_contrib in enumerate(batch_flux_contributions):
-        if i < len(times):
-            filepath = flux_path + f"{times[i]}"
-            save_args.append((flux_contrib, filepath))
-
-    with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
-        executor.map(save_single_flux, save_args)
-
-
-def save_batch_weights(batch_weights, batch_idx, batch_size, times, weight_path):
-    """
-    Save all attention weights from a batch efficiently in parallel.
-
-    Parameters
-    ----------
-    batch_weights : list of np.ndarray
-        Attention maps for each sample.
-    batch_idx : int
-        Current batch index.
-    batch_size : int
-        Number of samples in batch.
-    times : list of str
-        List of timestamps.
-    weight_path : str
-        Output directory for weight files.
-    """
-    weight_dir = Path(weight_path)
-    weight_dir.mkdir(parents=True, exist_ok=True)
-
-    def save_single_weight(args):
-        weight, filepath = args
-        np.savetxt(filepath, weight, delimiter=",")
-
-    save_args = []
-    for i, weight in enumerate(batch_weights):
-        if i < len(times):
-            filepath = os.path.join(weight_path, f"{times[i]}")
-            save_args.append((weight, filepath))
-
-    with ThreadPoolExecutor(max_workers=min(11, len(save_args))) as executor:
-        executor.map(save_single_weight, save_args)
-
-
-def save_weights_async(weight_data_queue, weight_path):
-    """
-    Asynchronously save attention weights to disk using threads.
-
-    Parameters
-    ----------
-    weight_data_queue : list of tuple
-        Each entry contains (weight_data, filepath).
-    weight_path : str
-        Output directory path for saving weights.
-    """
-    def save_single_weight(args):
-        weight, filepath = args
-        np.savetxt(filepath, weight, delimiter=",")
-
-    with ThreadPoolExecutor(max_workers=11) as executor:
-        executor.map(save_single_weight, weight_data_queue)
 
 
 def load_model_from_config(config_data):
@@ -455,7 +365,7 @@ def main():
     # Check if running in prediction-only mode
     prediction_only = config_data.get('prediction_only', 'false').lower() == 'true'
 
-    dataset = AIA_GOESDataset(aia_dir=config_data['data']['aia_dir'],
+    dataset = AIAGOESDataset(aia_dir=config_data['data']['aia_dir'],
                               sxr_dir=config_data['data'].get('sxr_dir') if not prediction_only else None,
                               wavelengths=config_data['wavelengths'],
                               only_prediction=prediction_only)

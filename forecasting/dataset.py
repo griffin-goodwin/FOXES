@@ -25,7 +25,7 @@ class SXRLogNormTransform:
         return (np.log10(x + 1e-8) - self.mean) / self.std
 
 
-class AIA_GOESDataset(torch.utils.data.Dataset):
+class AIAGOESDataset(torch.utils.data.Dataset):
     """
     PyTorch Dataset for loading paired AIA (EUV images) and GOES (SXR flux) data.
 

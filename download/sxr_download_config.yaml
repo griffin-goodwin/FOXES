@@ -1,0 +1,19 @@
+# =============================================================================
+# Raw GOES/SXR Download Configuration
+# =============================================================================
+# Used by sxr_downloader.py to pull raw GOES XRS netCDF files via SunPy Fido.
+# This is the advanced/raw path — most users should use
+# hugging_face_data_download.py instead (see the README). Data downloaded
+# here needs the data/ scripts to become the paired .npy format the model
+# expects.
+#
+# Usage:
+#   python download/sxr_downloader.py --config download/sxr_download_config.yaml
+# =============================================================================
+
+save_dir: "/path/to/GOES_raw"
+
+start_date: "2023-08-01"
+end_date:   "2023-08-02"
+
+max_workers: 4

@@ -46,16 +46,31 @@ The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity
 
 ## Repository Structure
 
-This repository is intentionally scoped to **running and evaluating** a trained
-FOXES model — it does not include the data download, preprocessing, or training
+This repository is intentionally scoped to **getting data, running inference,
+and evaluating** a trained FOXES model — it does not include the training
 code used to produce the released checkpoint.
 
 ```text
 FOXES
+├── download
+│   ├── hugging_face_data_download.py # Recommended: stream FOXES data from HF Hub straight to .npy
+│   ├── parquet_to_npy.py             # Convert already-downloaded HF parquet files to .npy
+│   ├── hf_download_config.yaml       # Config for hugging_face_data_download.py
+│   ├── download_sdo.py               # Advanced: raw AIA download from JSOC (needs data/build_dataset.py after)
+│   ├── sdo_download_config.yaml      # Config for download_sdo.py
+│   ├── sxr_downloader.py             # Advanced: raw GOES SXR download via SunPy Fido (needs data/build_dataset.py after)
+│   └── sxr_download_config.yaml      # Config for sxr_downloader.py
+├── data
+│   ├── build_dataset.py         # Runs the full raw -> processed pipeline below in one command
+│   ├── build_dataset_config.yaml # Config for build_dataset.py
+│   ├── clean_aia.py             # Drop AIA FITS files with a bad DATE-OBS timestamp
+│   ├── convert_aia.py           # Raw AIA FITS -> paired 512x512 .npy stacks (itipy)
+│   ├── combine_sxr.py           # Combine raw multi-satellite GOES files into per-satellite CSVs
+│   ├── align_aia_sxr.py         # Match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
+│   └── sxr_normalization.py     # Compute log-space mean/std over SXR .npy files for training
 ├── forecasting
 │   ├── dataset.py            # AIA_GOESDataset: loads paired AIA + SXR .npy files
 │   ├── model.py               # ViTLocal: Vision Transformer with patch flux heads
-│   ├── model_test.py          # Unit tests for the model's attention masking
 │   ├── inference.py           # Run a checkpoint over a folder of data; writes predictions.csv
 │   ├── inference_config.yaml  # Config for inference.py
 │   ├── evaluation.py          # Compute metrics and generate evaluation plots
@@ -92,9 +107,45 @@ conda activate foxes
 
 ## Running the Model
 
-FOXES is run in two steps: **inference** (run a checkpoint over your data) and
-**evaluation** (score the predictions and generate plots). Both are driven by a
-YAML config — edit the config, then run the script.
+FOXES is run in three steps: **get data**, **inference** (run a checkpoint over
+your data), and **evaluation** (score the predictions and generate plots). All
+three are driven by a YAML config — edit the config, then run the script.
+
+### 0) Get data
+
+**Recommended:** stream the released dataset straight from Hugging Face Hub
+into the paired `.npy` layout inference expects — no separate processing step:
+
+```bash
+python download/hugging_face_data_download.py --config download/hf_download_config.yaml
+```
+
+Edit `download/hf_download_config.yaml` first to set `aia_dir`/`sxr_dir`, which
+splits to pull, and whether to subsample.
+
+If you've already downloaded the HF parquet files locally instead of
+streaming, convert them the same way with `download/parquet_to_npy.py`.
+
+**Advanced:** to acquire and process raw data yourself instead, edit and run
+the two download configs, then the one dataset-build config, in order:
+
+```bash
+# 1) Raw AIA FITS from JSOC (requires a registered email)
+python download/download_sdo.py --config download/sdo_download_config.yaml
+
+# 2) Raw GOES XRS data via SunPy Fido
+python download/sxr_downloader.py --config download/sxr_download_config.yaml
+
+# 3) Clean + convert AIA, combine + align SXR -> paired .npy (see data/build_dataset_config.yaml)
+python data/build_dataset.py -config data/build_dataset_config.yaml
+```
+
+`data/build_dataset.py` runs the full raw-to-processed pipeline in one command
+(clean AIA → convert AIA → combine GOES → align AIA/SXR); each step can be
+skipped via the `steps:` block in its config if you've already run it. It can
+also optionally compute SXR normalization stats for training — set
+`sxr_normalization.compute: true` in the config (not needed for inference
+against a released checkpoint).
 
 ### 1) Data format
 
