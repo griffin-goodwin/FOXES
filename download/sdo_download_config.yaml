@@ -10,11 +10,11 @@
 #   python download/download_sdo.py --config download/sdo_download_config.yaml
 # =============================================================================
 
-download_dir: "/path/to/AIA_raw"
-email: "your.email@example.com"   # must be registered with JSOC: http://jsoc.stanford.edu/ajax/register_email.html
+download_dir: "/Volumes/T9/testing_foxes/AIA_raw"
+email: "ggoodwin5@gsu.edu"   # must be registered with JSOC: http://jsoc.stanford.edu/ajax/register_email.html
 
 start_date: "2023-08-01 00:00:00"
-end_date:   "2023-08-02 00:00:00"
-cadence: 60    # minutes between samples
+end_date:   "2023-12-01 00:00:00"
+cadence: 7200    # minutes between samples
 
 wavelengths: [94, 131, 171, 193, 211, 304, 335]

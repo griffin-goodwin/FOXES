@@ -47,6 +47,14 @@ subsample_frac: 0.1      # used only when subsample_n is null  (0.0–1.0)
 shuffle_buffer_size: 10
 
 # -----------------------------------------------------------------------------
+# Already downloaded parquet files locally instead of streaming from HF Hub?
+# Point this at the root dir containing per-split subdirs (train/, validation/
+# or val/, test/) and streaming + HF Hub login are skipped entirely.
+# -----------------------------------------------------------------------------
+local_parquet_dir: null
+delete_parquet_after: false   # delete each parquet file once its rows are written
+
+# -----------------------------------------------------------------------------
 # Misc
 # -----------------------------------------------------------------------------
 num_workers: 8     # parallel threads for disk writes (I/O bound, so > CPU count is fine)

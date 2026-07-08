@@ -1,0 +1,61 @@
+# =============================================================================
+# FOXES Training Configuration
+# =============================================================================
+# Used by train.py to train the ViTLocal model on paired AIA/SXR .npy data.
+# Expects aia_dir/sxr_dir to each have train/val/test subfolders (that's what
+# data/build_dataset.py produces).
+#
+# Usage:
+#   python training/train.py --config training/train_config.yaml
+# =============================================================================
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+
+# GPU configuration:
+#   0 (or any int)  - that single GPU
+#   [0, 1]          - those specific GPUs
+#   "all"           - every available GPU
+#   -1              - CPU only
+gpu_ids: -1
+
+batch_size: 6
+epochs: 150
+
+# Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
+# before starting. Takes one extra pass over the training set.
+calculate_base_weights: false
+
+vit_architecture:
+  embed_dim: 256
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  hidden_dim: 1024
+  num_heads: 8
+  num_layers: 8
+  dropout: 0.1
+  learning_rate: 0.0001
+  # Self-attention masking - one of:
+  #   inverted - the released model's behavior: each patch attends to DISTANT
+  #              patches (the flipped local-attention mask it was trained with)
+  #   local    - true local attention: each patch attends to its neighborhood
+  #   none     - standard full/global attention (no masking)
+  mask_mode: inverted
+  local_window: 9   # neighbourhood side length (patches), used by inverted/local
+
+data:
+  aia_dir: "/Volumes/T9/testing_foxes/AIA_processed"
+  sxr_dir: "/Volumes/T9/testing_foxes/SXR_processed"
+  sxr_norm_path: "/Volumes/T9/testing_foxes/normalized_sxr.npy"
+  checkpoints_dir: "/Volumes/T9/chkpt/"  # update to actual checkpoint
+
+wandb:
+  entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
+  project: FOXES
+  job_type: training
+  tags:
+    - aia
+    - sxr
+    - regression
+  run_name: run_1
+  notes: AIA to SXR translation

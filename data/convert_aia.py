@@ -8,10 +8,10 @@ import collections.abc
 import os
 from multiprocessing import Pool
 
-collections.Iterable = collections.abc.Iterable
-collections.Mapping = collections.abc.Mapping
-collections.MutableSet = collections.abc.MutableSet
-collections.MutableMapping = collections.abc.MutableMapping
+collections.Iterable = collections.abc.Iterable  # type: ignore[attr-defined]
+collections.Mapping = collections.abc.Mapping  # type: ignore[attr-defined]
+collections.MutableSet = collections.abc.MutableSet  # type: ignore[attr-defined]
+collections.MutableMapping = collections.abc.MutableMapping  # type: ignore[attr-defined]
 import numpy as np
 from itipy.data.dataset import StackDataset, get_intersecting_files, AIADataset
 from itipy.data.editor import BrightestPixelPatchEditor
@@ -40,7 +40,7 @@ class AIAStackDataset(StackDataset):
         ds_mapping = {94: AIADataset, 131: AIADataset, 171: AIADataset, 193: AIADataset, 211: AIADataset,
                       304: AIADataset, 335: AIADataset, 1600: AIADataset, 1700: AIADataset, 4500: AIADataset, 6173: AIADataset}
         data_sets = [ds_mapping[wl_id](files, wavelength=wl_id, resolution=resolution, ext=ext, allow_errors=allow_errors)
-                     for wl_id, files in zip(wavelengths, paths)]
+                     for wl_id, files in zip(wavelengths, paths)] # type: ignore[attr-defined]
         super().__init__(data_sets, **kwargs)
         if patch_shape is not None:
             self.addEditor(BrightestPixelPatchEditor(patch_shape))
@@ -58,11 +58,11 @@ def _init_worker(dataset, out_folder):
 
 def save_sample(i):
     try:
-        data = _aia_dataset[i]
-        file_path = os.path.join(_output_folder, _aia_dataset.getId(i)) + '.npy'
+        data = _aia_dataset[i] # type: ignore[attr-defined]
+        file_path = os.path.join(_output_folder, _aia_dataset.getId(i)) + '.npy' # type: ignore[attr-defined]
         np.save(file_path, data)
     except Exception as e:
-        print(f"Warning: Could not process sample {i} (ID: {_aia_dataset.getId(i)}): {e}")
+        print(f"Warning: Could not process sample {i} (ID: {_aia_dataset.getId(i)}): {e}") # type: ignore[attr-defined]
 
 
 def check_existing_files(base_input_folder, wavelengths, output_folder):

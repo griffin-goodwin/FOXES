@@ -3,7 +3,7 @@
 # =============================================================================
 # Used by evaluation.py to compute metrics and generate plots.
 #
-# Usage: python evaluation.py -config evaluation_config.yaml
+# Usage: python evaluation.py --config evaluation_config.yaml
 # =============================================================================
 
 model_predictions:

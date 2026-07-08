@@ -12,7 +12,7 @@ class SXRDownloader:
 
     def __init__(self, save_dir: str):
         self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(exist_ok=True)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
         self.used_g13_files = []
         self.used_g14_files = []
         self.used_g15_files = []

@@ -143,8 +143,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 flux_contributions = None
 
             current_batch_size = predictions.shape[0]
-            batch_weights = []
-            batch_flux_contributions = []
             
             # Process each sample in the batch to reduce memory footprint
             for i in range(current_batch_size):
@@ -319,14 +317,14 @@ def main():
         return recursive_substitute(config_dict, variables)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-config', type=str, default='inference_config.yaml', required=True,
+    parser.add_argument('--config', type=str, default='inference_config.yaml', required=True,
                         help='Path to the inference configuration YAML file.')
     args = parser.parse_args()
 
     with open(args.config, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
 
-    config_data = resolve_config_variables(config_data)
+    config_data: dict = resolve_config_variables(config_data)
 
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)

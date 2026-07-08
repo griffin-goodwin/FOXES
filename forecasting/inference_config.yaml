@@ -5,7 +5,7 @@
 # AIA data and write out SXR predictions (+ optional attention/flux maps).
 #
 # Usage:
-#   python forecasting/inference.py -config forecasting/inference_config.yaml
+#   python forecasting/inference.py --config forecasting/inference_config.yaml
 # =============================================================================
 
 wavelengths: [94, 131, 171, 193, 211, 304, 335]

@@ -91,12 +91,20 @@ class SDODownloader:
         obs = pd.to_datetime(date_str, errors='coerce', utc=True).dt.tz_localize(None)
         header['_diff'] = (obs - date).abs()
 
+        # QUALITY comes back from JSOC as a numeric keyword, but drms occasionally
+        # yields it as object/string dtype — compare on the coerced numeric value
+        # so a dtype quirk can't silently make every frame look "not quality-0"
+        # (which would fall through to accepting whatever frame is closest,
+        # calibration/dark frames included).
+        quality_numeric = pd.to_numeric(header['QUALITY'], errors='coerce')
+
         rows = []
         for wl in wavelengths:
-            sub = header[header['WAVELNTH'] == int(wl)]
+            mask = header['WAVELNTH'] == int(wl)
+            sub = header[mask]
             if len(sub) == 0:
                 continue
-            good = sub[(sub['QUALITY'] == 0) | sub['QUALITY'].isna()]
+            good = sub[(quality_numeric[mask] == 0) | quality_numeric[mask].isna()]
             if len(good) > 0:
                 sub = good
             else:
@@ -173,13 +181,27 @@ class SDODownloader:
 
             header['DATE_OBS'] = header['DATE__OBS']
             header = header_to_fits(MetaDict(header))
-            with fits.open(tmp_path, 'update') as f:
-                hdr = f[1].header
-                for k, v in header.items():
-                    if pd.isna(v):
-                        continue
-                    hdr[k] = v
-                f.verify('silentfix')
+
+            # JSOC serves this segment as a tile-compressed CompImageHDU whose
+            # correct physical values depend on internal per-tile scaling
+            # (ZSCALE/ZZERO), not just the outer BSCALE/BZERO placeholder.
+            # Opening it in 'update' mode and writing header cards in place
+            # forces astropy to re-derive that scaling from the (unrelated)
+            # placeholder values, silently corrupting the pixel data — most
+            # visible on 94A, whose narrow true dynamic range gets clipped to
+            # a flat value after calibration. Instead: read the correctly
+            # decompressed data once, then write a fresh plain (uncompressed)
+            # FITS file with the merged header — never re-touch the original
+            # compressed HDU.
+            with fits.open(tmp_path) as f:
+                data = f[1].data
+                hdr = f[1].header.copy()
+            for k, v in header.items():
+                if pd.isna(v):
+                    continue
+                hdr[k] = v
+            fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(data=data, header=hdr)]).writeto(
+                tmp_path, overwrite=True)
 
             os.replace(tmp_path, map_path)
             return map_path

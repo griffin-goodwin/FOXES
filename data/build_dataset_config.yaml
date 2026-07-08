@@ -4,23 +4,23 @@
 # Turns raw AIA FITS + raw GOES XRS data into the paired .npy layout that
 # forecasting/dataset.py expects.
 #
-# Usage: python data/build_dataset.py -config data/build_dataset_config.yaml
+# Usage: python data/build_dataset.py --config data/build_dataset_config.yaml
 # =============================================================================
 
 wavelengths: [94, 131, 171, 193, 211, 304, 335]
 
 aia:
-  raw_dir:        "/path/to/AIA_raw"       # raw FITS from download/download_sdo.py
-  bad_files_dir:  "/path/to/AIA_bad"       # bad-timestamp FITS get moved here
-  processed_dir:  "/path/to/AIA_processed" # paired 512x512 .npy stacks
+  raw_dir:        "/Volumes/T9/testing_foxes/AIA_raw"       # raw FITS from download/download_sdo.py
+  bad_files_dir:  "/Volumes/T9/testing_foxes/SDO/AIA_bad"       # bad-timestamp FITS get moved here
+  processed_dir:  "/Volumes/T9/testing_foxes/AIA_processed" # paired 512x512 .npy stacks
 
 sxr:
-  raw_dir:      "/path/to/GOES_raw"        # raw netCDF from download/sxr_downloader.py
-  combined_dir: "/path/to/GOES_combined"   # one interpolated CSV per satellite
+  raw_dir:      "/Volumes/T9/testing_foxes/GOES_raw"        # raw netCDF from download/download_sxr.py
+  combined_dir: "/Volumes/T9/testing_foxes/GOES_combined"   # one interpolated CSV per satellite
 
 output:
-  sxr_dir:         "/path/to/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
-  aia_missing_dir: "/path/to/AIA_missing"   # AIA files with no matching SXR value
+  sxr_dir:         "/Volumes/T9/testing_foxes/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
+  aia_missing_dir: "/Volumes/T9/testing_foxes/AIA_missing"   # AIA files with no matching SXR value
 
 processing:
   max_processes: null    # cap worker processes; null = use all CPUs
@@ -30,13 +30,26 @@ processing:
 # Which build steps to run, in order. Set any to false to skip it (e.g. if
 # you already ran that step and are re-running after fixing a later one).
 steps:
-  clean_aia:   true   # drop AIA FITS files with a bad DATE-OBS timestamp
-  convert_aia: true   # raw AIA FITS -> paired .npy stacks
-  combine_sxr: true   # combine raw multi-satellite GOES files into per-satellite CSVs
-  align:       true   # match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
+  clean_aia:   true    # drop AIA FITS files with a bad DATE-OBS timestamp
+  convert_aia: true    # raw AIA FITS -> paired .npy stacks
+  combine_sxr: true    # combine raw multi-satellite GOES files into per-satellite CSVs
+  align:       true    # match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
+  split:       true   # split aia.processed_dir / output.sxr_dir into train/val/test
+
+# Only needed if you're training (training/train_config.yaml expects
+# aia_dir/sxr_dir to each have train/val/test subfolders) — not needed for
+# inference or evaluation against a released checkpoint. Splits both
+# aia.processed_dir and output.sxr_dir in place, using the same date ranges
+# so a given timestamp lands in the same split for both.
+split:
+  train_range: ["2023-08-01","2023-08-15"]   # e.g. ["2012-01-01", "2022-12-31"]; null with the others -> month-based default
+  val_range:   ["2023-08-16","2023-08-22"]   # e.g. ["2023-01-01", "2023-06-30"]
+  test_range:  ["2023-08-23","2023-08-31"]   # e.g. ["2023-08-01", "2023-08-31"]
+  copy_files:  false  # copy instead of move
 
 # Optional — only needed if you're training, not for running inference
-# against a released checkpoint.
+# against a released checkpoint. Requires steps.split to have run (computes
+# stats from the train split only).
 sxr_normalization:
-  compute:     false
-  output_path: "/path/to/normalized_sxr.npy"
+  compute:     true
+  output_path: "/Volumes/T9/testing_foxes/normalized_sxr.npy"

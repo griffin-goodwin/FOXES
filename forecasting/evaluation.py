@@ -474,7 +474,7 @@ def load_evaluation_config(config_path):
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
 
     # Resolve variable substitutions
-    config_data = resolve_config_variables(config_data)
+    config_data: dict = resolve_config_variables(config_data)
     return config_data
 
 
@@ -488,7 +488,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Run FOXES solar flare evaluation')
-    parser.add_argument('-config', type=str, default='evaluation_config.yaml',
+    parser.add_argument('--config', type=str, default='evaluation_config.yaml',
                         help='Path to evaluation config YAML file')
     args = parser.parse_args()
 

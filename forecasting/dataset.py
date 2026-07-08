@@ -4,6 +4,8 @@ import pandas as pd
 import torch
 import numpy as np
 from pathlib import Path
+from pytorch_lightning import LightningDataModule
+from torch.utils.data import DataLoader
 import glob
 
 
@@ -168,5 +170,58 @@ class AIAGOESDataset(torch.utils.data.Dataset):
         """
         timestamp = self.samples[idx]
         return timestamp
+
+
+class AIAGOESDataModule(LightningDataModule):
+    """
+    PyTorch Lightning DataModule wiring up train/val/test AIAGOESDataset splits.
+    Used by train.py.
+
+    Parameters
+    ----------
+    aia_train_dir, aia_val_dir, aia_test_dir : str
+        Directories of AIA .npy files for each split.
+    sxr_train_dir, sxr_val_dir, sxr_test_dir : str
+        Directories of SXR .npy files for each split.
+    sxr_norm : np.ndarray
+        (mean, std) used to log-normalize SXR targets.
+    batch_size, num_workers : int
+    wavelengths : list of int
+    """
+
+    def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,
+                 sxr_norm, batch_size=64, num_workers=4, wavelengths=[94, 131, 171, 193, 211, 304, 335]):
+        super().__init__()
+        self.aia_train_dir = aia_train_dir
+        self.aia_val_dir = aia_val_dir
+        self.aia_test_dir = aia_test_dir
+        self.sxr_train_dir = sxr_train_dir
+        self.sxr_val_dir = sxr_val_dir
+        self.sxr_test_dir = sxr_test_dir
+        self.sxr_norm = sxr_norm
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.wavelengths = wavelengths
+
+    def setup(self, stage=None):
+        transform = SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1])
+        self.train_ds = AIAGOESDataset(aia_dir=self.aia_train_dir, sxr_dir=self.sxr_train_dir,
+                                       sxr_transform=transform, wavelengths=self.wavelengths)
+        self.val_ds = AIAGOESDataset(aia_dir=self.aia_val_dir, sxr_dir=self.sxr_val_dir,
+                                     sxr_transform=transform, wavelengths=self.wavelengths)
+        self.test_ds = AIAGOESDataset(aia_dir=self.aia_test_dir, sxr_dir=self.sxr_test_dir,
+                                      sxr_transform=transform, wavelengths=self.wavelengths)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
+                          num_workers=self.num_workers, prefetch_factor=4 if self.num_workers else None)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False,
+                          num_workers=self.num_workers, prefetch_factor=4 if self.num_workers else None)
+
+    def test_dataloader(self):
+        return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False,
+                          num_workers=self.num_workers, prefetch_factor=1 if self.num_workers else None)
 
 

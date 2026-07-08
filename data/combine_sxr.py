@@ -29,7 +29,7 @@ class SXRDataProcessor:
     def __init__(self, data_dir: str, output_dir: str):
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.used_g13_files = []
         self.used_g14_files = []
         self.used_g15_files = []
@@ -42,14 +42,19 @@ class SXRDataProcessor:
         Combine GOES-16 and GOES-18 files and track source files used.
         Parameters
         """
-        print("🔍 Scanning for GOES data files...")
-        
-        g13_files = sorted(self.data_dir.glob("*g13*.nc"))
-        g14_files = sorted(self.data_dir.glob("*g14*.nc"))
-        g15_files = sorted(self.data_dir.glob("*g15*.nc"))
-        g16_files = sorted(self.data_dir.glob("*g16*.nc"))
-        g17_files = sorted(self.data_dir.glob("*g17*.nc"))
-        g18_files = sorted(self.data_dir.glob("*g18*.nc"))
+        print("Scanning for GOES data files...")
+
+        def _glob(pattern):
+            # Skip macOS AppleDouble sidecar files (e.g. "._sci_xrsf...nc")
+            # that external/non-native filesystems litter alongside real files.
+            return sorted(p for p in self.data_dir.glob(pattern) if not p.name.startswith('._'))
+
+        g13_files = _glob("*g13*.nc")
+        g14_files = _glob("*g14*.nc")
+        g15_files = _glob("*g15*.nc")
+        g16_files = _glob("*g16*.nc")
+        g17_files = _glob("*g17*.nc")
+        g18_files = _glob("*g18*.nc")
         
         total_files = len(g13_files) + len(g14_files) + len(g15_files) + len(g16_files) + len(g17_files) + len(g18_files)
         logging.info(
@@ -62,11 +67,10 @@ class SXRDataProcessor:
 
         def process_files(files, satellite_name, output_file, used_file_list):
             datasets = []
-            combined_meta = {}
             successful_files = 0
             failed_files = 0
 
-            print(f"🛰️  Processing {satellite_name} ({len(files)} files)...")
+            print(f"Processing {satellite_name} ({len(files)} files)...")
             
             # Progress bar for file loading
             with tqdm(files, desc=f"Loading {satellite_name}", unit="file", 
@@ -85,7 +89,7 @@ class SXRDataProcessor:
                         continue
                     finally:
                         if 'ds' in locals():
-                            ds.close()
+                            ds.close() # type: ignore[attr-defined]
 
             if not datasets:
                 print(f"No valid datasets for {satellite_name}")

@@ -171,7 +171,10 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
 
     # Get target timestamps from AIA files
     print(f"\nFinding target timestamps from AIA files in: {aia_processed_dir}")
-    aia_files = sorted(glob.glob(f"{aia_processed_dir}/*.npy", recursive=True))
+    # Skip macOS AppleDouble sidecar files (e.g. "._2023-08-01T00:00:00.npy")
+    # that external/non-native filesystems litter alongside real files.
+    aia_files = sorted(f for f in glob.glob(f"{aia_processed_dir}/*.npy", recursive=True)
+                       if not os.path.basename(f).startswith('._'))
     aia_files_split = [file.split('/')[-1].split('.')[0] for file in aia_files]
     common_timestamps = [
         datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
