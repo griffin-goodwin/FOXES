@@ -65,7 +65,7 @@ FOXES
 │   ├── convert_aia.py           # Raw AIA FITS -> paired 512x512 .npy stacks (itipy)
 │   ├── combine_sxr.py           # Combine raw multi-satellite GOES files into per-satellite CSVs
 │   ├── align_aia_sxr.py         # Match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
-│   ├── split_train_val_test.py  # Split processed AIA/SXR into train/val/test (training only)
+│   ├── split_train_val_test.py  # Split processed AIA/SXR into train/val/test (use for training a new model only)
 │   └── sxr_normalization.py     # Compute log-space mean/std over SXR .npy files for training
 ├── forecasting
 │   ├── dataset.py            # AIAGOESDataset / AIAGOESDataModule: loads paired AIA + SXR .npy files
@@ -73,7 +73,8 @@ FOXES
 │   ├── inference.py           # Run a checkpoint over a folder of data; writes predictions.csv
 │   ├── inference_config.yaml  # Config for inference.py
 │   ├── evaluation.py          # Compute metrics and generate evaluation plots
-│   └── evaluation_config.yaml # Config for evaluation.py
+│   ├── evaluation_config.yaml # Config for evaluation.py
+│   └── trained_weights_and_normalization/  # 3 released checkpoints + normalized_sxr.npy (see below)
 ├── training
 │   ├── train.py                # Train ViTLocal with PyTorch Lightning + Weights & Biases logging
 │   ├── train_config.yaml       # Config for train.py
@@ -181,14 +182,26 @@ If you don't have ground-truth SXR data (e.g. scoring new/live data), set
 
 ### 2) Run inference
 
+Three released checkpoints are included under
+`forecasting/trained_weights_and_normalization/`, differing only in the
+self-attention mask they were trained with (see `mask_mode` in
+`training/train_config.yaml`) — each checkpoint carries its own mask, so
+nothing else needs to change to switch between them, just `checkpoint_path`:
+
+| Checkpoint | `mask_mode` | Description |
+| --- | --- | --- |
+| `inverted-attention-mask.ckpt` | `inverted` | **Original released FOXES model.** Each patch attends to *distant* patches (the flipped local-attention mask it was actually trained with). |
+| `localized-attention-mask.ckpt` | `local` | True local attention — the opposite of the original model: each patch attends only to its own neighborhood. |
+| `no-attention-mask.ckpt` | `none` | Global ViT — standard full/global attention, no masking at all. |
+
 Edit `forecasting/inference_config.yaml`:
 
 ```yaml
 data:
   aia_dir:         "/path/to/your/aia_data"
   sxr_dir:         "/path/to/your/sxr_data"   # omit/ignore if prediction_only
-  sxr_norm_path:   "/path/to/normalized_sxr.npy"
-  checkpoint_path: "/path/to/checkpoint.ckpt"
+  sxr_norm_path:   "forecasting/trained_weights_and_normalization/normalized_sxr.npy"
+  checkpoint_path: "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
 output_path: "/path/to/predictions.csv"
 ```

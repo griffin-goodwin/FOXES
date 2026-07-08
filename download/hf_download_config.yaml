@@ -18,8 +18,8 @@ repo_id: "griffingoodwin04/FOXES"
 #   {aia_dir}/{local_split}/{filename}   ("validation" maps to local dir "val")
 #   {sxr_dir}/{local_split}/{filename}
 # -----------------------------------------------------------------------------
-aia_dir: "/Volumes/T9/AIA_hg_processed"
-sxr_dir: "/Volumes/T9/SXR_hg_processed"
+aia_dir: "./foxes_data/AIA_hg_processed"
+sxr_dir: "./foxes_data/SXR_hg_processed"
 
 # -----------------------------------------------------------------------------
 # Splits to download  (any subset of: train, validation, test)

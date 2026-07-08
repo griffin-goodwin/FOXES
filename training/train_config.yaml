@@ -91,10 +91,10 @@ callbacks:
   attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
 
 data:
-  aia_dir: "/Volumes/T9/testing_foxes/AIA_processed"
-  sxr_dir: "/Volumes/T9/testing_foxes/SXR_processed"
-  sxr_norm_path: "/Volumes/T9/testing_foxes/normalized_sxr.npy"
-  checkpoints_dir: "/Volumes/T9/chkpt/"  # update to actual checkpoint
+  aia_dir: "./foxes_data/AIA_processed"
+  sxr_dir: "./foxes_data/SXR_processed"
+  sxr_norm_path: "./foxes_data/normalized_sxr.npy"
+  checkpoints_dir: "./foxes_data/chkpt/"  # update to actual checkpoint
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
