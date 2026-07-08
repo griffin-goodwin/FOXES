@@ -18,7 +18,7 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 gpu_ids: -1
 
 batch_size: 6
-epochs: 150
+epochs: 250
 
 # Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
 # before starting. Takes one extra pass over the training set.
@@ -43,11 +43,59 @@ vit_architecture:
   mask_mode: inverted
   local_window: 9   # neighbourhood side length (patches), used by inverted/local
 
+optimizer:
+  weight_decay: 0.00001   # AdamW weight decay
+  scheduler:              # CosineAnnealingWarmRestarts
+    T_0: 250
+    T_mult: 2
+    eta_min: 0.0000001
+
+loss:
+  huber_delta: 0.3          # delta for the underlying Huber loss
+  window_size: 15000        # rolling error-history length per flare class
+  diagnostic_every_n_steps: 200   # how often to log per-class adaptive weights
+
+  # Note: quiet/C/M/X flux boundaries (1e-6/1e-5/1e-4 W/m^2) are the fixed GOES
+  # flare-class definition, not configurable here — see
+  # SXRRegressionDynamicLoss.CLASS_THRESHOLDS in forecasting/model.py.
+
+  # Static per-class weight (multiplied by the adaptive multiplier below).
+  # Only used when calculate_base_weights: false. Leave null to fall back to
+  # SXRRegressionDynamicLoss's defaults, which were fit to the ORIGINALLY
+  # RELEASED dataset — set calculate_base_weights: true instead if training on
+  # your own data, or fill these in with weights fit to it.
+  base_weights: null
+  # base_weights:
+  #   quiet: 6.64
+  #   c_class: 1.63
+  #   m_class: 4.72
+  #   x_class: 43.13
+
+  # Advanced: per-class {max_multiplier, min_multiplier, sensitivity,
+  # min_samples, recent_window} controlling how far recent performance can
+  # move a class's weight from its base_weight. Leave null to use
+  # SXRRegressionDynamicLoss.DEFAULT_ADAPTIVE_MULTIPLIERS.
+  adaptive_multipliers: null
+
+checkpoint:
+  monitor: val_total_loss
+  mode: min
+  save_top_k: 10   # how many best checkpoints to keep on disk
+
+logging:
+  log_every_n_steps: 10   # Trainer step-logging interval
+
+callbacks:
+  sxr_plot_num_samples: 4          # validation samples shown in the pred-vs-true SXR plot
+  attention_num_samples: 4         # validation samples visualized per attention-map epoch
+  attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
+
 data:
   aia_dir: "/Volumes/T9/testing_foxes/AIA_processed"
   sxr_dir: "/Volumes/T9/testing_foxes/SXR_processed"
   sxr_norm_path: "/Volumes/T9/testing_foxes/normalized_sxr.npy"
   checkpoints_dir: "/Volumes/T9/chkpt/"  # update to actual checkpoint
+  num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
   entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name

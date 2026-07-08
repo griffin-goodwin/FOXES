@@ -20,7 +20,35 @@ def unnormalize_sxr(normalized_values, sxr_norm):
 
 
 class ViTLocal(pl.LightningModule):
-    def __init__(self, model_kwargs, sxr_norm, base_weights=None):
+    """
+    Parameters
+    ----------
+    model_kwargs : dict
+        Forwarded to VisionTransformerLocal (embed_dim, num_heads, mask_mode, ...).
+    sxr_norm : np.ndarray
+        (mean, std) used to log-normalize SXR targets.
+    base_weights : dict, optional
+        Per-class loss weights (see SXRRegressionDynamicLoss). If None, falls
+        back to SXRRegressionDynamicLoss's built-in defaults, which were fit to
+        the originally released dataset — pass real weights (e.g. from
+        training/train.py's get_base_weights) when training on different data.
+    weight_decay : float
+        AdamW weight decay.
+    scheduler_kwargs : dict, optional
+        Passed to CosineAnnealingWarmRestarts (T_0, T_mult, eta_min). Defaults
+        match the released model's training run.
+    loss_kwargs : dict, optional
+        Forwarded to SXRRegressionDynamicLoss (window_size, huber_delta,
+        adaptive_multipliers) — see that class for defaults.
+    diagnostic_every_n_steps : int
+        How often (in training steps) to log the adaptive loss's per-class
+        multipliers to the logger.
+    """
+
+    DEFAULT_SCHEDULER_KWARGS = {'T_0': 250, 'T_mult': 2, 'eta_min': 1e-7}
+
+    def __init__(self, model_kwargs, sxr_norm, base_weights=None, weight_decay=1e-5,
+                 scheduler_kwargs=None, loss_kwargs=None, diagnostic_every_n_steps=200):
         super().__init__()
         self.model_kwargs = model_kwargs
         self.lr = model_kwargs.get('learning_rate', model_kwargs.get('lr', 1e-4))
@@ -31,7 +59,11 @@ class ViTLocal(pl.LightningModule):
         filtered_kwargs.pop('num_classes', None)
         self.model = VisionTransformerLocal(**filtered_kwargs)
         self.base_weights = base_weights
-        self.adaptive_loss = SXRRegressionDynamicLoss(window_size=15000, base_weights=self.base_weights)
+        self.weight_decay = weight_decay
+        self.scheduler_kwargs = {**self.DEFAULT_SCHEDULER_KWARGS, **(scheduler_kwargs or {})}
+        self.diagnostic_every_n_steps = diagnostic_every_n_steps
+        self.adaptive_loss = SXRRegressionDynamicLoss(base_weights=self.base_weights, **(loss_kwargs or {}))
+        self.huber_delta = self.adaptive_loss.huber_delta
         self.sxr_norm = sxr_norm
 
     def forward(self, x, return_attention=True):
@@ -45,15 +77,10 @@ class ViTLocal(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.lr,
-            weight_decay=0.00001,
+            weight_decay=self.weight_decay,
         )
 
-        scheduler = CosineAnnealingWarmRestarts(
-            optimizer,
-            T_0=250,
-            T_mult=2,
-            eta_min=1e-7
-        )
+        scheduler = CosineAnnealingWarmRestarts(optimizer, **self.scheduler_kwargs)
 
         return {
             'optimizer': optimizer,
@@ -78,7 +105,7 @@ class ViTLocal(pl.LightningModule):
         )
 
         # Also calculate huber loss for logging
-        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=.3)
+        huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=self.huber_delta)
         mse_loss = F.mse_loss(norm_preds_squeezed, sxr)
         mae_loss = F.l1_loss(norm_preds_squeezed, sxr)
         rmse_loss = torch.sqrt(mse_loss)
@@ -99,8 +126,8 @@ class ViTLocal(pl.LightningModule):
                      prog_bar=True, logger=True, sync_dist=True)
             self.log("train/rmse_loss", rmse_loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
-            # Detailed diagnostics only every 200 steps
-            if self.global_step % 200 == 0:
+            # Detailed diagnostics only every N steps
+            if self.global_step % self.diagnostic_every_n_steps == 0:
                 multipliers = self.adaptive_loss.get_current_multipliers()
                 for key, value in multipliers.items():
                     self.log(f"adaptive/{key}", value, on_step=True, on_epoch=False, sync_dist=True)
@@ -433,10 +460,51 @@ def img_to_patch(x, patch_size, flatten_channels=True):
 
 
 class SXRRegressionDynamicLoss:
-    def __init__(self, window_size=15000, base_weights=None):
-        self.c_threshold = 1e-6
-        self.m_threshold = 1e-5
-        self.x_threshold = 1e-4
+    """
+    Huber loss with per-class weights (quiet/C/M/X) that adapt based on each
+    class's recent vs. overall running error — classes that are currently
+    performing worse than their own history get up-weighted.
+
+    Parameters
+    ----------
+    window_size : int
+        Max length of each class's rolling error history.
+    base_weights : dict, optional
+        Static per-class weight, multiplied by the adaptive multiplier below.
+        If None, falls back to DEFAULT_BASE_WEIGHTS (fit to the originally
+        released dataset — pass real weights fit to your own data instead,
+        e.g. via training/train.py's get_base_weights).
+    adaptive_multipliers : dict, optional
+        Per-class {max_multiplier, min_multiplier, sensitivity, min_samples,
+        recent_window} controlling how much recent performance can move a
+        class's weight. Merged over DEFAULT_ADAPTIVE_MULTIPLIERS.
+    huber_delta : float
+        Delta for the underlying Huber loss.
+    """
+
+    # GOES flare-class flux boundaries (W/m^2) — a fixed physical definition,
+    # not a training knob, so this is intentionally not a constructor param.
+    CLASS_THRESHOLDS = {'c': 1e-6, 'm': 1e-5, 'x': 1e-4}
+
+    DEFAULT_BASE_WEIGHTS = {
+        'quiet': 6.643528005464481,
+        'c_class': 1.626986450317832,
+        'm_class': 4.724573441010383,
+        'x_class': 43.13137472283814,
+    }
+
+    DEFAULT_ADAPTIVE_MULTIPLIERS = {
+        'quiet':   {'max_multiplier': 1.5, 'min_multiplier': 0.6, 'sensitivity': 0.05, 'min_samples': 2500, 'recent_window': 800},
+        'c_class': {'max_multiplier': 2.0, 'min_multiplier': 0.7, 'sensitivity': 0.08, 'min_samples': 2500, 'recent_window': 800},
+        'm_class': {'max_multiplier': 5.0, 'min_multiplier': 0.8, 'sensitivity': 0.1,  'min_samples': 1500, 'recent_window': 500},
+        'x_class': {'max_multiplier': 8.0, 'min_multiplier': 0.8, 'sensitivity': 0.12, 'min_samples': 1000, 'recent_window': 300},
+    }
+
+    def __init__(self, window_size=15000, base_weights=None, adaptive_multipliers=None, huber_delta=0.3):
+        self.c_threshold = self.CLASS_THRESHOLDS['c']
+        self.m_threshold = self.CLASS_THRESHOLDS['m']
+        self.x_threshold = self.CLASS_THRESHOLDS['x']
+        self.huber_delta = huber_delta
 
         self.window_size = window_size
         self.quiet_errors = deque(maxlen=window_size)
@@ -444,50 +512,28 @@ class SXRRegressionDynamicLoss:
         self.m_errors = deque(maxlen=window_size)
         self.x_errors = deque(maxlen=window_size)
 
-        # Calculate the base weights based on the number of samples in each class within training data
-        if base_weights is None:
-            self.base_weights = self._get_base_weights()
-        else:
-            self.base_weights = base_weights
-
-    def _get_base_weights(self):
-        # Base weights based on the number of samples in each class within training data
-        return {
-            'quiet': 6.643528005464481,    # Increase from current value
-            'c_class': 1.626986450317832,  # Keep as baseline
-            'm_class': 4.724573441010383,  # Maintain M-class focus
-            'x_class': 43.13137472283814  # Maintain X-class focus
-        }
+        self.base_weights = base_weights if base_weights is not None else dict(self.DEFAULT_BASE_WEIGHTS)
+        self.multiplier_params = {**self.DEFAULT_ADAPTIVE_MULTIPLIERS, **(adaptive_multipliers or {})}
 
     def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
-        base_loss = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
+        base_loss = F.huber_loss(preds_norm, sxr_norm, delta=self.huber_delta, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
         self._update_tracking(sxr_un, sxr_norm, preds_norm)
         weighted_loss = base_loss * weights
         loss = weighted_loss.mean()
         return loss, weights
 
+    def _class_weight(self, sxrclass, error_history):
+        mult = self._get_performance_multiplier(error_history, sxrclass)
+        return self.base_weights[sxrclass] * mult
+
     def _get_adaptive_weights(self, sxr_un):
         device = sxr_un.device
 
-        # Get continuous multipliers per class with custom params
-        quiet_mult = self._get_performance_multiplier(
-            self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.05, sxrclass='quiet'
-        )
-        c_mult = self._get_performance_multiplier(
-            self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.08, sxrclass='c_class'
-        )
-        m_mult = self._get_performance_multiplier(
-            self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.1, sxrclass='m_class'
-        )
-        x_mult = self._get_performance_multiplier(
-            self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=0.12, sxrclass='x_class'
-        )
-
-        quiet_weight = self.base_weights['quiet'] * quiet_mult
-        c_weight = self.base_weights['c_class'] * c_mult
-        m_weight = self.base_weights['m_class'] * m_mult
-        x_weight = self.base_weights['x_class'] * x_mult
+        quiet_weight = self._class_weight('quiet', self.quiet_errors)
+        c_weight = self._class_weight('c_class', self.c_errors)
+        m_weight = self._class_weight('m_class', self.m_errors)
+        x_weight = self._class_weight('x_class', self.x_errors)
 
         weights = torch.ones_like(sxr_un, device=device)
         weights = torch.where(sxr_un < self.c_threshold, quiet_weight, weights)
@@ -499,47 +545,28 @@ class SXRRegressionDynamicLoss:
         mean_weight = torch.mean(weights)
         weights = weights / (mean_weight)
 
-        # Save for logging
-        self.current_multipliers = {
-            'quiet_mult': quiet_mult,
-            'c_mult': c_mult,
-            'm_mult': m_mult,
-            'x_mult': x_mult,
-            'quiet_weight': quiet_weight,
-            'c_weight': c_weight,
-            'm_weight': m_weight,
-            'x_weight': x_weight
-        }
-
         return weights
 
-    def _get_performance_multiplier(self, error_history, max_multiplier=10.0, min_multiplier=0.5, sensitivity=3.0,
-                                    sxrclass='quiet'):
-        """Class-dependent performance multiplier"""
+    def _get_performance_multiplier(self, error_history, sxrclass):
+        """Class-dependent performance multiplier: how much recent error deviates
+        from this class's overall running error, mapped through an exponential
+        and clipped to [min_multiplier, max_multiplier]."""
+        params = self.multiplier_params[sxrclass]
 
-        class_params = {
-            'quiet': {'min_samples': 2500, 'recent_window': 800},
-            'c_class': {'min_samples': 2500, 'recent_window': 800},
-            'm_class': {'min_samples': 1500, 'recent_window': 500},
-            'x_class': {'min_samples': 1000, 'recent_window': 300}
-        }
-
-        if len(error_history) < class_params[sxrclass]['min_samples']:
+        if len(error_history) < params['min_samples']:
             return 1.0
 
-        recent_window = class_params[sxrclass]['recent_window']
-        recent = np.mean(list(error_history)[-recent_window:])
+        recent = np.mean(list(error_history)[-params['recent_window']:])
         overall = np.mean(list(error_history))
 
         ratio = recent / overall
-        multiplier = np.exp(sensitivity * (ratio - 1))
-        return np.clip(multiplier, min_multiplier, max_multiplier)
+        multiplier = np.exp(params['sensitivity'] * (ratio - 1))
+        return np.clip(multiplier, params['min_multiplier'], params['max_multiplier'])
 
     def _update_tracking(self, sxr_un, sxr_norm, preds_norm):
         sxr_un_np = sxr_un.detach().cpu().numpy()
 
-        # Huber loss
-        error = F.huber_loss(preds_norm, sxr_norm, delta=.3, reduction='none')
+        error = F.huber_loss(preds_norm, sxr_norm, delta=self.huber_delta, reduction='none')
         error = error.detach().cpu().numpy()
 
         quiet_mask = sxr_un_np < self.c_threshold
@@ -559,20 +586,18 @@ class SXRRegressionDynamicLoss:
             self.x_errors.append(float(np.mean(error[x_mask])))
 
     def get_current_multipliers(self):
-        """Get current performance multipliers for logging"""
+        """Current per-class multipliers/weights for logging — uses the exact
+        same _get_performance_multiplier params as the loss itself, so what's
+        logged always matches what was actually applied."""
+        quiet_mult = self._get_performance_multiplier(self.quiet_errors, 'quiet')
+        c_mult = self._get_performance_multiplier(self.c_errors, 'c_class')
+        m_mult = self._get_performance_multiplier(self.m_errors, 'm_class')
+        x_mult = self._get_performance_multiplier(self.x_errors, 'x_class')
         return {
-            'quiet_mult': self._get_performance_multiplier(
-                self.quiet_errors, max_multiplier=1.5, min_multiplier=0.6, sensitivity=0.2, sxrclass='quiet'
-            ),
-            'c_mult': self._get_performance_multiplier(
-                self.c_errors, max_multiplier=2, min_multiplier=0.7, sensitivity=0.3, sxrclass='c_class'
-            ),
-            'm_mult': self._get_performance_multiplier(
-                self.m_errors, max_multiplier=5.0, min_multiplier=0.8, sensitivity=0.8, sxrclass='m_class'
-            ),
-            'x_mult': self._get_performance_multiplier(
-                self.x_errors, max_multiplier=8.0, min_multiplier=0.8, sensitivity=1.0, sxrclass='x_class'
-            ),
+            'quiet_mult': quiet_mult,
+            'c_mult': c_mult,
+            'm_mult': m_mult,
+            'x_mult': x_mult,
             'quiet_count': len(self.quiet_errors),
             'c_count': len(self.c_errors),
             'm_count': len(self.m_errors),
@@ -581,8 +606,8 @@ class SXRRegressionDynamicLoss:
             'c_error': np.mean(self.c_errors) if self.c_errors else 0.0,
             'm_error': np.mean(self.m_errors) if self.m_errors else 0.0,
             'x_error': np.mean(self.x_errors) if self.x_errors else 0.0,
-            'quiet_weight': getattr(self, 'current_multipliers', {}).get('quiet_weight', 0.0),
-            'c_weight': getattr(self, 'current_multipliers', {}).get('c_weight', 0.0),
-            'm_weight': getattr(self, 'current_multipliers', {}).get('m_weight', 0.0),
-            'x_weight': getattr(self, 'current_multipliers', {}).get('x_weight', 0.0)
+            'quiet_weight': self.base_weights['quiet'] * quiet_mult,
+            'c_weight': self.base_weights['c_class'] * c_mult,
+            'm_weight': self.base_weights['m_class'] * m_mult,
+            'x_weight': self.base_weights['x_class'] * x_mult,
         }

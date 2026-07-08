@@ -32,7 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from training.callbacks import AttentionMapCallback, ImagePredictionLogger_SXR
 from forecasting.dataset import AIAGOESDataModule
-from forecasting.model import ViTLocal, unnormalize_sxr
+from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
 
 
 def resolve_config_variables(config_dict):
@@ -88,7 +88,9 @@ def get_base_weights(data_module, sxr_norm):
         Class weights for quiet, C, M, and X classes.
     """
     print("Calculating base weights from training data...")
-    c_threshold, m_threshold, x_threshold = 1e-6, 1e-5, 1e-4
+    # Fixed GOES flare-class boundaries — same source of truth the loss uses.
+    thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
+    c_threshold, m_threshold, x_threshold = thresholds['c'], thresholds['m'], thresholds['x']
 
     quiet_count = c_count = m_count = x_count = total = 0
     train_loader = data_module.train_dataloader()
@@ -161,6 +163,13 @@ def main():
     sxr_norm = np.load(config_data['data']['sxr_norm_path'])
     wavelengths = config_data['wavelengths']
 
+    optimizer_cfg = config_data.get('optimizer', {})
+    loss_cfg = config_data.get('loss', {})
+    checkpoint_cfg = config_data.get('checkpoint', {})
+    logging_cfg = config_data.get('logging', {})
+    callbacks_cfg = config_data.get('callbacks', {})
+    data_cfg = config_data.get('data', {})
+
     data_module = AIAGOESDataModule(
         aia_train_dir=config_data['data']['aia_dir'] + "/train",
         aia_val_dir=config_data['data']['aia_dir'] + "/val",
@@ -169,7 +178,7 @@ def main():
         sxr_val_dir=config_data['data']['sxr_dir'] + "/val",
         sxr_test_dir=config_data['data']['sxr_dir'] + "/test",
         batch_size=config_data['batch_size'],
-        num_workers=min(8, os.cpu_count()),
+        num_workers=data_cfg.get('num_workers', min(8, os.cpu_count() or 1)),
         sxr_norm=sxr_norm,
         wavelengths=wavelengths,
     )
@@ -187,19 +196,39 @@ def main():
 
     # Callbacks
     total_n_valid = len(data_module.val_ds)
-    plot_samples = [data_module.val_ds[i] for i in range(0, total_n_valid, max(1, total_n_valid // 4))]
+    sxr_plot_num_samples = callbacks_cfg.get('sxr_plot_num_samples', 4)
+    plot_samples = [data_module.val_ds[i]
+                    for i in range(0, total_n_valid, max(1, total_n_valid // sxr_plot_num_samples))]
     sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
     patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
-    attention_callback = AttentionMapCallback(patch_size=patch_size, use_local_attention=True)
+    attention_callback = AttentionMapCallback(
+        patch_size=patch_size,
+        use_local_attention=True,
+        num_samples=callbacks_cfg.get('attention_num_samples', 4),
+        log_every_n_epochs=callbacks_cfg.get('attention_log_every_n_epochs', 1),
+    )
 
-    base_weights = get_base_weights(data_module, sxr_norm) if config_data.get('calculate_base_weights') else None
-    model = ViTLocal(model_kwargs=config_data['vit_architecture'], sxr_norm=sxr_norm, base_weights=base_weights)
+    base_weights = (get_base_weights(data_module, sxr_norm)
+                    if config_data.get('calculate_base_weights') else loss_cfg.get('base_weights'))
+    model = ViTLocal(
+        model_kwargs=config_data['vit_architecture'],
+        sxr_norm=sxr_norm,
+        base_weights=base_weights,
+        weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
+        scheduler_kwargs=optimizer_cfg.get('scheduler'),
+        loss_kwargs={
+            'window_size': loss_cfg.get('window_size', 15000),
+            'huber_delta': loss_cfg.get('huber_delta', 0.3),
+            'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
+        },
+        diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
+    )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=config_data['data']['checkpoints_dir'],
-        monitor='val_total_loss',
-        mode='min',
-        save_top_k=10,
+        monitor=checkpoint_cfg.get('monitor', 'val_total_loss'),
+        mode=checkpoint_cfg.get('mode', 'min'),
+        save_top_k=checkpoint_cfg.get('save_top_k', 10),
         filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}",
     )
 
@@ -213,7 +242,7 @@ def main():
         max_epochs=config_data['epochs'],
         callbacks=[sxr_plot_callback, attention_callback, checkpoint_callback],
         logger=wandb_logger,
-        log_every_n_steps=10,
+        log_every_n_steps=logging_cfg.get('log_every_n_steps', 10),
     )
     trainer.fit(model, data_module)
     wandb.finish()
