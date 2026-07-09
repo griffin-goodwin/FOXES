@@ -14,6 +14,6 @@
 save_dir: "./foxes_data/SXR_raw"
 
 start_date: "2023-08-01"
-end_date:   "2023-08-31"
+end_date:   "2023-08-02"
 
 max_workers: 4

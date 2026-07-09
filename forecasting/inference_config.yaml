@@ -17,19 +17,20 @@ prediction_only: "false"
 data:
   # Point these directly at the folder of .npy files you want to run the model
   # on — no special subfolder naming (e.g. "test/") is required or assumed.
-  aia_dir:         "/your/path/to/aia_data"   # ignored if prediction_only: "true"
-  sxr_dir:         "/your/path/to/sxr_data"   # ignored if prediction_only: "true"
-  sxr_norm_path:   "/your/path/to/normalized_sxr.npy"
-  checkpoint_path: "/your/path/to/FOXES_Model_Checkpoint.ckpt"  # update to actual checkpoint
+  # Defaults below point at the test split data/build_dataset.py produces.
+  aia_dir:         "./foxes_data/AIA_processed/test"   # ignored if prediction_only: "true"
+  sxr_dir:         "./foxes_data/SXR_processed/test"   # ignored if prediction_only: "true"
+  sxr_norm_path:   "forecasting/trained_weights_and_normalization/normalized_sxr.npy"
+  checkpoint_path: "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
-output_path: "/your/path/to/inference/predictions.csv"
+output_path: "./foxes_data/inference/predictions.csv"
 
 # Per-sample attention weights (64x64 CSV per timestamp). Set model_params.no_weights: true to skip.
-weight_path: "/your/path/to/inference/weights/"
+weight_path: "./foxes_data/inference/weights/"
 
 # Per-patch flux contribution maps (64x64 CSV per timestamp) — saved automatically
 # during inference whenever flux_path is set and model_params.no_flux is false (default).
-flux_path:   "/your/path/to/inference/flux/"
+flux_path:   "./foxes_data/inference/flux/"
 
 model_params:
   input_size: 512

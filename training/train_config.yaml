@@ -94,11 +94,11 @@ data:
   aia_dir: "./foxes_data/AIA_processed"
   sxr_dir: "./foxes_data/SXR_processed"
   sxr_norm_path: "./foxes_data/normalized_sxr.npy"
-  checkpoints_dir: "./foxes_data/chkpt/"  # update to actual checkpoint
+  checkpoints_dir: "./foxes_data/checkpoints/"
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
-  entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
+  entity: ""  # your W&B username or team name
   project: FOXES
   job_type: training
   tags:

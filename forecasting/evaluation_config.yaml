@@ -7,10 +7,10 @@
 # =============================================================================
 
 model_predictions:
-  main_model_csv: "/your/path/to/model_predictions.csv"
+  main_model_csv: "./foxes_data/inference/predictions.csv"
 
 evaluation:
-  output_dir:  "/your/path/to/output_dir"
+  output_dir:  "./foxes_data/evaluation"
 
 plotting:
   regression_background: "black"
