@@ -20,8 +20,8 @@ data:
   # Defaults below point at the test split data/build_dataset.py produces.
   aia_dir:         "./foxes_data/AIA_processed/test"   # ignored if prediction_only: "true"
   sxr_dir:         "./foxes_data/SXR_processed/test"   # ignored if prediction_only: "true"
-  sxr_norm_path:   "forecasting/trained_weights_and_normalization/normalized_sxr.npy"
-  checkpoint_path: "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt"
+  sxr_norm_path:   "./trained_weights_and_normalization/normalized_sxr.npy"
+  checkpoint_path: "./trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
 output_path: "./foxes_data/inference/predictions.csv"
 
