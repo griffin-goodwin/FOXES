@@ -182,17 +182,6 @@ class SDODownloader:
             header['DATE_OBS'] = header['DATE__OBS']
             header = header_to_fits(MetaDict(header))
 
-            # JSOC serves this segment as a tile-compressed CompImageHDU whose
-            # correct physical values depend on internal per-tile scaling
-            # (ZSCALE/ZZERO), not just the outer BSCALE/BZERO placeholder.
-            # Opening it in 'update' mode and writing header cards in place
-            # forces astropy to re-derive that scaling from the (unrelated)
-            # placeholder values, silently corrupting the pixel data — most
-            # visible on 94A, whose narrow true dynamic range gets clipped to
-            # a flat value after calibration. Instead: read the correctly
-            # decompressed data once, then write a fresh plain (uncompressed)
-            # FITS file with the merged header — never re-touch the original
-            # compressed HDU.
             with fits.open(tmp_path) as f:
                 data = f[1].data
                 hdr = f[1].header.copy()
