@@ -2,12 +2,12 @@ import argparse
 import logging
 import os
 import shutil
-import socket
+import threading
 import time
 from datetime import timedelta, datetime
 from multiprocessing.pool import ThreadPool
+from http.client import IncompleteRead
 from urllib import request
-from urllib.error import URLError, HTTPError
 
 
 import drms
@@ -18,6 +18,7 @@ from astropy.io import fits
 from sunpy.io._fits import header_to_fits
 from sunpy.util import MetaDict
 from astropy import units as u
+_JSOC_CONNECTION_LIMIT = threading.Semaphore(6)
 
 
 class SDODownloader:
@@ -144,6 +145,7 @@ class SDODownloader:
             str: Path to the downloaded file.
         """
         header, segment, t = sample
+        tmp_path = None
         try:
             dir = os.path.join(self.ds_path, '%d' % header['WAVELNTH'])
             map_path = os.path.join(dir, '%s.fits' % t.isoformat('T', timespec='seconds'))
@@ -159,15 +161,16 @@ class SDODownloader:
             # Download to a temp file so a crash/partial transfer never leaves a
             # truncated .fits that the resume logic would mistake for "done".
             tmp_path = map_path + '.part'
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
                     req = request.Request(
                         url, headers={'User-Agent': 'Mozilla/5.0 (compatible; SDO-Downloader/1.0)'})
-                    with request.urlopen(req, timeout=self.timeout) as resp, open(tmp_path, 'wb') as f:
-                        shutil.copyfileobj(resp, f)
+                    with _JSOC_CONNECTION_LIMIT:
+                        with request.urlopen(req, timeout=self.timeout) as resp, open(tmp_path, 'wb') as f:
+                            shutil.copyfileobj(resp, f)
                     break
-                except (URLError, HTTPError, socket.timeout, TimeoutError) as e:
+                except (OSError, IncompleteRead) as e:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
                     if attempt < max_retries - 1:
@@ -190,11 +193,13 @@ class SDODownloader:
                     continue
                 hdr[k] = v
             fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(data=data, header=hdr)]).writeto(
-                tmp_path, overwrite=True)
+                tmp_path, overwrite=True, output_verify='silentfix')
 
             os.replace(tmp_path, map_path)
             return map_path
         except Exception as ex:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
             logging.info('Download failed: %s (requeue)' % header.get('DATE__OBS'))
             logging.info(ex)
             raise ex
