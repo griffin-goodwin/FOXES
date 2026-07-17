@@ -1,0 +1,54 @@
+# =============================================================================
+# Streaming SDOML Download Configuration
+# =============================================================================
+# Pulls AIA samples matched across all 7 wavelength channels from the
+# SDOML Zarr store on S3 and writes them as .npy files in the exact layout
+# data/convert_aia.py produces -- an alternative to the raw-FITS route
+# (download_sdo.py + convert_aia.py). AIA only; run data/align_aia_sxr.py
+# afterward to match against GOES CSVs, same as the raw-FITS pipeline does.
+#
+# Usage:
+#   python data/download_streaming_sdoml.py --config data/download_streaming_sdoml_config.yaml
+# =============================================================================
+
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+years: [2015]   # SDOML AIA.zarr covers 2010-2023
+
+s3_url: "nasa-radiant-data/helioai-datasets/us-fdlx-ard/sdomlv2a/AIA.zarr"
+
+# Local disk cache for per-(year, wavelength) T_OBS timestamp metadata used
+# for matching. Each (year, wavelength) costs ~20-30s to fetch from S3 the
+# first time (one ~250MB JSON blob per channel, covering the whole year);
+# cached to parquet after that. This does NOT affect pixel downloads below
+# -- those use a separate, much smaller (.zarray-only) metadata fetch.
+cache_dir: "./foxes_data/streaming_tobs_cache"
+
+matching:
+  cadence_minutes: 24      # walk the reference channel's own samples at this spacing
+  max_gap_minutes: 3      # reject a channel if its nearest sample is farther than this
+
+# Apply itipy's per-wavelength asinh-stretch normalization (see
+# itipy.data.editor.sdo_norms) directly to SDOML's raw intensities, mapped
+# to [-1, 1] -- same functional form data/convert_aia.py's itipy pipeline
+# uses, just applied to SDOML pixels instead of JSOC FITS. Set false to
+# write raw (unnormalized) intensities instead.
+normalize: true
+
+# Downloads are I/O-bound (waiting on S3, not CPU), parallelized with a
+# thread pool. 32 is a reasonable starting point; raise it if your
+# connection/CPU can keep up and downloads are still network-idle between
+# requests, lower it if you see connection errors or want to be gentler.
+max_workers: 32
+
+# How many decoded (15, 512, 512) chunks to keep cached in memory across
+# the whole run (~15MB each, so 64 -> ~1GB worst case). Nearby samples
+# usually share a chunk (see data/build_streaming_index.py's
+# make_chunk_cache), so this avoids re-fetching/re-decoding the same
+# object repeatedly -- raise it if you have RAM to spare and are
+# downloading a wide date range with a small cadence_minutes.
+chunk_cache_size: 64
+
+# Flat output dir, matching data/convert_aia.py's output layout -- run
+# data/align_aia_sxr.py then data/split_train_val_test.py afterward if
+# training.
+aia_dir: "./foxes_data/AIA_processed"

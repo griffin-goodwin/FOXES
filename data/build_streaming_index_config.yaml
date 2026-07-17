@@ -1,0 +1,29 @@
+# =============================================================================
+# Streaming Index Build Configuration
+# =============================================================================
+# Standalone tool to build (and optionally save) an index of AIA samples
+# matched across all 7 wavelength channels in the SDOML Zarr store on S3 --
+# useful on its own for inspecting match coverage for a date range without
+# downloading any pixel data. data/download_streaming_sdoml.py builds this
+# same index internally, so you don't need to run this first before
+# downloading; use it when you just want the numbers.
+#
+# Usage:
+#   python data/build_streaming_index.py --config data/build_streaming_index_config.yaml [--output path/to/index.parquet]
+# =============================================================================
+
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+years: [2015]   # SDOML AIA.zarr covers 2010-2023; start narrow, widen once this works
+
+s3_url: "nasa-radiant-data/helioai-datasets/us-fdlx-ard/sdomlv2a/AIA.zarr"
+
+# Local disk cache for per-(year, wavelength) T_OBS timestamp metadata. Each
+# (year, wavelength) costs ~20-30s to fetch from S3 the first time (one
+# ~250MB JSON blob per channel, covering the whole year); cached to parquet
+# after that so re-running this script or widening the date range doesn't
+# refetch years you've already indexed.
+cache_dir: "./foxes_data/streaming_tobs_cache"
+
+matching:
+  cadence_minutes: 24      # walk the reference channel's own samples at this spacing
+  max_gap_minutes: 2      # reject a channel if its nearest sample is farther than this
