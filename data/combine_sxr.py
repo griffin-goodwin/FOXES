@@ -37,10 +37,15 @@ class SXRDataProcessor:
         self.used_g17_files = []
         self.used_g18_files = []
 
-    def combine_goes_data(self, columns_to_interp=["xrsb_flux", "xrsa_flux"]):
+    def combine_goes_data(self, columns_to_interp=["xrsb_flux", "xrsa_flux"], apply_pre_goes16_scaling=True):
         """
         Combine GOES-16 and GOES-18 files and track source files used.
         Parameters
+        ----------
+        apply_pre_goes16_scaling : bool
+            Whether to apply the legacy GOES-13/14/15 (pre-GOES-16) scaling
+            correction. Set to False if your GOES-13/14/15 files are already
+            scaled to match GOES-16 (as with NOAA's newest reprocessed data).
         """
         print("Scanning for GOES data files...")
 
@@ -104,9 +109,12 @@ class SXRDataProcessor:
                 
                 # Scaling factors for GOES-13, GOES-14, and GOES-15
                 if satellite_name in ['GOES-13', 'GOES-14', 'GOES-15']:
-                    print(f"Applying scaling factors for {satellite_name}...")
-                    combined_ds['xrsa_flux'] = combined_ds['xrsa_flux'] / .85
-                    combined_ds['xrsb_flux'] = combined_ds['xrsb_flux'] / .7
+                    if apply_pre_goes16_scaling:
+                        print(f"Applying scaling factors for {satellite_name}...")
+                        combined_ds['xrsa_flux'] = combined_ds['xrsa_flux'] / .85
+                        combined_ds['xrsb_flux'] = combined_ds['xrsb_flux'] / .7
+                    else:
+                        print(f"Skipping pre-GOES-16 scaling factors for {satellite_name}...")
                 
                 print(f"Converting to DataFrame...")
                 df = combined_ds.to_dataframe().reset_index()

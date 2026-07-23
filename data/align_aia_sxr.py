@@ -19,9 +19,6 @@ from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
 
-# Set by main() before the worker Pool is created; read by process_batch in workers.
-OUTPUT_SXR_DIR = None
-
 
 def load_and_prepare_goes_data(goes_data_dir):
     """
@@ -114,7 +111,7 @@ def create_combined_lookup_table(goes_data_dict, target_timestamps):
     return lookup_data
 
 
-def process_batch(batch_data):
+def process_batch(batch_data, output_sxr_dir):
     """
     Process a batch of timestamps efficiently.
     This is much more efficient than processing one timestamp per process.
@@ -129,7 +126,7 @@ def process_batch(batch_data):
             sxr_b = data['sxr_b']
             instrument = data['instrument']
 
-            np.save(f"{OUTPUT_SXR_DIR}/{timestamp}.npy", np.array([sxr_b], dtype=np.float32))
+            np.save(f"{output_sxr_dir}/{timestamp}.npy", np.array([sxr_b], dtype=np.float32))
 
             successful_count += 1
             results.append((timestamp, True, f"Success using {instrument}"))
@@ -150,9 +147,6 @@ def split_into_batches(data, batch_size):
 def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_dir,
                    max_processes=None, batch_size_multiplier=4, min_batch_size=1):
     """Match AIA .npy timestamps to combined GOES SXR data, writing one xrsb_flux .npy per match."""
-    global OUTPUT_SXR_DIR
-    OUTPUT_SXR_DIR = output_sxr_dir
-
     print("=" * 60)
     print("GOES Data Alignment Tool")
     print("=" * 60)
@@ -212,7 +206,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
         # Single-threaded processing for small datasets
         pbar = tqdm(batches, desc="Processing batches")
         for batch in pbar:
-            results, successful, failed = process_batch(batch)
+            results, successful, failed = process_batch(batch, output_sxr_dir)
             total_successful += successful
             total_failed += failed
             pbar.set_postfix(success=total_successful, failed=total_failed)
@@ -222,7 +216,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
             # Process all batches
             results = []
             for batch in tqdm(batches, desc="Submitting batches"):
-                result = pool.apply_async(process_batch, (batch,))
+                result = pool.apply_async(process_batch, (batch, output_sxr_dir))
                 results.append(result)
 
             # Collect results with progress bar

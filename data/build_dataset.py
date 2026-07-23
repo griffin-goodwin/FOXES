@@ -61,7 +61,9 @@ def main():
 
     if steps.get('combine_sxr', True):
         print("\n--- Step 3/5: Combine raw GOES satellite files ---")
-        SXRDataProcessor(data_dir=sxr['raw_dir'], output_dir=sxr['combined_dir']).combine_goes_data()
+        SXRDataProcessor(data_dir=sxr['raw_dir'], output_dir=sxr['combined_dir']).combine_goes_data(
+            apply_pre_goes16_scaling=sxr.get('apply_pre_goes16_scaling', True)
+        )
     else:
         print("\n--- Step 3/5: Combine raw GOES satellite files (skipped) ---")
 
