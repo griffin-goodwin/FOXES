@@ -195,11 +195,8 @@ def main():
     )
 
     # Callbacks
-    total_n_valid = len(data_module.val_ds)
-    sxr_plot_num_samples = callbacks_cfg.get('sxr_plot_num_samples', 4)
-    plot_samples = [data_module.val_ds[i]
-                    for i in range(0, total_n_valid, max(1, total_n_valid // sxr_plot_num_samples))]
-    sxr_plot_callback = ImagePredictionLogger_SXR(plot_samples, sxr_norm)
+    sxr_plot_callback = ImagePredictionLogger_SXR(
+        data_module.val_ds, callbacks_cfg.get('sxr_plot_num_samples', 4), sxr_norm)
     patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
     attention_callback = AttentionMapCallback(
         patch_size=patch_size,
@@ -243,6 +240,7 @@ def main():
         callbacks=[sxr_plot_callback, attention_callback, checkpoint_callback],
         logger=wandb_logger,
         log_every_n_steps=logging_cfg.get('log_every_n_steps', 10),
+        gradient_clip_val=optimizer_cfg.get('gradient_clip_val',None),  # None -> disabled (PyTorch Lightning default)
     )
     trainer.fit(model, data_module)
     wandb.finish()

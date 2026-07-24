@@ -4,6 +4,8 @@ true SXR flux, and Vision Transformer attention maps, logged to Weights & Biases
 
 Used by train.py — not meant to be run standalone.
 """
+import random
+
 import wandb
 from pytorch_lightning import Callback
 import matplotlib.pyplot as plt
@@ -22,30 +24,37 @@ class ImagePredictionLogger_SXR(Callback):
     comparing predicted vs. ground-truth flare intensities.
     """
 
-    def __init__(self, data_samples, sxr_norm):
+    def __init__(self, val_ds, num_samples, sxr_norm):
         """
-        Initialize callback with validation samples and normalization parameters.
+        Initialize callback with the validation dataset and normalization parameters.
 
         Parameters
         ----------
-        data_samples : list
-            List of validation samples (AIA image, SXR target pairs).
+        val_ds : Dataset
+            Validation dataset to draw a fresh random sample from each epoch.
+        num_samples : int
+            Number of samples to draw per validation epoch.
         sxr_norm : np.ndarray
             Normalization statistics used to unnormalize predicted flux values.
         """
         super().__init__()
-        self.data_samples = data_samples
+        self.val_ds = val_ds
+        self.num_samples = num_samples
         self.sxr_norm = sxr_norm
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """
-        Log scatter plots comparing predicted and true SXR flux values
-        at the end of each validation epoch.
+        Log scatter plots comparing predicted and true SXR flux values,
+        sampled randomly from the validation set, at the end of each epoch.
         """
         true_sxr = []
         pred_sxr = []
 
-        for aia, target in self.data_samples:
+        n = min(self.num_samples, len(self.val_ds))
+        indices = random.sample(range(len(self.val_ds)), n)
+        data_samples = [self.val_ds[i] for i in indices]
+
+        for aia, target in data_samples:
             aia = aia.to(pl_module.device).unsqueeze(0)
             # forward() always returns a tuple (global_flux_raw, ...); we only need the flux.
             pred, *_ = pl_module(aia, return_attention=False)
@@ -117,16 +126,18 @@ class AttentionMapCallback(Callback):
             self._visualize_attention(trainer, pl_module)
 
     def _visualize_attention(self, trainer, pl_module):
-        """Generate and log attention maps from the model's attention weights."""
-        val_dataloader = trainer.val_dataloaders
-        if val_dataloader is None:
+        """Generate and log attention maps from the model's attention weights,
+        for a fresh random sample of the validation set each epoch."""
+        val_ds = trainer.datamodule.val_ds if trainer.datamodule else None
+        if not val_ds:
             return
 
+        was_training = pl_module.training
         pl_module.eval()
         with torch.no_grad():
-            batch = next(iter(val_dataloader))
-            imgs, labels = batch
-            imgs = imgs[:self.num_samples].to(pl_module.device)
+            n = min(self.num_samples, len(val_ds))
+            indices = random.sample(range(len(val_ds)), n)
+            imgs = torch.stack([val_ds[i][0] for i in indices]).to(pl_module.device)
 
             # forward(return_attention=True) -> (global_flux_raw, attention_weights, patch_flux_raw)
             _, attention_weights, patch_flux_raw = pl_module(imgs, return_attention=True)
@@ -142,6 +153,9 @@ class AttentionMapCallback(Callback):
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(fig)})
                 plt.close(fig)
+
+        if was_training:
+            pl_module.train()
 
     def _plot_attention_map(self, image, attention_weights, sample_idx, epoch, patch_size, patch_flux=None):
         """Plot and return a visualization of the attention heatmaps for a single image."""

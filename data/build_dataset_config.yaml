@@ -17,6 +17,8 @@ aia:
 sxr:
   raw_dir:      "./foxes_data/SXR_raw"         # raw netCDF from download/download_sxr.py
   combined_dir: "./foxes_data/SXR_combined"    # one interpolated CSV per satellite
+  apply_pre_goes16_scaling: false    # apply legacy scaling to GOES-13/14/15 (pre-GOES-16) flux;
+                                     # set false if your files are already scaled (e.g. NOAA's newest reprocessing)
 
 output:
   sxr_dir:         "./foxes_data/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
@@ -42,14 +44,18 @@ steps:
 # aia.processed_dir and output.sxr_dir in place, using the same date ranges
 # so a given timestamp lands in the same split for both.
 split:
-  train_range: null   # e.g. ["2012-01-01", "2022-12-31"]; null with the others -> month-based default
-  val_range:   null   # e.g. ["2023-01-01", "2023-06-30"]
-  test_range:  null   # e.g. ["2023-08-01", "2023-08-31"]
+  # Chronological split with ~1-month buffers to avoid active-region leakage
+  # across boundaries: train covers solar cycle 24's rise/max/decline, val
+  # lands on the cycle-24 minimum/transition, test is cycle-25's rise --
+  # genuinely unseen solar-cycle conditions, matching real forecasting deployment.
+  train_range: ["2010-01-01", "2018-10-31"]
+  val_range:   ["2018-12-01", "2020-10-31"]
+  test_range:  ["2020-12-01", "2024-01-01"]
   copy_files:  false  # copy instead of move
 
 # Optional — only needed if you're training, not for running inference
 # against a released checkpoint. Requires steps.split to have run (computes
 # stats from the train split only).
 sxr_normalization:
-  compute:     false
+  compute:     true
   output_path: "./foxes_data/normalized_sxr.npy"

@@ -15,14 +15,14 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 #   [0, 1]          - those specific GPUs
 #   "all"           - every available GPU
 #   -1              - CPU only
-gpu_ids: -1
+gpu_ids: 0
 
-batch_size: 6
+batch_size: 16
 epochs: 250
 
 # Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
 # before starting. Takes one extra pass over the training set.
-calculate_base_weights: false
+calculate_base_weights: true
 
 vit_architecture:
   embed_dim: 256
@@ -45,6 +45,10 @@ vit_architecture:
 
 optimizer:
   weight_decay: 0.00001   # AdamW weight decay
+  # Optional: clips gradient norm - guards against loss spikes (e.g. a rare
+  # X-class sample with its 43x loss weight) blowing up into a NaN that never
+  # recovers. Omit this key or set it to null to disable clipping entirely.
+  gradient_clip_val: None
   scheduler:              # CosineAnnealingWarmRestarts
     T_0: 250
     T_mult: 2
@@ -86,8 +90,8 @@ logging:
   log_every_n_steps: 10   # Trainer step-logging interval
 
 callbacks:
-  sxr_plot_num_samples: 4          # validation samples shown in the pred-vs-true SXR plot
-  attention_num_samples: 4         # validation samples visualized per attention-map epoch
+  sxr_plot_num_samples: 8          # validation samples shown in the pred-vs-true SXR plot
+  attention_num_samples: 8         # validation samples visualized per attention-map epoch
   attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
 
 data:
@@ -98,12 +102,12 @@ data:
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
-  entity: ""  # your W&B username or team name
+  entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
   project: FOXES
   job_type: training
   tags:
     - aia
     - sxr
     - regression
-  run_name: run_1
+  run_name: SDOML-run1
   notes: AIA to SXR translation

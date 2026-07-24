@@ -96,12 +96,25 @@ class ViTLocal(pl.LightningModule):
         imgs, sxr = batch
         raw_preds, raw_patch_contributions = self.model(imgs, self.sxr_norm)
         raw_preds_squeezed = torch.squeeze(raw_preds)
+
+        if not torch.isfinite(raw_preds_squeezed).all():
+            raise RuntimeError(
+                f"Non-finite model output in {mode} step at global_step={self.global_step}: "
+                f"raw_preds range=[{raw_preds_squeezed.min().item()}, {raw_preds_squeezed.max().item()}], "
+                f"imgs range=[{imgs.min().item()}, {imgs.max().item()}], "
+                f"sxr (normalized target) range=[{sxr.min().item()}, {sxr.max().item()}]. "
+                "This means the model itself produced NaN/Inf before reaching the loss -- "
+                "an activation blowup, not a data or loss-weighting issue."
+            )
+
         sxr_un = unnormalize_sxr(sxr, self.sxr_norm)
 
         norm_preds_squeezed = normalize_sxr(raw_preds_squeezed, self.sxr_norm)
-        # Use adaptive rare event loss
+        # Use adaptive rare event loss. Only train batches should feed the
+        # per-class error history the adaptive multipliers are computed from --
+        # otherwise val/test performance silently leaks into training dynamics.
         loss, weights = self.adaptive_loss.calculate_loss(
-            norm_preds_squeezed, sxr, sxr_un
+            norm_preds_squeezed, sxr, sxr_un, update_tracking=(mode == "train")
         )
 
         # Also calculate huber loss for logging
@@ -515,10 +528,11 @@ class SXRRegressionDynamicLoss:
         self.base_weights = base_weights if base_weights is not None else dict(self.DEFAULT_BASE_WEIGHTS)
         self.multiplier_params = {**self.DEFAULT_ADAPTIVE_MULTIPLIERS, **(adaptive_multipliers or {})}
 
-    def calculate_loss(self, preds_norm, sxr_norm, sxr_un):
+    def calculate_loss(self, preds_norm, sxr_norm, sxr_un, update_tracking=True):
         base_loss = F.huber_loss(preds_norm, sxr_norm, delta=self.huber_delta, reduction='none')
         weights = self._get_adaptive_weights(sxr_un)
-        self._update_tracking(sxr_un, sxr_norm, preds_norm)
+        if update_tracking:
+            self._update_tracking(sxr_un, sxr_norm, preds_norm)
         weighted_loss = base_loss * weights
         loss = weighted_loss.mean()
         return loss, weights
