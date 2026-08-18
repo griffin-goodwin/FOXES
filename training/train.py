@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from training.callbacks import AttentionMapCallback, ImagePredictionLogger_SXR
 from forecasting.dataset import AIAGOESDataModule
 from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
+from forecasting.model_uncertainty import GaussianNLLViTLocal
 
 
 def resolve_config_variables(config_dict):
@@ -180,6 +181,7 @@ def main():
         batch_size=config_data['batch_size'],
         num_workers=data_cfg.get('num_workers', min(8, os.cpu_count() or 1)),
         sxr_norm=sxr_norm,
+        aia_norm_path=data_cfg.get('aia_norm_path'),
         wavelengths=wavelengths,
     )
     data_module.setup()
@@ -207,19 +209,33 @@ def main():
 
     base_weights = (get_base_weights(data_module, sxr_norm)
                     if config_data.get('calculate_base_weights') else loss_cfg.get('base_weights'))
-    model = ViTLocal(
+    model_type = config_data.get('model_type', 'deterministic')
+    common_model_kwargs = dict(
         model_kwargs=config_data['vit_architecture'],
         sxr_norm=sxr_norm,
         base_weights=base_weights,
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
-        loss_kwargs={
-            'window_size': loss_cfg.get('window_size', 15000),
-            'huber_delta': loss_cfg.get('huber_delta', 0.3),
-            'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
-        },
-        diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
     )
+    if model_type == 'gaussian_nll':
+        model = GaussianNLLViTLocal(
+            **common_model_kwargs,
+            uncertainty_kwargs=config_data.get('uncertainty', {}),
+        )
+    elif model_type == 'deterministic':
+        model = ViTLocal(
+            **common_model_kwargs,
+            diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
+            loss_kwargs={
+                'window_size': loss_cfg.get('window_size', 15000),
+                'huber_delta': loss_cfg.get('huber_delta', 0.3),
+                'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
+            },
+        )
+    else:
+        raise ValueError(
+            f"Unknown model_type {model_type!r}; expected 'deterministic' or 'gaussian_nll'"
+        )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=config_data['data']['checkpoints_dir'],

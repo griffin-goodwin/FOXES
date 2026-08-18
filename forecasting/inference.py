@@ -34,7 +34,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from forecasting.dataset import AIAGOESDataset
+from forecasting.dataset import AIAGOESDataset, AIANormTransform
 from forecasting.model import ViTLocal
 
 
@@ -363,10 +363,18 @@ def main():
     # Check if running in prediction-only mode
     prediction_only = config_data.get('prediction_only', 'false').lower() == 'true'
 
-    dataset = AIAGOESDataset(aia_dir=config_data['data']['aia_dir'],
-                              sxr_dir=config_data['data'].get('sxr_dir') if not prediction_only else None,
-                              wavelengths=config_data['wavelengths'],
-                              only_prediction=prediction_only)
+    aia_norm_path = config_data['data'].get('aia_norm_path')
+    aia_transform = (
+        AIANormTransform.from_file(aia_norm_path, config_data['wavelengths'])
+        if aia_norm_path else None
+    )
+    dataset = AIAGOESDataset(
+        aia_dir=config_data['data']['aia_dir'],
+        sxr_dir=config_data['data'].get('sxr_dir') if not prediction_only else None,
+        wavelengths=config_data['wavelengths'],
+        aia_transform=aia_transform,
+        only_prediction=prediction_only,
+    )
 
     times = dataset.samples
     

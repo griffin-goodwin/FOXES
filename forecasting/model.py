@@ -256,13 +256,13 @@ class VisionTransformerLocal(nn.Module):
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
-        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean) - 1e-8, min=1e-15, max=1)
+        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean) - 1e-8, min=0, max=1)
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
 
         # Ensure global flux is never zero (add small epsilon if needed)
-        global_flux_raw = torch.clamp(global_flux_raw, min=1e-15)
+        global_flux_raw = torch.clamp(global_flux_raw, min=0)
 
         if return_attention:
             return global_flux_raw, attention_weights, patch_flux_raw

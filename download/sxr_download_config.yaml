@@ -11,9 +11,9 @@
 #   python download/download_sxr.py --config download/sxr_download_config.yaml
 # =============================================================================
 
-save_dir: "./foxes_data/SXR_raw"
+save_dir: "/home/ubuntu/SXR_raw"
 
-start_date: "2023-08-01"
-end_date:   "2023-08-02"
+start_date: "2023-01-01"
+end_date:   "2024-01-01"
 
-max_workers: 4
+max_workers: 2

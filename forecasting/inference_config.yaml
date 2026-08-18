@@ -21,6 +21,8 @@ data:
   aia_dir:         "./foxes_data/AIA_processed/test"   # ignored if prediction_only: "true"
   sxr_dir:         "./foxes_data/SXR_processed/test"   # ignored if prediction_only: "true"
   sxr_norm_path:   "./trained_weights_and_normalization/normalized_sxr.npy"
+  # Enable only for a checkpoint trained with this exact AIA transform/artifact.
+  aia_norm_path:   null
   checkpoint_path: "./trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
 output_path: "./foxes_data/inference/predictions.csv"

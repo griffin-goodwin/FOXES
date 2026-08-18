@@ -49,22 +49,33 @@ class ImagePredictionLogger_SXR(Callback):
         """
         true_sxr = []
         pred_sxr = []
+        lower_sxr = []
+        upper_sxr = []
 
         n = min(self.num_samples, len(self.val_ds))
         indices = random.sample(range(len(self.val_ds)), n)
         data_samples = [self.val_ds[i] for i in indices]
 
-        for aia, target in data_samples:
-            aia = aia.to(pl_module.device).unsqueeze(0)
-            # forward() always returns a tuple (global_flux_raw, ...); we only need the flux.
-            pred, *_ = pl_module(aia, return_attention=False)
-            pred_sxr.append(pred.item())
-            true_sxr.append(target.item())
+        with torch.no_grad():
+            for aia, target in data_samples:
+                aia = aia.to(pl_module.device).unsqueeze(0)
+                if getattr(pl_module, 'predicts_uncertainty', False):
+                    pred, lower, upper = pl_module.predict_interval(aia, z=1.96)
+                    lower_sxr.append(lower.item())
+                    upper_sxr.append(upper.item())
+                else:
+                    pred, *_ = pl_module(aia, return_attention=False)
+                pred_sxr.append(pred.item())
+                true_sxr.append(target.item())
 
         true_unorm = unnormalize_sxr(np.array(true_sxr, dtype=np.float32), self.sxr_norm)
-        pred_unnorm = unnormalize_sxr(np.array(pred_sxr, dtype=np.float32), self.sxr_norm)
-
-        fig1 = self.plot_aia_sxr(true_unorm, pred_unnorm)
+        # Both model variants already return predictions in raw W/m^2 units.
+        fig1 = self.plot_aia_sxr(
+            true_unorm,
+            np.asarray(pred_sxr),
+            np.asarray(lower_sxr) if lower_sxr else None,
+            np.asarray(upper_sxr) if upper_sxr else None,
+        )
         trainer.logger.experiment.log({"Soft X-ray flux plots": wandb.Image(fig1)})
         plt.close(fig1)
 
@@ -72,13 +83,31 @@ class ImagePredictionLogger_SXR(Callback):
     AXIS_MIN = 1e-8
     AXIS_MAX = 1e-3
 
-    def plot_aia_sxr(self, val_sxr, pred_sxr):
+    def plot_aia_sxr(self, val_sxr, pred_sxr, lower_sxr=None, upper_sxr=None):
         """Log-log parity plot: predicted vs. true SXR flux, with a 1:1 reference line."""
         fig, ax = plt.subplots(1, 1, figsize=(4, 4))
 
         ax.plot([self.AXIS_MIN, self.AXIS_MAX], [self.AXIS_MIN, self.AXIS_MAX],
                 color='gray', linestyle='--', linewidth=1, label='Perfect prediction')
-        ax.scatter(val_sxr, pred_sxr, color='blue', alpha=0.7,s=10, label='Predictions')
+        if lower_sxr is not None and upper_sxr is not None:
+            # Log axes cannot display zero; clipping is visualization-only.
+            visible_predictions = np.maximum(pred_sxr, self.AXIS_MIN)
+            visible_lower = np.clip(lower_sxr, self.AXIS_MIN, visible_predictions)
+            visible_upper = np.maximum(upper_sxr, visible_predictions)
+            errors = np.vstack((
+                visible_predictions - visible_lower,
+                visible_upper - visible_predictions,
+            ))
+            ax.errorbar(
+                val_sxr, visible_predictions, yerr=errors, fmt='o', color='blue',
+                ecolor='cornflowerblue', alpha=0.7, markersize=3, capsize=2,
+                linewidth=0.8, label='Predictions (95% interval)',
+            )
+        else:
+            ax.scatter(
+                val_sxr, pred_sxr, color='blue', alpha=0.7, s=10,
+                label='Predictions',
+            )
 
         ax.set_xscale('log')
         ax.set_yscale('log')
@@ -139,8 +168,13 @@ class AttentionMapCallback(Callback):
             indices = random.sample(range(len(val_ds)), n)
             imgs = torch.stack([val_ds[i][0] for i in indices]).to(pl_module.device)
 
-            # forward(return_attention=True) -> (global_flux_raw, attention_weights, patch_flux_raw)
-            _, attention_weights, patch_flux_raw = pl_module(imgs, return_attention=True)
+            outputs = pl_module(imgs, return_attention=True)
+            if getattr(pl_module, 'predicts_uncertainty', False):
+                _, _, attention_weights, patch_flux_raw, patch_variance_raw = outputs
+            else:
+                # (global_flux_raw, attention, patch_flux_raw)
+                _, attention_weights, patch_flux_raw = outputs
+                patch_variance_raw = None
 
             for sample_idx in range(min(self.num_samples, imgs.size(0))):
                 fig = self._plot_attention_map(
@@ -149,7 +183,9 @@ class AttentionMapCallback(Callback):
                     sample_idx,
                     trainer.current_epoch,
                     patch_size=self.patch_size,
-                    patch_flux=patch_flux_raw[sample_idx] if patch_flux_raw is not None else None
+                    patch_flux=patch_flux_raw[sample_idx] if patch_flux_raw is not None else None,
+                    patch_std=(torch.sqrt(patch_variance_raw[sample_idx])
+                               if patch_variance_raw is not None else None),
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(fig)})
                 plt.close(fig)
@@ -157,7 +193,8 @@ class AttentionMapCallback(Callback):
         if was_training:
             pl_module.train()
 
-    def _plot_attention_map(self, image, attention_weights, sample_idx, epoch, patch_size, patch_flux=None):
+    def _plot_attention_map(self, image, attention_weights, sample_idx, epoch,
+                            patch_size, patch_flux=None, patch_std=None):
         """Plot and return a visualization of the attention heatmaps for a single image."""
         img_np = image.cpu().numpy()
         if len(img_np.shape) == 3 and img_np.shape[0] in [1, 3]:
@@ -231,10 +268,19 @@ class AttentionMapCallback(Callback):
             axes[1, 1].set_title('Patch Flux')
             axes[1, 1].axis('off')
 
-        axes[1, 2].hist(attention_map.flatten(), bins=50, alpha=0.7)
-        axes[1, 2].set_title('Attention Distribution')
-        axes[1, 2].set_xlabel('Attention Weight')
-        axes[1, 2].set_ylabel('Frequency')
+        if patch_std is not None:
+            patch_std_np = patch_std.cpu().numpy().reshape(grid_h, grid_w)
+            im4 = axes[1, 2].imshow(
+                patch_std_np, cmap='magma', interpolation='nearest'
+            )
+            axes[1, 2].set_title('Patch Flux Std [W/m²]')
+            axes[1, 2].axis('off')
+            plt.colorbar(im4, ax=axes[1, 2])
+        else:
+            axes[1, 2].hist(attention_map.flatten(), bins=50, alpha=0.7)
+            axes[1, 2].set_title('Attention Distribution')
+            axes[1, 2].set_xlabel('Attention Weight')
+            axes[1, 2].set_ylabel('Frequency')
 
         plt.tight_layout()
         return fig

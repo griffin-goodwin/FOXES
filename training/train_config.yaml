@@ -18,11 +18,25 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 gpu_ids: 0
 
 batch_size: 16
-epochs: 250
+epochs: 40
+
+# deterministic: original adaptive Huber model
+# gaussian_nll: predicts input-dependent variance in normalized log-SXR space
+model_type: gaussian_nll
+
+uncertainty:
+  # Typical global training flux / patch count sets each contribution's scale.
+  patch_flux_scale_multiplier: 1.0
+  # Softplus maps each patch's raw score to a positive relative std deviation.
+  relative_std_floor: 0.0025
+  relative_std_max: 20.0
+  # Adds a typical-flux scale so dark patches can retain nonzero uncertainty.
+  patch_scale_floor_fraction: 1.0
+  use_class_weights: false
 
 # Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
 # before starting. Takes one extra pass over the training set.
-calculate_base_weights: true
+calculate_base_weights: false
 
 vit_architecture:
   embed_dim: 256
@@ -40,19 +54,19 @@ vit_architecture:
   #              patches (the flipped local-attention mask it was trained with)
   #   local    - true local attention: each patch attends to its neighborhood
   #   none     - standard full/global attention (no masking)
-  mask_mode: inverted
+  mask_mode: none
   local_window: 9   # neighbourhood side length (patches), used by inverted/local
 
 optimizer:
-  weight_decay: 0.00001   # AdamW weight decay
+  weight_decay: 0.0001   # AdamW weight decay
   # Optional: clips gradient norm - guards against loss spikes (e.g. a rare
   # X-class sample with its 43x loss weight) blowing up into a NaN that never
   # recovers. Omit this key or set it to null to disable clipping entirely.
-  gradient_clip_val: None
+  gradient_clip_val: 1.0
   scheduler:              # CosineAnnealingWarmRestarts
-    T_0: 250
-    T_mult: 2
-    eta_min: 0.0000001
+    T_0: 40
+    T_mult: 1
+    eta_min: 0.000001
 
 loss:
   huber_delta: 0.3          # delta for the underlying Huber loss
@@ -95,10 +109,12 @@ callbacks:
   attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
 
 data:
-  aia_dir: "./foxes_data/AIA_processed"
-  sxr_dir: "./foxes_data/SXR_processed"
-  sxr_norm_path: "./foxes_data/normalized_sxr.npy"
-  checkpoints_dir: "./foxes_data/checkpoints/"
+  aia_dir: "/data/AIA_processed"
+  sxr_dir: "/data/SXR_processed"
+  sxr_norm_path: "/data/SXR_processed/normalized_sxr.npy"
+  # Must be computed from the training split only.
+  aia_norm_path: "/data/aia_q90_asinh_q99999_norm_streamed.npz"
+  checkpoints_dir: "/data/checkpoints/"
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:

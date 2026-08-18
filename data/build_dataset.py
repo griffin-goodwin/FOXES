@@ -11,6 +11,9 @@ Usage:
 """
 import argparse
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -44,6 +47,7 @@ def main():
     steps = config.get('steps', {})
     split = config.get('split', {})
     norm = config.get('sxr_normalization', {})
+    aia_norm = config.get('aia_normalization', {})
 
     print("=== FOXES Dataset Build ===")
 
@@ -97,6 +101,22 @@ def main():
         sxr_norm = compute_sxr_norm(os.path.join(output['sxr_dir'], 'train'))
         np.save(norm['output_path'], sxr_norm)
         print(f"Saved SXR normalization to {norm['output_path']}")
+
+    if aia_norm.get('compute', False):
+        print("\n--- Optional: Compute AIA normalization stats (from the train split) ---")
+        command = [
+            sys.executable, str(Path(__file__).with_name('aia_normalization.py')),
+            '--train-dir', os.path.join(aia['processed_dir'], 'train'),
+            '--output', aia_norm['output_path'],
+            '--checkpoint', aia_norm['checkpoint_path'],
+            '--summary-csv', aia_norm['summary_csv_path'],
+            '--batch-size', str(aia_norm.get('batch_size', 2048)),
+            '--load-workers', str(aia_norm.get('load_workers', os.cpu_count() or 1)),
+            '--reduce-workers', str(aia_norm.get('reduce_workers', os.cpu_count() or 1)),
+            '--checkpoint-every', str(aia_norm.get('checkpoint_every', 1)),
+        ]
+        subprocess.run(command, check=True)
+        print(f"Saved AIA normalization to {aia_norm['output_path']}")
 
     print("\nDataset build complete!")
 
