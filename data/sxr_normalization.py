@@ -64,7 +64,7 @@ def compute_sxr_norm(sxr_dir):
             if not np.isfinite(sxr) or sxr < 0:
                 print(f"Skipping invalid SXR value in {f}: {sxr}")
                 continue
-            sxr_values.append(np.log10(sxr))
+            sxr_values.append(np.log10(sxr + 1e-8))
         except Exception as e:
             print(f"Failed to load SXR file {f}: {e}")
             continue
