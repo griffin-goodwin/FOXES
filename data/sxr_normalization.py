@@ -1,12 +1,16 @@
 """
 Compute log-space mean/std normalization stats over processed SXR .npy files.
 Only needed for training, not for running inference against a released
-checkpoint. Called by build_dataset.py — not meant to be run standalone.
+checkpoint. Called by build_dataset.py, or run directly to regenerate only the
+normalization artifact after the dataset has already been built.
 """
+import argparse
 import numpy as np
 from pathlib import Path
 import glob
 import os
+
+SXR_LOG_OFFSET = 1e-8
 
 
 def compute_sxr_norm(sxr_dir):
@@ -27,8 +31,8 @@ def compute_sxr_norm(sxr_dir):
     Returns
     -------
     tuple of (float, float)
-        - mean : Mean of log10-transformed SXR flux values.
-        - std : Standard deviation of log10-transformed SXR flux values.
+        - mean : Mean of log10(SXR + 1e-8) flux values.
+        - std : Standard deviation of log10(SXR + 1e-8) flux values.
 
     Raises
     ------
@@ -40,7 +44,7 @@ def compute_sxr_norm(sxr_dir):
     Notes
     -----
     - Files are expected to contain scalar SXR flux values in W/m².
-    - Invalid (non-finite or negative) values are automatically skipped.
+    - Invalid (non-finite or nonpositive) values are automatically skipped.
     - The logarithmic transform helps stabilize the variance and normalize scale differences.
     """
     sxr_dir = Path(sxr_dir).resolve()
@@ -61,10 +65,10 @@ def compute_sxr_norm(sxr_dir):
         try:
             sxr = np.load(f)
             sxr = np.atleast_1d(sxr).flatten()[0]
-            if not np.isfinite(sxr) or sxr < 0:
+            if not np.isfinite(sxr) or sxr <= 0:
                 print(f"Skipping invalid SXR value in {f}: {sxr}")
                 continue
-            sxr_values.append(np.log10(sxr))
+            sxr_values.append(np.log10(sxr + SXR_LOG_OFFSET))
         except Exception as e:
             print(f"Failed to load SXR file {f}: {e}")
             continue
@@ -77,3 +81,25 @@ def compute_sxr_norm(sxr_dir):
     std = np.std(sxr_values)
     print(f"Computed SXR normalization: mean={mean}, std={std}")
     return mean, std
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--sxr-dir", type=Path, required=True,
+        help="Training-split directory containing scalar SXR .npy files.",
+    )
+    parser.add_argument(
+        "--output", type=Path, required=True,
+        help="Destination .npy normalization artifact.",
+    )
+    args = parser.parse_args()
+
+    mean, std = compute_sxr_norm(args.sxr_dir)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    np.save(args.output, np.asarray([mean, std], dtype=np.float32))
+    print(f"Saved SXR normalization to {args.output.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

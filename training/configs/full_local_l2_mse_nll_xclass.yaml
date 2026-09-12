@@ -1,0 +1,155 @@
+# Full-data promotion of the strongest X-class RMSE screening architecture.
+#
+# This run starts from scratch. It promotes the hyperparameters from the
+# standard Gaussian local-layer-2 subset run; it does not resume that run's
+# weights. There is intentionally no max_steps entry, so all 25 epochs run.
+#
+# Launch from the repository root with:
+#   /home/ubuntu/anaconda3/envs/foxes/bin/python training/train.py \
+#     --config training/configs/full_local_l2_mse_nll_xclass.yaml
+
+wavelengths:
+  - 94
+  - 131
+  - 171
+  - 193
+  - 211
+  - 304
+  - 335
+
+# One GPU keeps the effective batch size identical to the winning screen.
+gpu_ids: 0
+batch_size: 64
+epochs: 25
+seed: 42
+accumulate_grad_batches: 1
+
+model_type: gaussian_nll
+
+uncertainty:
+  # The point head is trained directly with MSE. Gaussian NLL trains the
+  # uncertainty head with the point prediction and shared features detached,
+  # so uncertainty gradients cannot move the point prediction/backbone.
+  mean_loss: mse
+  train_uncertainty: true
+  beta_nll_beta: 0.0
+
+  relative_std_floor: 0.0025
+  relative_std_max: 20.0
+  patch_scale_floor_fraction: 1.0
+  patch_flux_scale_multiplier: 1.0
+  max_abs_log10_patch_multiplier: 8.0
+  mean_huber_delta: 1.0
+
+  spatial_sparsity:
+    weight: 0.0
+    top_fraction: 0.05
+    gate_center_flux: 5.0e-06
+    gate_width_dex: 0.25
+
+calculate_base_weights: false
+
+vit_architecture:
+  embed_dim: 512
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  hidden_dim: 1024
+  num_heads: 8
+  num_layers: 2
+  dropout: 0.1
+  learning_rate: 5.0e-05
+  mask_mode: local
+  local_window: 3
+
+optimizer:
+  weight_decay: 0.0001
+  gradient_clip_val: null
+  scheduler:
+    T_max: 25
+    eta_min: 1.0e-06
+
+checkpoint:
+  # Coverage is a diagnostic with an ideal target (0.68/0.95), not something
+  # to maximize. Keep the five best X-RMSE checkpoints, then compare their
+  # X-class coverage and NLL when choosing the final checkpoint.
+  monitor: val_class/X/rmse_dex
+  mode: min
+  save_top_k: 5
+
+early_stopping:
+  enabled: false
+  monitor: val_class/X/rmse_dex
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
+
+logging:
+  log_every_n_steps: 10
+
+callbacks:
+  per_class_metrics_enabled: true
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 5
+  spatial_quantile_enabled: false
+  spatial_quantile_num_samples: 5
+  spatial_quantile_log_every_n_epochs: 1
+  spatial_gaussian_enabled: true
+  spatial_gaussian_num_samples: 5
+  spatial_gaussian_log_every_n_epochs: 1
+  attention_enabled: false
+  attention_num_samples: 8
+  attention_log_every_n_epochs: 1
+
+data:
+  aia_dir: /data/FOXES_OG/AIA_processed
+  sxr_dir: /data/FOXES_OG/SXR_processed
+  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+  # FOXES_OG AIA arrays are already in the representation used by screening.
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/FULL-LOCAL-L2-EMBED512-P8-W3-MSE-BETA0-NOSPARSE-NOCLIP
+  num_workers: 8
+
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  project: FOXES-SDOML
+  job_type: training
+  tags:
+    - full-data
+    - foxes-og
+    - screen-winner
+    - selected-by-x-rmse
+    - gaussian-nll
+    - mean-loss-mse
+    - detached-uncertainty
+    - beta-0
+    - train-uncertainty
+    - local-attention
+    - window-3
+    - embed-512
+    - patch-8
+    - layers-2
+    - sparsity-0
+    - gradient-clip-off
+    - batch-64
+    - lr-5e-05
+  run_name: full-local-l2-embed512-p8-w3-mse-beta0-nosparse-noclip-xrmse
+  notes: >-
+    Full FOXES_OG run from scratch using the standard local layer-2 Gaussian
+    model selected for its subset X-class RMSE. The mean uses direct MSE;
+    detached Gaussian NLL trains uncertainty with beta=0. Checkpoints are
+    ranked by X-class RMSE, with X 68/95 coverage and NLL used for final review.
+
+promotion:
+  source_config: /data/FOXES_screening/runs-contextual-local-depth/screen-local-layers2-subset-embed512-p8-w3-mse-beta0-nosparse-noclip-lr5e-05-steps5000-tmax25/train_config.yaml
+  source_data_mode: subset-og-quick
+  destination_data_mode: full-FOXES_OG
+  initialization: scratch
+  source_best_checkpoint_metric: val/mse
+  source_selected_x_rmse_dex: 0.119976
+  source_selected_x_coverage_68: 1.0
+  source_selected_x_coverage_95: 1.0
+  source_x_validation_count: 20

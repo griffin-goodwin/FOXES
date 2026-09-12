@@ -18,30 +18,55 @@ data:
   # Point these directly at the folder of .npy files you want to run the model
   # on — no special subfolder naming (e.g. "test/") is required or assumed.
   # Defaults below point at the test split data/build_dataset.py produces.
-  aia_dir:         "./foxes_data/AIA_processed/test"   # ignored if prediction_only: "true"
-  sxr_dir:         "./foxes_data/SXR_processed/test"   # ignored if prediction_only: "true"
-  sxr_norm_path:   "./trained_weights_and_normalization/normalized_sxr.npy"
+  aia_dir:         "/data/FOXES_OG/AIA_processed/test"   # ignored if prediction_only: "true"
+  sxr_dir:         "/data/FOXES_OG/SXR_processed/test"   # ignored if prediction_only: "true"
+  sxr_norm_path:   "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
   # Enable only for a checkpoint trained with this exact AIA transform/artifact.
-  aia_norm_path:   null
-  checkpoint_path: "./trained_weights_and_normalization/inverted-attention-mask.ckpt"
+  aia_norm_path:   #"/data/aia_q90_asinh_q99999_norm_streamed.npz"
+  checkpoint_path: "/data/checkpoints/EMBED512-LAYERS12-HEADS8-LOCAL3-WEIGHTED-HUBER015/SDOML-RTX-6000-EMBED512-LAYERS8-LOCAL3-WEIGHTED-HUBER015-epoch=09-step=012160.ckpt"
 
-output_path: "./foxes_data/inference/predictions.csv"
+# auto detects Gaussian and spatial-quantile uncertainty checkpoints; explicit
+# alternatives are deterministic, gaussian_nll,
+# gaussian_nll_background_excess, gaussian_nll_og, and quantile.
+model_type: gaussian_nll
+
+output_path: "./foxes_data/inference_patch_un/predictions.csv"
 
 # Per-sample attention weights (64x64 CSV per timestamp). Set model_params.no_weights: true to skip.
-weight_path: "./foxes_data/inference/weights/"
+weight_path: "./foxes_data/inference_patch/weights/"
 
 # Per-patch flux contribution maps (64x64 CSV per timestamp) — saved automatically
 # during inference whenever flux_path is set and model_params.no_flux is false (default).
-flux_path:   "./foxes_data/inference/flux/"
+flux_path:   "./foxes_data/inference_patch/flux/"
+
+# Background-plus-excess checkpoints only: optional compressed NPZ artifacts
+# with the whole-image background scalar, learned local-excess map, fixed
+# background allocation, total accounting map, and variance decompositions.
+# The ordinary flux_path above remains the total accounting map.
+component_flux_path:
+
+# Standard Gaussian checkpoints save one per-patch standard-deviation NPY.
+# Background-plus-excess checkpoints instead save sqrt(global-variance
+# contribution) maps; these are not marginal patch error bars. Quantile
+# checkpoints save q02.5/q16/q50/q84/q97.5 plus 68%/95% width maps in one NPZ.
+# Global 68%/95% intervals always go in the predictions CSV.
+patch_uncertainty_path: "./foxes_data/inference_patch/patch_uncertainty/"
 
 model_params:
   input_size: 512
   patch_size: 8
-  batch_size: 10
-  no_weights: false   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
-  no_flux:    false   # true = skip saving flux contribution maps
+  batch_size: 1024  # benchmarked at ~89 samples/s, ~26/24 GiB peak VRAM
+  no_weights: true   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
+  no_flux:    true   # true = skip saving flux contribution maps
+  no_patch_uncertainty: true  # true = skip per-patch uncertainty map files
 
-num_workers: 8    # set to 0 to disable multiprocessing (useful for debugging stalls)
+num_workers: 16   # 48 CPU cores and 685 GB of test NPY files: keep I/O prefetched
 pin_memory:  true
-use_amp:     false  # set true to enable FP16 autocast (faster on A100, may OOM on V100)
-multi_gpu:   false  # set true to use all available GPUs via DataParallel
+prefetch_factor: 2
+persistent_workers: true
+multiprocessing_context: spawn
+use_amp:     true
+amp_dtype:   bfloat16  # Blackwell-native and safer numerically than FP16
+matmul_precision: high # enables fast TF32 for operations outside autocast
+progress_update_interval: 1024
+multi_gpu:   true  # set true to use all available GPUs via DataParallel

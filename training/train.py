@@ -6,11 +6,14 @@ This script:
 2. Initializes the AIA-GOES DataModule.
 3. Configures logging with Weights & Biases.
 4. Builds and trains a Vision Transformer (ViTLocal) model.
-5. Optionally computes dynamic base class weights for flare categories (Quiet, C, M, X).
-6. Saves model checkpoints (.ckpt).
+5. Computes exact training-split class weights for probabilistic objectives when requested.
+6. Optionally computes legacy class weights for the deterministic model.
+7. Saves model checkpoints (.ckpt).
 
 Usage:
     python training/train.py --config training/train_config.yaml
+    python training/train.py --config training/train_config.yaml \
+        --ckpt-path /path/to/checkpoint.ckpt
 """
 
 import argparse
@@ -23,17 +26,38 @@ import numpy as np
 import torch
 import wandb
 import yaml
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from training.callbacks import AttentionMapCallback, ImagePredictionLogger_SXR
+from training.callbacks import (
+    AttentionMapCallback,
+    ImagePredictionLogger_SXR,
+    PerClassQuantileValidationMetrics,
+    PerClassValidationMetrics,
+    SpatialGaussianMapCallback,
+    SpatialQuantileMapCallback,
+)
 from forecasting.dataset import AIAGOESDataModule
 from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
 from forecasting.model_uncertainty import GaussianNLLViTLocal
+from forecasting.model_uncertainty_background_excess import (
+    BackgroundExcessGaussianNLLViTLocal,
+)
+from forecasting.model_uncertainty_og import OGGaussianNLLViTLocal
+from forecasting.model_quantile import QuantileViTLocal
+
+
+FIVE_CLASS_KEYS = (
+    'below_b', 'b_class', 'c_class', 'm_class', 'x_class',
+)
+FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
+GAUSSIAN_MODEL_TYPES = {
+    'gaussian_nll', 'gaussian_nll_background_excess', 'gaussian_nll_og',
+}
 
 
 def resolve_config_variables(config_dict):
@@ -126,6 +150,135 @@ def get_base_weights(data_module, sxr_norm):
     return weights
 
 
+def get_five_class_macro_weights(data_module):
+    """Count training targets and return exact <B/B/C/M/X macro weights.
+
+    Only the small scalar SXR files are read; AIA images and data transforms
+    are not loaded. For class ``k``, ``N / (5 * N_k)`` makes the expected
+    weighted sample mean equal the average of the five class-mean NLLs.
+    """
+    dataset = data_module.train_ds
+    counts = dict.fromkeys(FIVE_CLASS_KEYS, 0)
+    print("Calculating five-class macro-objective weights from training targets...")
+
+    for index, timestamp in enumerate(dataset.samples, start=1):
+        path = dataset.sxr_dir / f"{timestamp}.npy"
+        value = np.load(path, allow_pickle=False)
+        if value.size != 1:
+            raise ValueError(
+                f"Expected one SXR value in {path}, found {value.size}"
+            )
+        flux = float(value.reshape(-1)[0])
+        if not np.isfinite(flux):
+            raise ValueError(f"Non-finite SXR flux in {path}: {flux!r}")
+        if flux < 1e-7:
+            class_name = 'below_b'
+        elif flux < 1e-6:
+            class_name = 'b_class'
+        elif flux < 1e-5:
+            class_name = 'c_class'
+        elif flux < 1e-4:
+            class_name = 'm_class'
+        else:
+            class_name = 'x_class'
+        counts[class_name] += 1
+        if index % 10_000 == 0:
+            print(
+                f"Counted {index:,}/{len(dataset.samples):,} "
+                "training targets..."
+            )
+
+    empty = [name for name, count in counts.items() if count == 0]
+    if empty:
+        raise ValueError(
+            "The five-class macro objective requires at least one training example in "
+            f"every <B/B/C/M/X bin; empty bins: {empty}"
+        )
+    total = sum(counts.values())
+    weights = {
+        name: total / (len(FIVE_CLASS_KEYS) * counts[name])
+        for name in FIVE_CLASS_KEYS
+    }
+    print(f"Five-class training counts: {counts}")
+    print(
+        "Five-class macro weights: "
+        + ", ".join(
+            f"{name}={weights[name]:.4f}" for name in FIVE_CLASS_KEYS
+        )
+    )
+    return counts, weights
+
+
+def get_four_class_macro_weights(data_module, exponent=1.0):
+    """Return quiet/C/M/X weights computed from scalar training targets.
+
+    ``exponent=1`` produces inverse-frequency macro weights. ``exponent=0.5``
+    produces their square-root relative weighting. Both are normalized to an
+    expected sample weight of one, so changing the scheme does not silently
+    change the scale of the mean loss relative to uncertainty NLL. Only SXR
+    targets are read; loading all AIA images merely to count classes would
+    make startup unnecessarily costly.
+    """
+    if exponent not in {0.5, 1.0}:
+        raise ValueError("four-class weighting exponent must be 0.5 or 1.0")
+    dataset = data_module.train_ds
+    counts = dict.fromkeys(FOUR_CLASS_KEYS, 0)
+    thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
+    print("Calculating quiet/C/M/X macro weights from training targets...")
+
+    for index, timestamp in enumerate(dataset.samples, start=1):
+        path = dataset.sxr_dir / f"{timestamp}.npy"
+        value = np.load(path, allow_pickle=False)
+        if value.size != 1:
+            raise ValueError(
+                f"Expected one SXR value in {path}, found {value.size}"
+            )
+        flux = float(value.reshape(-1)[0])
+        if not np.isfinite(flux):
+            raise ValueError(f"Non-finite SXR flux in {path}: {flux!r}")
+        if flux < thresholds['c']:
+            class_name = 'quiet'
+        elif flux < thresholds['m']:
+            class_name = 'c_class'
+        elif flux < thresholds['x']:
+            class_name = 'm_class'
+        else:
+            class_name = 'x_class'
+        counts[class_name] += 1
+        if index % 10_000 == 0:
+            print(
+                f"Counted {index:,}/{len(dataset.samples):,} "
+                "training targets..."
+            )
+
+    empty = [name for name, count in counts.items() if count == 0]
+    if empty:
+        raise ValueError(
+            "The four-class macro mean objective requires at least one "
+            f"training example in every quiet/C/M/X bin; empty bins: {empty}"
+        )
+    total = sum(counts.values())
+    raw_weights = {
+        name: (total / counts[name]) ** exponent
+        for name in FOUR_CLASS_KEYS
+    }
+    expected_weight = sum(
+        counts[name] * raw_weights[name] for name in FOUR_CLASS_KEYS
+    ) / total
+    weights = {
+        name: raw_weights[name] / expected_weight
+        for name in FOUR_CLASS_KEYS
+    }
+    print(f"Four-class training counts: {counts}")
+    print(
+        "Four-class macro mean weights: "
+        + ", ".join(
+            f"{name}={weights[name]:.4f}" for name in FOUR_CLASS_KEYS
+        )
+    )
+    return counts, weights
+
+
 def resolve_devices(gpu_config):
     """Resolve accelerator/devices/strategy from the gpu_ids config value."""
     if gpu_config == -1:
@@ -146,15 +299,84 @@ def resolve_devices(gpu_config):
     return "gpu", [gpu_config], "auto"
 
 
+def resolve_resume_checkpoint(checkpoint_config, cli_checkpoint_path=None):
+    """Resolve and validate an optional checkpoint used to resume training.
+
+    The command-line value takes precedence over ``checkpoint.resume_from`` so
+    a one-off recovery can override a config without editing it. Requiring an
+    existing file catches path mistakes before datasets, W&B, or GPUs are
+    initialized.
+    """
+    checkpoint_path = (
+        cli_checkpoint_path
+        if cli_checkpoint_path is not None
+        else checkpoint_config.get('resume_from')
+    )
+    if checkpoint_path in {None, ''}:
+        return None
+    if not isinstance(checkpoint_path, (str, os.PathLike)):
+        raise TypeError(
+            "checkpoint.resume_from/--ckpt-path must be a filesystem path"
+        )
+
+    checkpoint_path = Path(checkpoint_path).expanduser()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Resume checkpoint does not exist: {checkpoint_path}"
+        )
+    return str(checkpoint_path.resolve())
+
+
+def build_checkpoint_callback(config_data, checkpoint_config):
+    """Build the checkpoint callback shared by fresh and resumed runs."""
+    return ModelCheckpoint(
+        dirpath=config_data['data']['checkpoints_dir'],
+        monitor=checkpoint_config.get('monitor', 'val_total_loss'),
+        mode=checkpoint_config.get('mode', 'min'),
+        save_top_k=checkpoint_config.get('save_top_k', 10),
+        save_last=checkpoint_config.get('save_last', False),
+        # Selection is controlled by ``monitor`` above. Avoid embedding a
+        # different metric in the filename: beta-NLL losses have incomparable
+        # scales even when runs are all selected by val/mse.
+        filename=(
+            f"{config_data['wandb']['run_name']}"
+            "-{epoch:02d}-{step:06d}"
+        ),
+    )
+
+
+def get_resume_fit_kwargs(resume_checkpoint):
+    """Return Lightning fit arguments for a trusted full-state checkpoint."""
+    if resume_checkpoint is None:
+        return {}
+    # Full training recovery needs the optimizer, scheduler, loop, and callback
+    # state. PyTorch 2.6+ otherwise defaults local torch.load calls to the
+    # restricted weights-only loader, which rejects older Lightning metadata.
+    return {
+        'ckpt_path': resume_checkpoint,
+        'weights_only': False,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train the FOXES ViTLocal model.')
     parser.add_argument('--config', type=str, default='training/train_config.yaml', required=True,
                         help='Path to train_config.yaml')
+    parser.add_argument(
+        '--ckpt-path',
+        type=str,
+        default=None,
+        help=(
+            'Checkpoint to resume from. Overrides checkpoint.resume_from in '
+            'the YAML config.'
+        ),
+    )
     args = parser.parse_args()
 
     with open(args.config, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
     config_data: dict = resolve_config_variables(config_data)
+    seed_everything(config_data.get('seed', 42), workers=True)
 
     print("Resolved paths:")
     print(f"AIA dir: {config_data['data']['aia_dir']}")
@@ -170,6 +392,11 @@ def main():
     logging_cfg = config_data.get('logging', {})
     callbacks_cfg = config_data.get('callbacks', {})
     data_cfg = config_data.get('data', {})
+    resume_checkpoint = resolve_resume_checkpoint(
+        checkpoint_cfg, args.ckpt_path
+    )
+    if resume_checkpoint is not None:
+        print(f"Resuming training state from: {resume_checkpoint}")
 
     data_module = AIAGOESDataModule(
         aia_train_dir=config_data['data']['aia_dir'] + "/train",
@@ -186,6 +413,49 @@ def main():
     )
     data_module.setup()
 
+    model_type = config_data.get('model_type', 'deterministic')
+    class_balanced_objective = (
+        model_type in GAUSSIAN_MODEL_TYPES
+        and config_data.get('uncertainty', {}).get('nll_weighting')
+        == 'five_class'
+    ) or (
+        model_type == 'quantile'
+        and config_data.get('quantile', {}).get('loss_weighting')
+        == 'five_class'
+    )
+    if class_balanced_objective:
+        five_class_counts, five_class_weights = get_five_class_macro_weights(
+            data_module
+        )
+        objective_key = (
+            'quantile' if model_type == 'quantile' else 'uncertainty'
+        )
+        config_data[objective_key]['five_class_weights'] = five_class_weights
+        config_data['computed_five_class_train_counts'] = five_class_counts
+
+    uncertainty_config = config_data.get('uncertainty', {})
+    class_weighting = uncertainty_config.get(
+        'class_weighting',
+        {
+            'four_class_macro': 'inverse_frequency',
+            'sqrt_four_class_macro': 'sqrt_inverse_frequency',
+        }.get(uncertainty_config.get('mean_loss_weighting')),
+    )
+    mean_class_balanced = (
+        model_type in GAUSSIAN_MODEL_TYPES
+        and class_weighting
+        in {'inverse_frequency', 'sqrt_inverse_frequency'}
+    )
+    if mean_class_balanced:
+        four_class_counts, four_class_weights = get_four_class_macro_weights(
+            data_module,
+            exponent=(
+                0.5 if class_weighting == 'sqrt_inverse_frequency' else 1.0
+            ),
+        )
+        config_data['uncertainty']['class_weights'] = four_class_weights
+        config_data['computed_four_class_train_counts'] = four_class_counts
+
     wandb_logger = WandbLogger(
         entity=config_data['wandb']['entity'],
         project=config_data['wandb']['project'],
@@ -196,20 +466,58 @@ def main():
         config=config_data,
     )
 
-    # Callbacks
-    sxr_plot_callback = ImagePredictionLogger_SXR(
-        data_module.val_ds, callbacks_cfg.get('sxr_plot_num_samples', 4), sxr_norm)
+    # Callbacks. Expensive visualizations can be disabled for short parameter
+    # screening runs while remaining enabled by default for normal training.
+    callbacks = []
+    if callbacks_cfg.get('per_class_metrics_enabled', True):
+        callbacks.append(
+            PerClassQuantileValidationMetrics()
+            if model_type == 'quantile'
+            else PerClassValidationMetrics()
+        )
+    if callbacks_cfg.get('sxr_plot_enabled', True):
+        callbacks.append(ImagePredictionLogger_SXR(
+            data_module.val_ds,
+            callbacks_cfg.get('sxr_plot_num_samples', 4),
+            sxr_norm,
+        ))
     patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
-    attention_callback = AttentionMapCallback(
-        patch_size=patch_size,
-        use_local_attention=True,
-        num_samples=callbacks_cfg.get('attention_num_samples', 4),
-        log_every_n_epochs=callbacks_cfg.get('attention_log_every_n_epochs', 1),
-    )
+    if (
+        model_type == 'quantile'
+        and callbacks_cfg.get('spatial_quantile_enabled', False)
+    ):
+        callbacks.append(SpatialQuantileMapCallback(
+            patch_size=patch_size,
+            num_samples=callbacks_cfg.get(
+                'spatial_quantile_num_samples', 5
+            ),
+            log_every_n_epochs=callbacks_cfg.get(
+                'spatial_quantile_log_every_n_epochs', 1
+            ),
+        ))
+    if (
+        model_type in GAUSSIAN_MODEL_TYPES
+        and callbacks_cfg.get('spatial_gaussian_enabled', False)
+    ):
+        callbacks.append(SpatialGaussianMapCallback(
+            patch_size=patch_size,
+            num_samples=callbacks_cfg.get(
+                'spatial_gaussian_num_samples', 5
+            ),
+            log_every_n_epochs=callbacks_cfg.get(
+                'spatial_gaussian_log_every_n_epochs', 1
+            ),
+        ))
+    if callbacks_cfg.get('attention_enabled', True):
+        callbacks.append(AttentionMapCallback(
+            patch_size=patch_size,
+            use_local_attention=True,
+            num_samples=callbacks_cfg.get('attention_num_samples', 4),
+            log_every_n_epochs=callbacks_cfg.get('attention_log_every_n_epochs', 1),
+        ))
 
     base_weights = (get_base_weights(data_module, sxr_norm)
                     if config_data.get('calculate_base_weights') else loss_cfg.get('base_weights'))
-    model_type = config_data.get('model_type', 'deterministic')
     common_model_kwargs = dict(
         model_kwargs=config_data['vit_architecture'],
         sxr_norm=sxr_norm,
@@ -221,6 +529,21 @@ def main():
         model = GaussianNLLViTLocal(
             **common_model_kwargs,
             uncertainty_kwargs=config_data.get('uncertainty', {}),
+        )
+    elif model_type == 'gaussian_nll_background_excess':
+        model = BackgroundExcessGaussianNLLViTLocal(
+            **common_model_kwargs,
+            uncertainty_kwargs=config_data.get('uncertainty', {}),
+        )
+    elif model_type == 'gaussian_nll_og':
+        model = OGGaussianNLLViTLocal(
+            **common_model_kwargs,
+            uncertainty_kwargs=config_data.get('uncertainty', {}),
+        )
+    elif model_type == 'quantile':
+        model = QuantileViTLocal(
+            **common_model_kwargs,
+            quantile_kwargs=config_data.get('quantile', {}),
         )
     elif model_type == 'deterministic':
         model = ViTLocal(
@@ -234,16 +557,30 @@ def main():
         )
     else:
         raise ValueError(
-            f"Unknown model_type {model_type!r}; expected 'deterministic' or 'gaussian_nll'"
+            f"Unknown model_type {model_type!r}; expected 'deterministic', "
+            "'gaussian_nll', 'gaussian_nll_background_excess', "
+            "'gaussian_nll_og', or 'quantile'"
         )
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=config_data['data']['checkpoints_dir'],
-        monitor=checkpoint_cfg.get('monitor', 'val_total_loss'),
-        mode=checkpoint_cfg.get('mode', 'min'),
-        save_top_k=checkpoint_cfg.get('save_top_k', 10),
-        filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}",
+    checkpoint_callback = build_checkpoint_callback(
+        config_data, checkpoint_cfg
     )
+    callbacks.append(checkpoint_callback)
+
+    early_stopping_cfg = config_data.get('early_stopping', {})
+    if early_stopping_cfg.get('enabled', False):
+        callbacks.append(EarlyStopping(
+            monitor=early_stopping_cfg.get(
+                'monitor', checkpoint_cfg.get('monitor', 'val_total_loss')
+            ),
+            mode=early_stopping_cfg.get(
+                'mode', checkpoint_cfg.get('mode', 'min')
+            ),
+            patience=early_stopping_cfg.get('patience', 8),
+            min_delta=early_stopping_cfg.get('min_delta', 0.0),
+            check_finite=early_stopping_cfg.get('check_finite', True),
+            verbose=early_stopping_cfg.get('verbose', True),
+        ))
 
     accelerator, devices, strategy = resolve_devices(config_data.get('gpu_ids', -1))
 
@@ -253,12 +590,20 @@ def main():
         devices=devices,
         strategy=strategy,
         max_epochs=config_data['epochs'],
-        callbacks=[sxr_plot_callback, attention_callback, checkpoint_callback],
+        max_steps=config_data.get('max_steps', -1),
+        accumulate_grad_batches=config_data.get(
+            'accumulate_grad_batches', 1
+        ),
+        callbacks=callbacks,
         logger=wandb_logger,
         log_every_n_steps=logging_cfg.get('log_every_n_steps', 10),
         gradient_clip_val=optimizer_cfg.get('gradient_clip_val',None),  # None -> disabled (PyTorch Lightning default)
     )
-    trainer.fit(model, data_module)
+    trainer.fit(
+        model,
+        data_module,
+        **get_resume_fit_kwargs(resume_checkpoint),
+    )
     wandb.finish()
     print(f"Training complete. Checkpoints saved to {config_data['data']['checkpoints_dir']}")
 

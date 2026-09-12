@@ -18,8 +18,8 @@ repo_id: "griffingoodwin04/FOXES"
 #   {aia_dir}/{local_split}/{filename}   ("validation" maps to local dir "val")
 #   {sxr_dir}/{local_split}/{filename}
 # -----------------------------------------------------------------------------
-aia_dir: "./foxes_data/AIA_processed"
-sxr_dir: "./foxes_data/SXR_processed"
+aia_dir: "/data/FOXES_OG/AIA_processed"
+sxr_dir: "/data/FOXES_OG/SXR_processed"
 
 # -----------------------------------------------------------------------------
 # Splits to download  (any subset of: train, validation, test)
@@ -32,7 +32,7 @@ splits:
 # -----------------------------------------------------------------------------
 # Subsampling  (set subsample: true to download a random subset)
 # -----------------------------------------------------------------------------
-subsample: true
+subsample: false
 subsample_seed: 42
 
 # Number of samples per split when subsampling.
@@ -51,11 +51,16 @@ shuffle_buffer_size: 10
 # Point this at the root dir containing per-split subdirs (train/, validation/
 # or val/, test/) and streaming + HF Hub login are skipped entirely.
 # -----------------------------------------------------------------------------
-local_parquet_dir: null
-delete_parquet_after: false   # delete each parquet file once its rows are written
+local_parquet_dir: /data/FOXES_OG/parquet/default
+delete_parquet_after: true   # delete each parquet file once its rows are written
 
 # -----------------------------------------------------------------------------
 # Misc
 # -----------------------------------------------------------------------------
-num_workers: 8     # parallel threads for disk writes (I/O bound, so > CPU count is fine)
+num_workers: 48     # parallel threads for disk writes (I/O bound, so > CPU count is fine)
 print_every: 5     # log progress every N rows submitted
+
+# Used only by --repair-existing-numpy. This repairs flattened AIA .npy shape
+# headers in place; it does not rewrite the multi-terabyte pixel payload.
+repair_numpy_workers: 16
+repair_numpy_print_every: 5000

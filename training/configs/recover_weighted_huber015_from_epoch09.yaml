@@ -1,0 +1,135 @@
+# Resume the full-data weighted-Huber run from its surviving epoch-9
+# checkpoint. Lightning resumes at epoch 10 and trains through epoch 24.
+# Every regenerated epoch is retained, and last.ckpt is updated as an
+# additional recovery point.
+#
+# This intentionally writes to a new directory and W&B run. It cannot recreate
+# missing checkpoints before epoch 9; recovering those requires a fresh run.
+#
+# Launch from the repository root with:
+#   /home/ubuntu/anaconda3/envs/foxes/bin/python training/train.py \
+#     --config training/configs/recover_weighted_huber015_from_epoch09.yaml
+
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+
+# Match the original run's hardware selection. For the closest continuation,
+# launch with the same visible GPU count used by the original run.
+gpu_ids: "all"
+batch_size: 64
+epochs: 25
+seed: 42
+accumulate_grad_batches: 1
+
+model_type: gaussian_nll
+
+uncertainty:
+  huber_delta: 0.15
+  class_weighting: inverse_frequency
+
+calculate_base_weights: false
+
+vit_architecture:
+  embed_dim: 512
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  hidden_dim: 1024
+  num_heads: 8
+  num_layers: 8
+  dropout: 0.1
+  learning_rate: 0.00005
+  mask_mode: local
+  local_window: 3
+
+optimizer:
+  weight_decay: 0.0001
+  gradient_clip_val: null
+  scheduler:
+    T_max: 25
+    eta_min: 0.000001
+
+loss:
+  # This legacy deterministic-model block is retained to match the original
+  # logged configuration; gaussian_nll does not use it.
+  base_weights:
+    quiet: 1.0
+    c_class: 1.77
+    m_class: 3.20
+    x_class: 14.75
+  huber_delta: 0.3
+  window_size: 15000
+  diagnostic_every_n_steps: 200
+  adaptive_multipliers: null
+
+checkpoint:
+  # Keep the original monitor so Lightning can associate the callback state in
+  # epoch 9 with this callback. save_top_k=-1 retains every regenerated epoch.
+  # Only resume checkpoints you trust: full-state recovery restores pickled
+  # optimizer, scheduler, loop, and callback state in addition to model weights.
+  monitor: val_class/X/rmse_dex
+  mode: min
+  save_top_k: -1
+  save_last: true
+  resume_from: /data/checkpoints/SDOML-RTX-6000-EMBED512-LAYERS8-LOCAL3-WEIGHTED-HUBER015/SDOML-RTX-6000-EMBED512-LAYERS8-LOCAL3-WEIGHTED-HUBER015-epoch=09-step=006080.ckpt
+
+early_stopping:
+  enabled: false
+  monitor: val_class/macro_mse_dex2
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
+
+logging:
+  log_every_n_steps: 10
+
+callbacks:
+  per_class_metrics_enabled: true
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 5
+  spatial_quantile_enabled: false
+  spatial_quantile_num_samples: 5
+  spatial_quantile_log_every_n_epochs: 1
+  spatial_gaussian_enabled: true
+  spatial_gaussian_num_samples: 5
+  spatial_gaussian_log_every_n_epochs: 1
+  attention_enabled: false
+  attention_num_samples: 8
+  attention_log_every_n_epochs: 1
+
+data:
+  aia_dir: /data/FOXES_OG/AIA_processed
+  sxr_dir: /data/FOXES_OG/SXR_processed
+  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/SDOML-RTX-6000-EMBED512-LAYERS8-LOCAL3-WEIGHTED-HUBER015-RECOVERY-FROM-EPOCH09
+  num_workers: 8
+
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  project: FOXES-SDOML
+  job_type: recovery-training
+  tags:
+    - full-data
+    - recovery
+    - resumed-from-epoch-09
+    - save-every-epoch
+    - embed-512
+    - layers-8
+    - local-3
+    - weighted-huber
+    - detached-patch-uncertainty
+  run_name: SDOML-RTX-6000-EMBED512-LAYERS8-LOCAL3-WEIGHTED-HUBER015-RECOVERY-FROM-EPOCH09
+  notes: >-
+    Resume of W&B run xe4x9zjx from its surviving epoch-9 checkpoint. The
+    original training settings are preserved; every regenerated epoch from 10
+    through 24 is retained, along with last.ckpt.
+
+recovery:
+  source_wandb_run_id: xe4x9zjx
+  source_epoch: 9
+  source_global_step: 6080
+  expected_first_regenerated_epoch: 10
+  expected_last_regenerated_epoch: 24

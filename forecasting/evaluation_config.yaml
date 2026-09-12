@@ -7,10 +7,12 @@
 # =============================================================================
 
 model_predictions:
-  main_model_csv: "./foxes_data/inference/predictions.csv"
+  main_model_csv: "/home/ubuntu/FOXES/forecasting/foxes_data/inference_patch_un/predictions.csv"
 
 evaluation:
-  output_dir:  "./foxes_data/evaluation"
+  output_dir:  "/home/ubuntu/FOXES/forecasting/foxes_data/evaluation_patch_un"
+  # Auto-runs for Gaussian or direct-quantile uncertainty columns.
+  evaluate_uncertainty: true
 
 plotting:
   regression_background: "black"

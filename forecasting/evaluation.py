@@ -1,6 +1,7 @@
 import os
 import re
 import yaml
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,12 @@ from matplotlib.colors import LogNorm
 import matplotlib.ticker as mticker
 import matplotlib.font_manager as fm
 from matplotlib import rcParams
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def setup_barlow_font():
@@ -55,13 +62,38 @@ class FOXESEvaluator:
 
     Key Features:
         - Performance metrics calculation (MSE, RMSE, MAE, R², Pearson correlation)
-        - Flare class-specific analysis (Quiet, C, M, X classes)
+        - Flare class-specific analysis (Below-B, B, C, M, X classes)
+        - Gaussian NLL or quantile pinball/coverage uncertainty evaluation
     """
+
+    FLARE_CLASSES = {
+        'Below-B': (0, 1e-7),
+        'B': (1e-7, 1e-6),
+        'C': (1e-6, 1e-5),
+        'M': (1e-5, 1e-4),
+        'X': (1e-4, np.inf),
+    }
+
+    GAUSSIAN_UNCERTAINTY_COLUMNS = {
+        'prediction_normalized',
+        'groundtruth_normalized',
+        'variance_normalized',
+    }
+    QUANTILE_UNCERTAINTY_COLUMNS = {
+        'prediction_normalized',
+        'groundtruth_normalized',
+        'q025_normalized',
+        'q16_normalized',
+        'q50_normalized',
+        'q84_normalized',
+        'q975_normalized',
+    }
 
     def __init__(self,
                  csv_path,
                  output_dir="./foxes_evaluation",
-                 plot_background='black'):
+                 plot_background='black',
+                 evaluate_uncertainty=True):
         """
         Initialize the FOXES evaluation system.
 
@@ -73,6 +105,7 @@ class FOXESEvaluator:
         self.csv_path = csv_path
         self.output_dir = output_dir
         self.plot_background = (plot_background or 'black').lower()
+        self.evaluate_uncertainty = _as_bool(evaluate_uncertainty)
 
         # Create output directory structure
         self.metrics_dir = os.path.join(output_dir, "metrics")
@@ -85,6 +118,8 @@ class FOXESEvaluator:
         self.df = None
         self.y_true = None
         self.y_pred = None
+        self.has_uncertainty = False
+        self.uncertainty_kind = None
 
     def load_data(self):
         """
@@ -94,9 +129,64 @@ class FOXESEvaluator:
             None
         """
         self.df = pd.read_csv(self.csv_path)
+        required = {'groundtruth', 'predictions'}
+        missing = required.difference(self.df.columns)
+        if missing:
+            raise ValueError(
+                f"Prediction CSV is missing required columns: {sorted(missing)}"
+            )
+
+        valid = (
+            np.isfinite(self.df['groundtruth'])
+            & np.isfinite(self.df['predictions'])
+            & (self.df['groundtruth'] > 0)
+            & (self.df['predictions'] > 0)
+        )
+        if not np.all(valid):
+            dropped = int((~valid).sum())
+            print(
+                f"Warning: dropping {dropped} rows with missing, non-finite, "
+                "or non-positive prediction/ground truth values"
+            )
+            self.df = self.df.loc[valid].reset_index(drop=True)
+        if self.df.empty:
+            raise ValueError(
+                "No evaluable rows remain. Prediction-only CSVs cannot be "
+                "scored without ground truth."
+            )
+
         self.y_true = self.df['groundtruth'].values
         self.y_pred = self.df['predictions'].values
+        quantile_specific_columns = (
+            self.QUANTILE_UNCERTAINTY_COLUMNS
+            - {'prediction_normalized', 'groundtruth_normalized'}
+        )
+        quantile_present = quantile_specific_columns.intersection(
+            self.df.columns
+        )
+        gaussian_present = 'variance_normalized' in self.df.columns
+        if quantile_present and not self.QUANTILE_UNCERTAINTY_COLUMNS.issubset(
+            self.df.columns
+        ):
+            raise ValueError(
+                "Prediction CSV has incomplete quantile outputs; missing "
+                f"{sorted(self.QUANTILE_UNCERTAINTY_COLUMNS.difference(self.df.columns))}"
+            )
+        if gaussian_present and not self.GAUSSIAN_UNCERTAINTY_COLUMNS.issubset(
+            self.df.columns
+        ):
+            raise ValueError(
+                "Prediction CSV has incomplete Gaussian uncertainty outputs; "
+                f"missing {sorted(self.GAUSSIAN_UNCERTAINTY_COLUMNS.difference(self.df.columns))}"
+            )
+        if self.QUANTILE_UNCERTAINTY_COLUMNS.issubset(self.df.columns):
+            self.uncertainty_kind = 'quantile'
+        elif self.GAUSSIAN_UNCERTAINTY_COLUMNS.issubset(self.df.columns):
+            self.uncertainty_kind = 'gaussian'
+        self.has_uncertainty = self.uncertainty_kind is not None
         print(f"Loaded model data with {len(self.df)} records")
+        if self.has_uncertainty:
+            print(f"Detected {self.uncertainty_kind} uncertainty columns")
 
     def calculate_metrics(self):
         """
@@ -104,7 +194,7 @@ class FOXESEvaluator:
 
         Computes standard regression metrics (MSE, RMSE, MAE, R², Pearson correlation)
         in log-space, plus class-specific metrics for different flare classes
-        (Quiet, C, M, X).
+        (Below-B, B, C, M, X).
 
         Returns:
             pandas.DataFrame: DataFrame containing all calculated metrics
@@ -119,19 +209,13 @@ class FOXESEvaluator:
             'MAE': mean_absolute_error(np.log10(self.y_true), np.log10(self.y_pred)),
             'R2': r2_score(np.log10(self.y_true), np.log10(self.y_pred)),
             'Pearson_Corr': np.corrcoef(np.log10(self.y_true), np.log10(self.y_pred))[0, 1],
+            'Sample_Count': len(self.y_true),
         }
 
         # Calculate metrics for each flare class
-        flare_classes = {
-            'Quiet': (0, 1e-6),  # Below 1e-6
-            'C': (1e-6, 1e-5),  # 1e-6 to 1e-5
-            'M': (1e-5, 1e-4),  # 1e-5 to 1e-4
-            'X': (1e-4, np.inf)  # Above 1e-4
-        }
-
         flare_class_metrics = []
 
-        for class_name, (lower_bound, upper_bound) in flare_classes.items():
+        for class_name, (lower_bound, upper_bound) in self.FLARE_CLASSES.items():
             # Create mask for current flare class
             if upper_bound == np.inf:
                 mask = self.y_true >= lower_bound
@@ -153,9 +237,17 @@ class FOXESEvaluator:
                 'MSE': mean_squared_error(np.log10(y_true_class), np.log10(y_pred_class)),
                 'RMSE': np.sqrt(mean_squared_error(np.log10(y_true_class), np.log10(y_pred_class))),
                 'MAE': mean_absolute_error(np.log10(y_true_class), np.log10(y_pred_class)),
-                'R2': r2_score(np.log10(y_true_class), np.log10(y_pred_class)),
+                'R2': (
+                    r2_score(np.log10(y_true_class), np.log10(y_pred_class))
+                    if len(y_true_class) >= 2 else np.nan
+                ),
                 'Sample_Count': len(y_true_class),
-                'Pearson_Corr': np.corrcoef(np.log10(y_true_class), np.log10(y_pred_class))[0, 1],
+                'Pearson_Corr': (
+                    np.corrcoef(
+                        np.log10(y_true_class), np.log10(y_pred_class)
+                    )[0, 1]
+                    if len(y_true_class) >= 2 else np.nan
+                ),
             }
 
             flare_class_metrics.append(class_metrics)
@@ -171,6 +263,321 @@ class FOXESEvaluator:
         self._plot_regression()
 
         return metrics_df
+
+    def _class_masks(self):
+        """Return overall and ground-truth flare-class masks."""
+        masks = {'Overall': np.ones(len(self.y_true), dtype=bool)}
+        for class_name, (lower_bound, upper_bound) in self.FLARE_CLASSES.items():
+            if np.isinf(upper_bound):
+                masks[class_name] = self.y_true >= lower_bound
+            else:
+                masks[class_name] = (
+                    (self.y_true >= lower_bound)
+                    & (self.y_true < upper_bound)
+                )
+        return masks
+
+    def calculate_uncertainty_metrics(self):
+        """Evaluate Gaussian or quantile uncertainty in normalized log space.
+
+        This reports both calibration (coverage and standardized residuals)
+        and sharpness (typical predicted sigma). A model can obtain high
+        coverage merely by widening its intervals, so both are needed.
+        """
+        if not self.has_uncertainty:
+            raise ValueError(
+                "The prediction CSV does not contain complete Gaussian or "
+                "quantile uncertainty columns."
+            )
+        if self.uncertainty_kind == 'quantile':
+            return self._calculate_quantile_uncertainty_metrics()
+
+        mean = self.df['prediction_normalized'].to_numpy(dtype=float)
+        target = self.df['groundtruth_normalized'].to_numpy(dtype=float)
+        variance = self.df['variance_normalized'].to_numpy(dtype=float)
+        valid = (
+            np.isfinite(mean) & np.isfinite(target) & np.isfinite(variance)
+            & (variance > 0)
+        )
+        if not np.all(valid):
+            print(
+                f"Warning: excluding {int((~valid).sum())} rows from "
+                "uncertainty metrics because their Gaussian outputs are invalid"
+            )
+        if not np.any(valid):
+            raise ValueError("No finite positive uncertainty predictions to evaluate")
+
+        sigma = np.sqrt(np.maximum(variance, np.finfo(float).tiny))
+        residual_z = (target - mean) / sigma
+        sigma_dex = (
+            self.df['sigma_dex'].to_numpy(dtype=float)
+            if 'sigma_dex' in self.df.columns
+            else np.full(len(self.df), np.nan)
+        )
+
+        rows = []
+        for group_name, group_mask in self._class_masks().items():
+            mask = group_mask & valid
+            if not np.any(mask):
+                print(
+                    f"Warning: No valid uncertainty samples for {group_name}"
+                )
+                continue
+
+            group_variance = variance[mask]
+            group_error = target[mask] - mean[mask]
+            group_z = residual_z[mask]
+            nll = 0.5 * (
+                np.log(2.0 * np.pi * group_variance)
+                + np.square(group_error) / group_variance
+            )
+            row = {
+                'Group': group_name,
+                'Sample_Count': int(mask.sum()),
+                'Gaussian_NLL_Normalized': float(np.mean(nll)),
+                'Coverage_68': float(np.mean(np.abs(group_z) <= 1.0)),
+                'Coverage_95': float(np.mean(np.abs(group_z) <= 1.96)),
+                'Mean_Sigma_Normalized': float(np.mean(sigma[mask])),
+                'Mean_Sigma_Dex': (
+                    float(np.nanmean(sigma_dex[mask]))
+                    if np.any(np.isfinite(sigma_dex[mask])) else np.nan
+                ),
+                'Mean_Absolute_Z': float(np.mean(np.abs(group_z))),
+                'Z_Mean': float(np.mean(group_z)),
+                'Z_Std': (
+                    float(np.std(group_z, ddof=1))
+                    if mask.sum() >= 2 else np.nan
+                ),
+            }
+            if {'lower_68', 'upper_68'}.issubset(self.df.columns):
+                row['Mean_68_Interval_Width_Raw'] = float(np.mean(
+                    self.df.loc[mask, 'upper_68'].to_numpy(dtype=float)
+                    - self.df.loc[mask, 'lower_68'].to_numpy(dtype=float)
+                ))
+            if {'lower_95', 'upper_95'}.issubset(self.df.columns):
+                row['Mean_95_Interval_Width_Raw'] = float(np.mean(
+                    self.df.loc[mask, 'upper_95'].to_numpy(dtype=float)
+                    - self.df.loc[mask, 'lower_95'].to_numpy(dtype=float)
+                ))
+            rows.append(row)
+
+        metrics_df = pd.DataFrame(rows)
+        metrics_path = os.path.join(
+            self.metrics_dir, 'uncertainty_metrics.csv'
+        )
+        metrics_df.to_csv(metrics_path, index=False)
+        self._plot_uncertainty_calibration(residual_z, valid)
+        print(f"Saved uncertainty metrics to {metrics_path}")
+        return metrics_df
+
+    def _calculate_quantile_uncertainty_metrics(self):
+        """Evaluate direct q16/q84 and q02.5/q97.5 predictive intervals."""
+        target = self.df['groundtruth_normalized'].to_numpy(dtype=float)
+        quantile_columns = (
+            'q025_normalized', 'q16_normalized', 'q50_normalized',
+            'q84_normalized', 'q975_normalized',
+        )
+        quantiles = self.df[list(quantile_columns)].to_numpy(dtype=float)
+        valid = np.isfinite(target) & np.isfinite(quantiles).all(axis=1)
+        ordered = np.all(np.diff(quantiles, axis=1) >= 0, axis=1)
+        valid &= ordered
+        if not np.all(valid):
+            print(
+                f"Warning: excluding {int((~valid).sum())} rows with invalid "
+                "or crossing quantiles"
+            )
+        if not np.any(valid):
+            raise ValueError("No finite ordered quantile predictions to evaluate")
+
+        levels = np.array([0.025, 0.16, 0.5, 0.84, 0.975])
+        errors = target[:, None] - quantiles
+        pinball = np.maximum(
+            levels * errors, (levels - 1.0) * errors
+        ).mean(axis=1)
+        rows = []
+        for group_name, group_mask in self._class_masks().items():
+            mask = group_mask & valid
+            if not np.any(mask):
+                continue
+            coverage_68 = np.mean(
+                (target[mask] >= quantiles[mask, 1])
+                & (target[mask] <= quantiles[mask, 3])
+            )
+            coverage_95 = np.mean(
+                (target[mask] >= quantiles[mask, 0])
+                & (target[mask] <= quantiles[mask, 4])
+            )
+            row = {
+                'Group': group_name,
+                'Sample_Count': int(mask.sum()),
+                'Mean_Pinball_Normalized': float(np.mean(pinball[mask])),
+                'Coverage_68': float(coverage_68),
+                'Coverage_95': float(coverage_95),
+                'Calibration_Error': float(0.5 * (
+                    abs(coverage_68 - 0.68)
+                    + abs(coverage_95 - 0.95)
+                )),
+                'Mean_68_Interval_Width_Normalized': float(np.mean(
+                    quantiles[mask, 3] - quantiles[mask, 1]
+                )),
+                'Mean_95_Interval_Width_Normalized': float(np.mean(
+                    quantiles[mask, 4] - quantiles[mask, 0]
+                )),
+            }
+            if {'lower_68', 'upper_68'}.issubset(self.df.columns):
+                row['Mean_68_Interval_Width_Raw'] = float(np.mean(
+                    self.df.loc[mask, 'upper_68'].to_numpy(dtype=float)
+                    - self.df.loc[mask, 'lower_68'].to_numpy(dtype=float)
+                ))
+            if {'lower_95', 'upper_95'}.issubset(self.df.columns):
+                row['Mean_95_Interval_Width_Raw'] = float(np.mean(
+                    self.df.loc[mask, 'upper_95'].to_numpy(dtype=float)
+                    - self.df.loc[mask, 'lower_95'].to_numpy(dtype=float)
+                ))
+            rows.append(row)
+
+        metrics_df = pd.DataFrame(rows)
+        metrics_path = os.path.join(
+            self.metrics_dir, 'uncertainty_metrics.csv'
+        )
+        metrics_df.to_csv(metrics_path, index=False)
+        self._plot_quantile_calibration(metrics_df)
+        print(f"Saved uncertainty metrics to {metrics_path}")
+        return metrics_df
+
+    def _plot_quantile_calibration(self, metrics_df):
+        """Plot nominal versus empirical 68%/95% quantile coverage."""
+        setup_barlow_font()
+        theme = 'white' if self.plot_background in ('white', 'light') else 'black'
+        figure_color = '#FFFFFF' if theme == 'white' else '#000000'
+        axes_color = '#FFFFFF' if theme == 'white' else '#151522'
+        text_color = '#111111' if theme == 'white' else '#FFFFFF'
+        colors = {
+            'Overall': '#E24A33', 'Below-B': '#8C8C8C',
+            'B': '#59A14F', 'C': '#348ABD', 'M': '#988ED5',
+            'X': '#FBC15E',
+        }
+        fig, ax = plt.subplots(figsize=(6, 6), facecolor=figure_color)
+        ax.set_facecolor(axes_color)
+        ax.plot(
+            [0, 1], [0, 1], '--', color=text_color,
+            label='Ideal calibration',
+        )
+        for _, row in metrics_df.iterrows():
+            ax.plot(
+                [0.68, 0.95],
+                [row['Coverage_68'], row['Coverage_95']],
+                marker='o', color=colors.get(row['Group']),
+                label=row['Group'],
+            )
+        ax.set(
+            xlabel='Nominal central interval coverage',
+            ylabel='Empirical coverage',
+            xlim=(0, 1), ylim=(0, 1),
+            title='Quantile interval calibration',
+        )
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=9)
+        ax.tick_params(colors=text_color)
+        ax.xaxis.label.set_color(text_color)
+        ax.yaxis.label.set_color(text_color)
+        ax.title.set_color(text_color)
+        for spine in ax.spines.values():
+            spine.set_color(text_color)
+        fig.tight_layout()
+        plot_path = os.path.join(
+            self.plots_dir, 'uncertainty_calibration.png'
+        )
+        fig.savefig(
+            plot_path, dpi=300, bbox_inches='tight',
+            facecolor=figure_color,
+        )
+        plt.close(fig)
+        print(f"Saved uncertainty calibration plot to {plot_path}")
+
+    def _plot_uncertainty_calibration(self, residual_z, valid):
+        """Plot nominal-vs-empirical coverage and standardized residuals."""
+        setup_barlow_font()
+        nominal = np.linspace(0.05, 0.99, 20)
+        z_limits = np.array([
+            NormalDist().inv_cdf((1.0 + probability) / 2.0)
+            for probability in nominal
+        ])
+
+        theme = 'white' if self.plot_background in ('white', 'light') else 'black'
+        figure_color = '#FFFFFF' if theme == 'white' else '#000000'
+        axes_color = '#FFFFFF' if theme == 'white' else '#151522'
+        text_color = '#111111' if theme == 'white' else '#FFFFFF'
+
+        fig, (coverage_ax, residual_ax) = plt.subplots(
+            1, 2, figsize=(12, 5), facecolor=figure_color
+        )
+        colors = {
+            'Overall': '#E24A33', 'Below-B': '#8C8C8C',
+            'B': '#59A14F', 'C': '#348ABD', 'M': '#988ED5',
+            'X': '#FBC15E',
+        }
+        for ax in (coverage_ax, residual_ax):
+            ax.set_facecolor(axes_color)
+            ax.tick_params(colors=text_color)
+            for spine in ax.spines.values():
+                spine.set_color(text_color)
+            ax.grid(alpha=0.25)
+
+        coverage_ax.plot(
+            [0, 1], [0, 1], '--', color=text_color, linewidth=1,
+            label='Ideal calibration',
+        )
+        for group_name, group_mask in self._class_masks().items():
+            mask = group_mask & valid
+            if not np.any(mask):
+                continue
+            empirical = [
+                np.mean(np.abs(residual_z[mask]) <= z_limit)
+                for z_limit in z_limits
+            ]
+            coverage_ax.plot(
+                nominal, empirical, marker='o', markersize=3,
+                color=colors[group_name], label=group_name,
+            )
+        coverage_ax.set(
+            xlabel='Nominal central interval coverage',
+            ylabel='Empirical coverage', xlim=(0, 1), ylim=(0, 1),
+            title='Predictive interval calibration',
+        )
+        coverage_ax.legend(fontsize=9)
+
+        overall_z = residual_z[valid]
+        residual_ax.hist(
+            overall_z, bins=np.linspace(-5, 5, 51), density=True,
+            alpha=0.75, color='#348ABD', label='FOXES residuals',
+        )
+        normal_x = np.linspace(-5, 5, 300)
+        residual_ax.plot(
+            normal_x,
+            np.exp(-0.5 * normal_x ** 2) / np.sqrt(2.0 * np.pi),
+            color='#E24A33', linewidth=2, label='Standard normal',
+        )
+        residual_ax.set(
+            xlabel='Standardized residual (target - mean) / sigma',
+            ylabel='Density', title='Standardized residual distribution',
+        )
+        residual_ax.legend(fontsize=9)
+
+        for ax in (coverage_ax, residual_ax):
+            ax.xaxis.label.set_color(text_color)
+            ax.yaxis.label.set_color(text_color)
+            ax.title.set_color(text_color)
+
+        fig.tight_layout()
+        plot_path = os.path.join(
+            self.plots_dir, 'uncertainty_calibration.png'
+        )
+        fig.savefig(
+            plot_path, dpi=300, bbox_inches='tight', facecolor=figure_color
+        )
+        plt.close(fig)
+        print(f"Saved uncertainty calibration plot to {plot_path}")
 
     def _plot_regression(self):
         """
@@ -414,6 +821,17 @@ class FOXESEvaluator:
         print("\n=== Performance Metrics ===")
         print(metrics_df.to_string(index=False))
 
+        if self.evaluate_uncertainty and self.has_uncertainty:
+            print("\nCalculating uncertainty calibration metrics...")
+            uncertainty_df = self.calculate_uncertainty_metrics()
+            print("\n=== Uncertainty Metrics ===")
+            print(uncertainty_df.to_string(index=False))
+        elif self.evaluate_uncertainty:
+            print(
+                "\nNo Gaussian uncertainty columns found; skipping uncertainty "
+                "evaluation."
+            )
+
         print("\nEvaluation complete!")
         return metrics_df
 
@@ -508,7 +926,10 @@ def main():
     evaluator = FOXESEvaluator(
         csv_path=model_predictions['main_model_csv'],
         output_dir=evaluation['output_dir'],
-        plot_background=plotting_config.get('regression_background', 'black')
+        plot_background=plotting_config.get('regression_background', 'black'),
+        evaluate_uncertainty=_as_bool(
+            evaluation.get('evaluate_uncertainty', True)
+        ),
     )
 
     # Run complete evaluation

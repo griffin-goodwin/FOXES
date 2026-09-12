@@ -158,6 +158,37 @@ more things, both off by default and only relevant if you're training:
 - `sxr_normalization.compute: true` — computes SXR normalization stats from
   the train split (requires `steps.split` to have run first).
 
+To regenerate only the SXR normalization artifact for an existing split (the
+training convention is `log10(SXR + 1e-8)`), run:
+
+```bash
+python data/sxr_normalization.py \
+  --sxr-dir /data/SXR_processed/train \
+  --output /data/SXR_processed/normalized_sxr.npy
+```
+
+Before training or evaluation, the integrity scanner can identify blank,
+non-finite, and noise/dark-frame AIA products. Its centered-disk morphology
+check catches the AIA daily-dark products without relying on their timestamp:
+
+```bash
+python data/check_dataset_integrity.py \
+  --aia-dir /data/AIA_processed \
+  --sxr-dir /data/SXR_processed \
+  --report /data/dataset_integrity.json
+```
+
+After reviewing `/data/dataset_integrity_invalid.csv`, quarantine the paired
+AIA and SXR files using that existing report:
+
+```bash
+python data/check_dataset_integrity.py \
+  --aia-dir /data/AIA_processed \
+  --sxr-dir /data/SXR_processed \
+  --move-from-csv /data/dataset_integrity_invalid.csv \
+  --move-invalid-to /data/FOXES_invalid
+```
+
 ### 1) Data format
 
 Point `inference.py` at a folder of paired `.npy` files, one file per timestamp:
@@ -218,6 +249,24 @@ automatically alongside it whenever `flux_path` / `weight_path` are set in the
 config — set `model_params.no_flux: true` or `model_params.no_weights: true` to
 skip either.
 
+`model_type: auto` also supports standard, background-plus-excess, and original
+patch-mean Gaussian checkpoints. For those checkpoints the prediction CSV
+additionally contains normalized mean/variance,
+normalized sigma, sigma in dex, and asymmetric 68%/95% intervals in physical
+W/m². Set `patch_uncertainty_path` to save a raw-flux spatial uncertainty map
+for each image, or set `model_params.no_patch_uncertainty: true` to skip the
+maps while retaining the global uncertainty columns. Standard Gaussian maps
+are marginal patch standard deviations. Background-plus-excess maps are the
+square root of each patch's additive contribution to global variance, not
+independently calibrated patch error bars.
+
+For a background-plus-excess checkpoint, set `component_flux_path` to save a
+compressed NPZ per timestamp with the whole-image background scalar, learned
+local-excess map, fixed background allocation, total accounting map, and their
+variance decomposition. The prediction CSV also receives background/excess
+flux totals and variance-fraction diagnostics. `flux_path` remains the total
+accounting map for compatibility.
+
 ### 3) Evaluate
 
 Edit `forecasting/evaluation_config.yaml` to point at the predictions
@@ -227,7 +276,12 @@ CSV and data directories, then run:
 python forecasting/evaluation.py --config forecasting/evaluation_config.yaml
 ```
 
-This computes metrics (MSE, MAE, R²) and generates plots under `evaluation.output_dir`.
+This computes metrics (MSE, MAE, R²) and generates plots under
+`evaluation.output_dir`. When the CSV contains Gaussian uncertainty columns,
+evaluation also writes `metrics/uncertainty_metrics.csv` with NLL, 68%/95%
+coverage, sharpness, and standardized-residual diagnostics for the full dataset
+and each Quiet/C/M/X class. The corresponding reliability curve and residual
+histogram are saved as `plots/uncertainty_calibration.png`.
 
 ### 4) Train your own model (optional)
 

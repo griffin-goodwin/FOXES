@@ -13,9 +13,15 @@ conversion instead of a per-row Python loop.
 
 Usage:
     python download/hugging_face_data_download.py --config download/hf_download_config.yaml
+
+Repair already-converted flattened AIA ``.npy`` files in place (header-only;
+the multi-terabyte pixel payload is not rewritten):
+    python download/hugging_face_data_download.py \
+        --config download/hf_download_config.yaml --repair-existing-numpy
 """
 
 import argparse
+from io import BytesIO
 import logging
 import os
 import time
@@ -23,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from numpy.lib import format as npy_format
 import pyarrow.parquet as pq
 import yaml
 from datasets import load_dataset
@@ -32,6 +39,133 @@ from huggingface_hub import login
 # HuggingFace uses "validation"; local pipeline directories use "val"
 HF_TO_LOCAL = {"validation": "val"}
 LOCAL_TO_HF = {v: k for k, v in HF_TO_LOCAL.items()}
+AIA_SHAPE = (7, 512, 512)
+AIA_SIZE = int(np.prod(AIA_SHAPE))
+
+
+def _restore_aia_shape(array: np.ndarray) -> np.ndarray:
+    """Restore flattened parquet AIA rows to channel-first image stacks."""
+    array = np.asarray(array, dtype=np.float32)
+    if array.shape == AIA_SHAPE:
+        return array
+    if array.size == AIA_SIZE:
+        return array.reshape(AIA_SHAPE)
+    raise ValueError(
+        f"Expected AIA shape {AIA_SHAPE} or {AIA_SIZE} flattened values, "
+        f"got shape {array.shape} ({array.size} values)"
+    )
+
+
+def _repair_aia_npy_header(path: Path) -> tuple[str, str | None]:
+    """Repair one flattened AIA NPY header without rewriting its pixel data."""
+    try:
+        with path.open("rb") as stream:
+            version = npy_format.read_magic(stream)
+            if version == (1, 0):
+                shape, fortran_order, dtype = (
+                    npy_format.read_array_header_1_0(stream)
+                )
+                writer = npy_format.write_array_header_1_0
+            elif version == (2, 0):
+                shape, fortran_order, dtype = (
+                    npy_format.read_array_header_2_0(stream)
+                )
+                writer = npy_format.write_array_header_2_0
+            else:
+                return "error", f"unsupported NPY version {version}: {path}"
+            data_offset = stream.tell()
+
+        if tuple(shape) == AIA_SHAPE:
+            return "already_shaped", None
+        if int(np.prod(shape)) != AIA_SIZE:
+            return (
+                "error",
+                f"unexpected shape {shape} ({int(np.prod(shape))} values): {path}",
+            )
+
+        expected_size = data_offset + AIA_SIZE * np.dtype(dtype).itemsize
+        actual_size = path.stat().st_size
+        if actual_size != expected_size:
+            return (
+                "error",
+                f"unexpected file size {actual_size}, expected {expected_size}: {path}",
+            )
+
+        header_buffer = BytesIO()
+        writer(header_buffer, {
+            "descr": npy_format.dtype_to_descr(np.dtype(dtype)),
+            "fortran_order": bool(fortran_order),
+            "shape": AIA_SHAPE,
+        })
+        new_header = header_buffer.getvalue()
+        if len(new_header) != data_offset:
+            return (
+                "error",
+                f"replacement header is {len(new_header)} bytes but data starts "
+                f"at {data_offset}: {path}",
+            )
+
+        descriptor = os.open(path, os.O_WRONLY)
+        try:
+            written = os.pwrite(descriptor, new_header, 0)
+        finally:
+            os.close(descriptor)
+        if written != len(new_header):
+            return "error", f"short header write ({written} bytes): {path}"
+        return "repaired", None
+    except Exception as exc:
+        return "error", f"{path}: {exc}"
+
+
+def repair_existing_numpy(cfg: dict):
+    """Restore shapes of existing flattened AIA NPY files in every split."""
+    workers = int(cfg.get("repair_numpy_workers", 16))
+    print_every = int(cfg.get("repair_numpy_print_every", 5000))
+    batch_size = max(workers * 8, 1024)
+    totals = {"repaired": 0, "already_shaped": 0, "error": 0}
+    errors = []
+    start = time.time()
+
+    for hf_split in cfg.get("splits", ["train", "validation", "test"]):
+        local_split = HF_TO_LOCAL.get(hf_split, hf_split)
+        split_dir = Path(cfg["aia_dir"]) / local_split
+        paths = sorted(split_dir.glob("*.npy")) if split_dir.is_dir() else []
+        print(f"[{local_split}] Checking {len(paths)} existing AIA NPY files")
+        processed = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for offset in range(0, len(paths), batch_size):
+                futures = [
+                    pool.submit(_repair_aia_npy_header, path)
+                    for path in paths[offset:offset + batch_size]
+                ]
+                for future in as_completed(futures):
+                    status, error = future.result()
+                    totals[status] += 1
+                    processed += 1
+                    if error and len(errors) < 20:
+                        errors.append(error)
+                    if print_every > 0 and processed % print_every == 0:
+                        print(
+                            f"[{local_split}] checked={processed}/{len(paths)} | "
+                            f"repaired={totals['repaired']} "
+                            f"already-shaped={totals['already_shaped']} "
+                            f"errors={totals['error']}",
+                            flush=True,
+                        )
+
+    elapsed = time.time() - start
+    print(
+        "NPY repair complete — "
+        f"{totals['repaired']} repaired, "
+        f"{totals['already_shaped']} already shaped, "
+        f"{totals['error']} errors | {elapsed / 60:.1f} min"
+    )
+    if totals["error"]:
+        for error in errors:
+            print(f"  [error] {error}")
+        raise RuntimeError(
+            f"Failed to repair {totals['error']} AIA NPY files; see errors above"
+        )
 
 
 def load_config(path: str) -> dict:
@@ -48,8 +182,8 @@ def _write_arrays(filename: str, aia_arr: np.ndarray, sxr_arr: np.ndarray,
     if os.path.exists(aia_path) and os.path.exists(sxr_path):
         return False
 
-    np.save(aia_path, aia_arr)
-    np.save(sxr_path, sxr_arr)
+    np.save(aia_path, _restore_aia_shape(aia_arr))
+    np.save(sxr_path, np.asarray(sxr_arr, dtype=np.float32).reshape(-1))
     return True
 
 
@@ -292,8 +426,20 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
 def main():
     parser = argparse.ArgumentParser(description="Get FOXES data from HuggingFace Hub (stream or local parquet)")
     parser.add_argument("--config", default="download/hf_download_config.yaml")
+    parser.add_argument(
+        "--repair-existing-numpy", action="store_true",
+        help=(
+            "Only repair flattened AIA .npy files already under aia_dir. "
+            "This edits their shape headers in place without downloading or "
+            "rewriting pixel data."
+        ),
+    )
     args = parser.parse_args()
     cfg = load_config(args.config)
+
+    if args.repair_existing_numpy:
+        repair_existing_numpy(cfg)
+        return
 
     splits = cfg.get("splits", ["train", "validation", "test"])
     local_parquet_dir = cfg.get("local_parquet_dir")

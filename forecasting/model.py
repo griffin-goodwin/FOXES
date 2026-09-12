@@ -5,18 +5,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+SXR_LOG_OFFSET = 1e-8
 
 
 def normalize_sxr(unnormalized_values, sxr_norm):
-    """Convert from unnormalized to normalized space"""
-    log_values = torch.log10(unnormalized_values + 1e-8)
+    """Convert physical flux using the FOXES ``log10(F + 1e-8)`` convention."""
+    log_values = torch.log10(unnormalized_values + SXR_LOG_OFFSET)
     normalized = (log_values - float(sxr_norm[0].item())) / float(sxr_norm[1].item())
     return normalized
 
 
 def unnormalize_sxr(normalized_values, sxr_norm):
-    return 10 ** (normalized_values * float(sxr_norm[1].item()) + float(sxr_norm[0].item())) - 1e-8
+    """Invert :func:`normalize_sxr` back to physical flux."""
+    return (
+        10 ** (
+            normalized_values * float(sxr_norm[1].item())
+            + float(sxr_norm[0].item())
+        )
+        - SXR_LOG_OFFSET
+    )
 
 
 class ViTLocal(pl.LightningModule):
@@ -35,8 +44,8 @@ class ViTLocal(pl.LightningModule):
     weight_decay : float
         AdamW weight decay.
     scheduler_kwargs : dict, optional
-        Passed to CosineAnnealingWarmRestarts (T_0, T_mult, eta_min). Defaults
-        match the released model's training run.
+        Passed to CosineAnnealingLR (T_max, eta_min). ``T_max`` is measured in
+        epochs because the scheduler is stepped once per epoch.
     loss_kwargs : dict, optional
         Forwarded to SXRRegressionDynamicLoss (window_size, huber_delta,
         adaptive_multipliers) — see that class for defaults.
@@ -45,7 +54,7 @@ class ViTLocal(pl.LightningModule):
         multipliers to the logger.
     """
 
-    DEFAULT_SCHEDULER_KWARGS = {'T_0': 250, 'T_mult': 2, 'eta_min': 1e-7}
+    DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
 
     def __init__(self, model_kwargs, sxr_norm, base_weights=None, weight_decay=1e-5,
                  scheduler_kwargs=None, loss_kwargs=None, diagnostic_every_n_steps=200):
@@ -66,7 +75,7 @@ class ViTLocal(pl.LightningModule):
         self.huber_delta = self.adaptive_loss.huber_delta
         self.sxr_norm = sxr_norm
 
-    def forward(self, x, return_attention=True):
+    def forward(self, x, return_attention=False):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
 
     def forward_for_callback(self, x, return_attention=True):
@@ -80,7 +89,7 @@ class ViTLocal(pl.LightningModule):
             weight_decay=self.weight_decay,
         )
 
-        scheduler = CosineAnnealingWarmRestarts(optimizer, **self.scheduler_kwargs)
+        scheduler = CosineAnnealingLR(optimizer, **self.scheduler_kwargs)
 
         return {
             'optimizer': optimizer,
@@ -256,7 +265,11 @@ class VisionTransformerLocal(nn.Module):
 
         # --- Convert to raw SXR ---
         mean, std = sxr_norm  # in log10 space
-        patch_flux_raw = torch.clamp(10 ** (patch_logits * std + mean) - 1e-8, min=0, max=1)
+        patch_flux_raw = torch.clamp(
+            10 ** (patch_logits * std + mean) - SXR_LOG_OFFSET,
+            min=0,
+            max=1,
+        )
 
         # Sum over patches for raw global flux
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
@@ -336,7 +349,13 @@ class AttentionBlock(nn.Module):
             x = x + self.linear(self.layer_norm_2(x))
             return x, attn_weights
         else:
-            attn_output = self.attn(inp_x, inp_x, inp_x)[0]
+            # Do not materialize the O(T^2) attention-weight tensor when the
+            # caller only needs the transformed embeddings.  Besides saving
+            # memory, need_weights=False lets PyTorch use its optimized scaled
+            # dot-product attention implementation when available.
+            attn_output = self.attn(
+                inp_x, inp_x, inp_x, need_weights=False
+            )[0]
             x = x + attn_output
             x = x + self.linear(self.layer_norm_2(x))
             return x
@@ -445,9 +464,13 @@ class InvertedAttentionBlock(nn.Module):
             x = x + self.linear(self.layer_norm_2(x))
             return x, attn_weights
         else:
+            # Avoid computing and returning the O(T^2) attention weights on
+            # the normal training/inference path.  Attention-map callers use
+            # the explicit return_attention=True branch above.
             attn_output = self.attn(
                 inp_x, inp_x, inp_x,
-                attn_mask=self.attention_mask
+                attn_mask=self.attention_mask,
+                need_weights=False,
             )[0]
             x = x + attn_output
             x = x + self.linear(self.layer_norm_2(x))

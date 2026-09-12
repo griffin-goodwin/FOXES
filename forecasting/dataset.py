@@ -8,6 +8,8 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 import glob
 
+SXR_LOG_OFFSET = 1e-8
+
 
 def _normalize_timestamp(ts: str) -> str:
     """Normalize timestamp strings with underscores instead of colons (cross-platform filenames)."""
@@ -24,10 +26,31 @@ class SXRLogNormTransform:
         self.std = std
 
     def __call__(self, x: float) -> float:
-        return (np.log10(x + 1e-8) - self.mean) / self.std
+        if not np.isfinite(x) or x <= 0:
+            raise ValueError(f"SXR flux must be finite and positive, got {x!r}")
+        return (np.log10(x + SXR_LOG_OFFSET) - self.mean) / self.std
 
 
 AIA_WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335)
+
+
+def _restore_aia_shape(array, target_size=(512, 512)):
+    """Return an AIA stack as ``(7, H, W)``.
+
+    Hugging Face's generated parquet representation stores the documented
+    ``(7, 512, 512)`` stack as one flat list.  Accept those losslessly
+    converted arrays as well as the native channel-first representation.
+    """
+    array = np.asarray(array)
+    expected_shape = (len(AIA_WAVELENGTHS), *map(int, target_size))
+    if array.shape == expected_shape:
+        return array
+    if array.size == int(np.prod(expected_shape)):
+        return array.reshape(expected_shape)
+    raise ValueError(
+        f"Expected AIA shape {expected_shape} or {np.prod(expected_shape)} "
+        f"flattened values, got shape {array.shape} ({array.size} values)"
+    )
 
 
 class AIANormTransform:
@@ -215,7 +238,9 @@ class AIAGOESDataset(torch.utils.data.Dataset):
         # Load AIA image as (7, H, W)
         try:
             all_wavelengths = [94, 131, 171, 193, 211, 304, 335]
-            aia_img = np.load(aia_path)
+            aia_img = _restore_aia_shape(
+                np.load(aia_path), target_size=self.target_size
+            )
             indices = [all_wavelengths.index(wav) for wav in self.wavelengths if wav in all_wavelengths]
             aia_img = aia_img[indices]
         except:
@@ -322,5 +347,3 @@ class AIAGOESDataModule(LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False,
                           num_workers=self.num_workers, prefetch_factor=1 if self.num_workers else None)
-
-

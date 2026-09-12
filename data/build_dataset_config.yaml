@@ -12,7 +12,7 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 aia:
   raw_dir:        "/data/AIA_raw"        # raw FITS from download/download_sdo.py
   bad_files_dir:  "/data/AIA_bad"        # bad-timestamp FITS get moved here
-  processed_dir:  "/data/AIA_processed"  # paired 512x512 .npy stacks
+  processed_dir:  "/data/FOXES_OG/AIA_processed"  # paired 512x512 .npy stacks
 
 sxr:
   raw_dir:      "/data/SXR_raw"         # raw netCDF from download/download_sxr.py
@@ -21,7 +21,7 @@ sxr:
                                      # set false if your files are already scaled (e.g. NOAA's newest reprocessing)
 
 output:
-  sxr_dir:         "/data/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
+  sxr_dir:         "/data/FOXES_OG/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
   aia_missing_dir: "/data/AIA_missing"   # AIA files with no matching SXR value
 
 processing:
@@ -36,7 +36,7 @@ steps:
   convert_aia: false    # raw AIA FITS -> paired .npy stacks
   combine_sxr: false    # combine raw multi-satellite GOES files into per-satellite CSVs
   align:       false    # match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
-  split:       true  # split aia.processed_dir / output.sxr_dir into train/val/test
+  split:       false  # split aia.processed_dir / output.sxr_dir into train/val/test
 
 # Only needed if you're training (training/train_config.yaml expects
 # aia_dir/sxr_dir to each have train/val/test subfolders) — not needed for
@@ -58,7 +58,7 @@ split:
 # stats from the train split only).
 sxr_normalization:
   compute:     true
-  output_path: "/data/SXR_processed/normalized_sxr.npy"
+  output_path: "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
 
 
 # Optional training-only AIA statistics. This scans only the train split and

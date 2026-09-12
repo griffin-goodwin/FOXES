@@ -15,38 +15,38 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 #   [0, 1]          - those specific GPUs
 #   "all"           - every available GPU
 #   -1              - CPU only
-gpu_ids: 0
+gpu_ids: "all"
 
-batch_size: 16
-epochs: 40
+batch_size: 32
+epochs: 50
+seed: 42
+# Two GPUs x microbatch 16 x two accumulated batches preserves the selected
+# screening run's effective batch size of 64.
+accumulate_grad_batches: 1
 
-# deterministic: original adaptive Huber model
-# gaussian_nll: predicts input-dependent variance in normalized log-SXR space
+# Canonical model: log-space patch multipliers form the global mean and
+# detached patch variances form the global predictive uncertainty.
 model_type: gaussian_nll
 
 uncertainty:
-  # Typical global training flux / patch count sets each contribution's scale.
-  patch_flux_scale_multiplier: 1.0
-  # Softplus maps each patch's raw score to a positive relative std deviation.
-  relative_std_floor: 0.0025
-  relative_std_max: 20.0
-  # Adds a typical-flux scale so dark patches can retain nonzero uncertainty.
-  patch_scale_floor_fraction: 1.0
-  use_class_weights: false
+  # Huber is the only mean objective. Class weights are calculated from the
+  # configured training split and normalized to mean sample weight one.
+  huber_delta: 0.15
+  class_weighting: sqrt_inverse_frequency
 
-# Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
-# before starting. Takes one extra pass over the training set.
+# Deterministic-model-only option: compute its legacy class weights from the
+# training data before starting. Both probabilistic models ignore it.
 calculate_base_weights: false
 
 vit_architecture:
-  embed_dim: 256
+  embed_dim: 512
   num_channels: 7
   num_classes: 1
   patch_size: 8
   num_patches: 4096
-  hidden_dim: 1024
+  hidden_dim: 2048
   num_heads: 8
-  num_layers: 8
+  num_layers: 12
   dropout: 0.1
   learning_rate: 0.0001
   # Self-attention masking - one of:
@@ -54,22 +54,25 @@ vit_architecture:
   #              patches (the flipped local-attention mask it was trained with)
   #   local    - true local attention: each patch attends to its neighborhood
   #   none     - standard full/global attention (no masking)
-  mask_mode: none
-  local_window: 9   # neighbourhood side length (patches), used by inverted/local
+  mask_mode: local
+  local_window: 3   # neighbourhood side length (patches), used by inverted/local
 
 optimizer:
-  weight_decay: 0.0001   # AdamW weight decay
-  # Optional: clips gradient norm - guards against loss spikes (e.g. a rare
-  # X-class sample with its 43x loss weight) blowing up into a NaN that never
-  # recovers. Omit this key or set it to null to disable clipping entirely.
-  gradient_clip_val: 1.0
-  scheduler:              # CosineAnnealingWarmRestarts
-    T_0: 40
-    T_mult: 1
+  weight_decay: 0.00001   # AdamW weight decay
+  gradient_clip_val: null
+  scheduler:              # CosineAnnealingLR, stepped once per epoch
+    T_max: 50            # decay from the initial LR to eta_min over the run
     eta_min: 0.000001
 
 loss:
-  huber_delta: 0.3          # delta for the underlying Huber loss
+  # Everything in this block belongs to the deterministic legacy model only.
+  base_weights:
+    quiet: 1.0
+    c_class: 1.77
+    m_class: 3.20
+    x_class: 14.75
+
+  huber_delta: 0.3
   window_size: 15000        # rolling error-history length per flare class
   diagnostic_every_n_steps: 200   # how often to log per-class adaptive weights
 
@@ -77,34 +80,45 @@ loss:
   # flare-class definition, not configurable here — see
   # SXRRegressionDynamicLoss.CLASS_THRESHOLDS in forecasting/model.py.
 
-  # Static per-class weight (multiplied by the adaptive multiplier below).
-  # Only used when calculate_base_weights: false. Leave null to fall back to
-  # SXRRegressionDynamicLoss's defaults, which were fit to the ORIGINALLY
-  # RELEASED dataset — set calculate_base_weights: true instead if training on
-  # your own data, or fill these in with weights fit to it.
-  base_weights: null
-  # base_weights:
-  #   quiet: 6.64
-  #   c_class: 1.63
-  #   m_class: 4.72
-  #   x_class: 43.13
-
-  # Advanced: per-class {max_multiplier, min_multiplier, sensitivity,
+  # Deterministic-model advanced option: per-class {max_multiplier, min_multiplier, sensitivity,
   # min_samples, recent_window} controlling how far recent performance can
   # move a class's weight from its base_weight. Leave null to use
   # SXRRegressionDynamicLoss.DEFAULT_ADAPTIVE_MULTIPLIERS.
   adaptive_multipliers: null
 
 checkpoint:
-  monitor: val_total_loss
+  # Select by the rare-class point metric; coverage and NLL remain diagnostics.
+  monitor: val_class/macro_mse_dex2
   mode: min
   save_top_k: 10   # how many best checkpoints to keep on disk
+
+early_stopping:
+  enabled: false
+  monitor: val_class/macro_mse_dex2
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
 
 logging:
   log_every_n_steps: 10   # Trainer step-logging interval
 
 callbacks:
-  sxr_plot_num_samples: 8          # validation samples shown in the pred-vs-true SXR plot
+  per_class_metrics_enabled: true  # validation metrics for <B/B/C/M/X
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 5          # validation samples shown in the pred-vs-true SXR plot
+  # Optional low-memory map-only callback. AttentionMapCallback already logs
+  # these maps when attention_enabled is true, so leave this off for full runs.
+  spatial_quantile_enabled: false
+  spatial_quantile_num_samples: 5  # one per <B/B/C/M/X when available
+  spatial_quantile_log_every_n_epochs: 1
+  # Low-memory Gaussian patch flux/std maps. Leave off when the attention
+  # callback is enabled because that callback already contains these maps.
+  spatial_gaussian_enabled: true
+  spatial_gaussian_num_samples: 5  # one per <B/B/C/M/X when available
+  spatial_gaussian_log_every_n_epochs: 1
+  attention_enabled: false
   attention_num_samples: 8         # validation samples visualized per attention-map epoch
   attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
 
@@ -114,16 +128,13 @@ data:
   sxr_norm_path: "/data/SXR_processed/normalized_sxr.npy"
   # Must be computed from the training split only.
   aia_norm_path: "/data/aia_q90_asinh_q99999_norm_streamed.npz"
-  checkpoints_dir: "/data/checkpoints/"
+  checkpoints_dir: "/data/checkpoints/SDOML-EMBED512-LAYERS12-HEADS8-LOCAL3-WEIGHTED-HUBER015-INV-SQRT/"
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
   entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
-  project: FOXES
+  project: FOXES-SDOML
   job_type: training
-  tags:
-    - aia
-    - sxr
-    - regression
-  run_name: SDOML-run1
-  notes: AIA to SXR translation
+  tags: [full-data, foxes-og, embed-512, layers-8, local-3, multiplier-patch-mean, weighted-huber, detached-patch-uncertainty]
+  run_name: SDOML-EMBED512-LAYERS12-HEADS8-LOCAL3-WEIGHTED-HUBER015-INV-SQRT
+  notes: Canonical multiplier patch model with inverse-frequency weighted Huber and detached patch uncertainty.
