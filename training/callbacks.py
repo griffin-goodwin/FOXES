@@ -102,11 +102,14 @@ def stratified_validation_indices(dataset, num_samples):
 
 
 class PerClassValidationMetrics(Callback):
-    """Aggregate class-specific mean and uncertainty diagnostics over validation."""
+    """Aggregate mean metrics and optional uncertainty diagnostics."""
 
     METRIC_COUNT = 9
 
     def on_validation_epoch_start(self, trainer, pl_module):
+        self.has_uncertainty = bool(
+            getattr(pl_module, 'predicts_uncertainty', False)
+        )
         self.totals = torch.zeros(
             len(FLARE_CLASSES), self.METRIC_COUNT,
             device=pl_module.device, dtype=torch.float64,
@@ -115,20 +118,27 @@ class PerClassValidationMetrics(Callback):
     def on_validation_batch_end(
         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
     ):
-        if not isinstance(outputs, dict) or 'variance_norm' not in outputs:
+        required = {'target_raw', 'target_norm', 'mean_norm', 'prediction_raw'}
+        if not isinstance(outputs, dict) or not required.issubset(outputs):
             return
+        if 'variance_norm' in outputs:
+            self.has_uncertainty = True
         target_raw = outputs['target_raw'].reshape(-1)
         target_norm = outputs['target_norm'].reshape(-1)
         mean_norm = outputs['mean_norm'].reshape(-1)
-        variance_norm = outputs['variance_norm'].reshape(-1)
         prediction_raw = outputs['prediction_raw'].reshape(-1)
         norm_std = float(pl_module.sxr_norm[1].item())
         error_dex = (mean_norm - target_norm) * norm_std
-        sigma_dex = torch.sqrt(variance_norm) * norm_std
-        nll = F.gaussian_nll_loss(
-            mean_norm, target_norm, variance_norm,
-            full=True, reduction='none',
-        )
+        if self.has_uncertainty:
+            variance_norm = outputs['variance_norm'].reshape(-1)
+            sigma_dex = torch.sqrt(variance_norm) * norm_std
+            nll = F.gaussian_nll_loss(
+                mean_norm, target_norm, variance_norm,
+                full=True, reduction='none',
+            )
+        else:
+            sigma_dex = torch.zeros_like(error_dex)
+            nll = torch.zeros_like(error_dex)
 
         predicted_classes = torch.zeros_like(target_raw, dtype=torch.long)
         predicted_classes = torch.where(
@@ -188,177 +198,41 @@ class PerClassValidationMetrics(Callback):
             class_mae.append(mae)
             mse = (squared_error / count).item()
             class_mse.append(mse)
-            mean_nll = (nll / count).item()
-            class_nll.append(mean_nll)
-            coverage_68 = (covered_68 / count).item()
-            class_coverage_68.append(coverage_68)
-            coverage_95 = (covered_95 / count).item()
-            class_coverage_95.append(coverage_95)
             metrics.update({
                 f'{prefix}/count': count_value,
                 f'{prefix}/mae_dex': mae,
                 f'{prefix}/mse_dex2': mse,
                 f'{prefix}/rmse_dex': np.sqrt(mse),
                 f'{prefix}/bias_dex': (bias / count).item(),
-                f'{prefix}/mean_sigma_dex': (sigma / count).item(),
-                f'{prefix}/coverage_68': coverage_68,
-                f'{prefix}/coverage_95': coverage_95,
                 f'{prefix}/class_accuracy': (correct / count).item(),
-                f'{prefix}/nll': mean_nll,
             })
+            if self.has_uncertainty:
+                mean_nll = (nll / count).item()
+                class_nll.append(mean_nll)
+                coverage_68 = (covered_68 / count).item()
+                class_coverage_68.append(coverage_68)
+                coverage_95 = (covered_95 / count).item()
+                class_coverage_95.append(coverage_95)
+                metrics.update({
+                    f'{prefix}/mean_sigma_dex': (sigma / count).item(),
+                    f'{prefix}/coverage_68': coverage_68,
+                    f'{prefix}/coverage_95': coverage_95,
+                    f'{prefix}/nll': mean_nll,
+                })
         if class_mae:
             metrics['val_class/macro_mae_dex'] = float(np.mean(class_mae))
             metrics['val_class/macro_mse_dex2'] = float(np.mean(class_mse))
-            metrics['val_class/macro_nll'] = float(np.mean(class_nll))
-            metrics['val_class/macro_coverage_68'] = float(
-                np.mean(class_coverage_68)
-            )
-            metrics['val_class/macro_coverage_95'] = float(
-                np.mean(class_coverage_95)
-            )
+            if self.has_uncertainty:
+                metrics['val_class/macro_nll'] = float(np.mean(class_nll))
+                metrics['val_class/macro_coverage_68'] = float(
+                    np.mean(class_coverage_68)
+                )
+                metrics['val_class/macro_coverage_95'] = float(
+                    np.mean(class_coverage_95)
+                )
         # Logging through the LightningModule makes macro NLL available to
         # ModelCheckpoint as well as W&B. Every DDP rank has the same totals
         # after all-reduce, so no additional distributed reduction is needed.
-        pl_module.log_dict(
-            metrics, on_step=False, on_epoch=True, logger=True,
-            sync_dist=False,
-        )
-
-
-class PerClassQuantileValidationMetrics(Callback):
-    """Aggregate class-specific pinball, coverage, width, and point errors."""
-
-    METRIC_COUNT = 10
-
-    def on_validation_epoch_start(self, trainer, pl_module):
-        self.totals = torch.zeros(
-            len(FLARE_CLASSES), self.METRIC_COUNT,
-            device=pl_module.device, dtype=torch.float64,
-        )
-
-    def on_validation_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
-    ):
-        if not isinstance(outputs, dict) or 'quantiles_norm' not in outputs:
-            return
-        target_raw = outputs['target_raw'].reshape(-1)
-        target_norm = outputs['target_norm'].reshape(-1)
-        median_norm = outputs['mean_norm'].reshape(-1)
-        prediction_raw = outputs['prediction_raw'].reshape(-1)
-        quantiles_norm = outputs['quantiles_norm']
-        pinball = outputs['pinball_per_sample'].reshape(-1)
-        norm_std = float(pl_module.sxr_norm[1].item())
-        errors = (median_norm - target_norm) * norm_std
-        width_68 = (quantiles_norm[:, 3] - quantiles_norm[:, 1]) * norm_std
-        width_95 = (quantiles_norm[:, 4] - quantiles_norm[:, 0]) * norm_std
-        covered_68 = (
-            (target_norm >= quantiles_norm[:, 1])
-            & (target_norm <= quantiles_norm[:, 3])
-        )
-        covered_95 = (
-            (target_norm >= quantiles_norm[:, 0])
-            & (target_norm <= quantiles_norm[:, 4])
-        )
-
-        predicted_classes = torch.zeros_like(target_raw, dtype=torch.long)
-        predicted_classes = torch.where(
-            prediction_raw >= 1e-7, 1, predicted_classes
-        )
-        predicted_classes = torch.where(
-            prediction_raw >= 1e-6, 2, predicted_classes
-        )
-        predicted_classes = torch.where(
-            prediction_raw >= 1e-5, 3, predicted_classes
-        )
-        predicted_classes = torch.where(
-            prediction_raw >= 1e-4, 4, predicted_classes
-        )
-
-        for class_index, (_, lower, upper) in enumerate(FLARE_CLASSES):
-            mask = (target_raw >= lower) & (target_raw < upper)
-            if not mask.any():
-                continue
-            class_errors = errors[mask]
-            self.totals[class_index] += torch.stack((
-                mask.sum(),
-                class_errors.abs().sum(),
-                class_errors.square().sum(),
-                class_errors.sum(),
-                width_68[mask].sum(),
-                width_95[mask].sum(),
-                covered_68[mask].sum(),
-                covered_95[mask].sum(),
-                (predicted_classes[mask] == class_index).sum(),
-                pinball[mask].sum(),
-            )).to(dtype=torch.float64)
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if trainer.sanity_checking or not hasattr(self, 'totals'):
-            return
-        totals = self.totals.clone()
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
-
-        metrics = {}
-        class_mae = []
-        class_mse = []
-        class_pinball = []
-        class_coverage_68 = []
-        class_coverage_95 = []
-        class_calibration_error = []
-        for class_index, (name, _, _) in enumerate(FLARE_CLASSES):
-            (
-                count, abs_error, squared_error, bias,
-                width_68, width_95, covered_68, covered_95,
-                correct, pinball,
-            ) = totals[class_index]
-            if count.item() == 0:
-                continue
-            prefix = f'val_class/{name}'
-            mae = (abs_error / count).item()
-            mse = (squared_error / count).item()
-            coverage_68 = (covered_68 / count).item()
-            coverage_95 = (covered_95 / count).item()
-            mean_pinball = (pinball / count).item()
-            calibration_error = 0.5 * (
-                abs(coverage_68 - 0.68) + abs(coverage_95 - 0.95)
-            )
-            class_mae.append(mae)
-            class_mse.append(mse)
-            class_pinball.append(mean_pinball)
-            class_coverage_68.append(coverage_68)
-            class_coverage_95.append(coverage_95)
-            class_calibration_error.append(calibration_error)
-            metrics.update({
-                f'{prefix}/count': count.item(),
-                f'{prefix}/mae_dex': mae,
-                f'{prefix}/mse_dex2': mse,
-                f'{prefix}/rmse_dex': np.sqrt(mse),
-                f'{prefix}/bias_dex': (bias / count).item(),
-                f'{prefix}/mean_width_68_dex': (width_68 / count).item(),
-                f'{prefix}/mean_width_95_dex': (width_95 / count).item(),
-                f'{prefix}/coverage_68': coverage_68,
-                f'{prefix}/coverage_95': coverage_95,
-                f'{prefix}/calibration_error': calibration_error,
-                f'{prefix}/class_accuracy': (correct / count).item(),
-                f'{prefix}/pinball': mean_pinball,
-            })
-
-        if class_mae:
-            metrics.update({
-                'val_class/macro_mae_dex': float(np.mean(class_mae)),
-                'val_class/macro_mse_dex2': float(np.mean(class_mse)),
-                'val_class/macro_pinball': float(np.mean(class_pinball)),
-                'val_class/macro_coverage_68': float(
-                    np.mean(class_coverage_68)
-                ),
-                'val_class/macro_coverage_95': float(
-                    np.mean(class_coverage_95)
-                ),
-                'val_class/macro_calibration_error': float(
-                    np.mean(class_calibration_error)
-                ),
-            })
         pl_module.log_dict(
             metrics, on_step=False, on_epoch=True, logger=True,
             sync_dist=False,
@@ -524,64 +398,32 @@ class AttentionMapCallback(Callback):
             n = min(self.num_samples, len(val_ds))
             indices = stratified_validation_indices(val_ds, n)
             samples = [val_ds[index] for index in indices]
-            imgs = torch.stack([sample[0] for sample in samples]).to(pl_module.device)
+            # Attention is O(num_patches^2) per head and layer. Forwarding all
+            # visualization samples together can consume tens of GiB for a
+            # 64x64 patch grid, even though each plot only needs one sample.
+            for sample_idx, sample in enumerate(samples):
+                img = sample[0].unsqueeze(0).to(pl_module.device)
+                outputs = pl_module(img, return_attention=True)
+                if getattr(pl_module, 'predicts_uncertainty', False):
+                    (
+                        _, _, attention_weights, patch_flux_raw,
+                        patch_variance_raw,
+                    ) = outputs
+                    patch_uncertainty = torch.sqrt(patch_variance_raw)
+                    patch_uncertainty_title = (
+                        'Sqrt Global Variance Contribution [W/m²]'
+                        if getattr(
+                            pl_module, 'patch_uncertainty_semantics', None
+                        ) == 'variance_attribution'
+                        else 'Patch Flux Std [W/m²]'
+                    )
+                else:
+                    # (global_flux_raw, attention, patch_flux_raw)
+                    _, attention_weights, patch_flux_raw = outputs
+                    patch_uncertainty = None
+                    patch_uncertainty_title = None
 
-            has_components = bool(getattr(
-                pl_module,
-                'predicts_background_excess_components',
-                False,
-            ))
-            outputs = pl_module(
-                imgs,
-                return_attention=True,
-                **({'return_components': True} if has_components else {}),
-            )
-            component_batch = outputs[-1] if has_components else None
-            if has_components:
-                outputs = outputs[:-1]
-            uncertainty_kind = getattr(
-                pl_module, 'uncertainty_kind', 'gaussian'
-            )
-            patch_quantiles_raw = None
-            if uncertainty_kind == 'quantile':
-                (
-                    _, _, attention_weights, patch_flux_raw,
-                    patch_quantiles_raw,
-                ) = outputs
-                patch_uncertainty = (
-                    patch_quantiles_raw[:, :, 4]
-                    - patch_quantiles_raw[:, :, 0]
-                )
-                patch_uncertainty_title = 'Patch 95% Interval Width [W/m²]'
-            elif getattr(pl_module, 'predicts_uncertainty', False):
-                (
-                    _, _, attention_weights, patch_flux_raw,
-                    patch_variance_raw,
-                ) = outputs
-                if component_batch is not None:
-                    patch_flux_raw = component_batch[
-                        'excess_patch_flux_raw'
-                    ]
-                    patch_variance_raw = component_batch[
-                        'excess_variance_contribution_raw'
-                    ]
-                patch_uncertainty = torch.sqrt(patch_variance_raw)
-                patch_uncertainty_title = (
-                    'Sqrt Local Excess Variance Contribution [W/m²]'
-                    if component_batch is not None
-                    else 'Sqrt Global Variance Contribution [W/m²]'
-                    if getattr(pl_module, 'patch_uncertainty_semantics', None)
-                    == 'variance_attribution'
-                    else 'Patch Flux Std [W/m²]'
-                )
-            else:
-                # (global_flux_raw, attention, patch_flux_raw)
-                _, attention_weights, patch_flux_raw = outputs
-                patch_uncertainty = None
-                patch_uncertainty_title = None
-
-            for sample_idx in range(imgs.size(0)):
-                target_norm = float(samples[sample_idx][1].item())
+                target_norm = float(sample[1].item())
                 sxr_transform = getattr(val_ds, 'sxr_transform', None)
                 if sxr_transform is not None:
                     target_raw = float(
@@ -598,40 +440,22 @@ class AttentionMapCallback(Callback):
                     )
                 else:
                     sample_description = f'normalized target={target_norm:.3g}'
-                if component_batch is not None:
-                    sample_description += (
-                        ', whole-image background='
-                        f"{float(component_batch['background_flux_raw'][sample_idx].item()):.2e} W/m²"
-                    )
                 fig = self._plot_attention_map(
-                    imgs[sample_idx],
+                    img[0],
                     attention_weights,
-                    sample_idx,
+                    0,
                     trainer.current_epoch,
                     patch_size=self.patch_size,
                     aia_transform=getattr(val_ds, 'aia_transform', None),
                     sample_description=sample_description,
-                    patch_flux=patch_flux_raw[sample_idx] if patch_flux_raw is not None else None,
-                    patch_std=(patch_uncertainty[sample_idx]
+                    patch_flux=patch_flux_raw[0] if patch_flux_raw is not None else None,
+                    patch_std=(patch_uncertainty[0]
                                if patch_uncertainty is not None else None),
                     patch_uncertainty_title=patch_uncertainty_title,
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(fig)})
                 plt.close(fig)
-                if patch_quantiles_raw is not None:
-                    quantile_fig = self._plot_spatial_quantile_maps(
-                        imgs[sample_idx],
-                        patch_quantiles_raw[sample_idx],
-                        patch_size=self.patch_size,
-                        aia_transform=getattr(
-                            val_ds, 'aia_transform', None
-                        ),
-                        sample_description=sample_description,
-                    )
-                    trainer.logger.experiment.log({
-                        "Spatial quantile plots": wandb.Image(quantile_fig)
-                    })
-                    plt.close(quantile_fig)
+                del outputs, attention_weights, patch_flux_raw, img
 
         if was_training:
             pl_module.train()
@@ -787,132 +611,8 @@ class AttentionMapCallback(Callback):
         plt.tight_layout()
         return fig
 
-    @classmethod
-    def _plot_spatial_quantile_maps(
-        cls, image, patch_quantiles_raw, patch_size,
-        aia_transform=None, sample_description=None,
-    ):
-        """Visualize q50 flux plus central 68%/95% spatial interval maps."""
-        height, width = image.shape[:2]
-        grid_h, grid_w = height // patch_size, width // patch_size
-        quantiles = patch_quantiles_raw.detach().cpu().float().numpy().reshape(
-            grid_h, grid_w, 5
-        )
-        quantiles = np.nan_to_num(
-            quantiles, nan=0.0, posinf=0.0, neginf=0.0
-        )
-        q025, q16, q50, q84, q975 = np.moveaxis(quantiles, -1, 0)
-        width_68 = np.maximum(q84 - q16, 0)
-        width_95 = np.maximum(q975 - q025, 0)
-
-        fig, axes = plt.subplots(2, 3, figsize=(15, 9))
-        title = 'Spatial Quantile Flux Maps'
-        if sample_description:
-            title += f'\n{sample_description}'
-        fig.suptitle(title, fontsize=15)
-        axes[0, 0].imshow(cls._display_image(image, aia_transform))
-        axes[0, 0].set_title('AIA Image')
-        axes[0, 0].axis('off')
-
-        panels = (
-            (axes[0, 1], q50, 'q50 Patch Flux'),
-            (axes[0, 2], width_68, 'Patch 68% Interval Width'),
-            (axes[1, 0], q025, 'q02.5 Patch Flux'),
-            (axes[1, 1], q975, 'q97.5 Patch Flux'),
-            (axes[1, 2], width_95, 'Patch 95% Interval Width'),
-        )
-        for axis, values, panel_title in panels:
-            positive = values[values > 0]
-            norm = None
-            if positive.size and positive.max() > positive.min():
-                norm = LogNorm(vmin=positive.min(), vmax=positive.max())
-            plotted = axis.imshow(
-                values, cmap='magma', norm=norm, interpolation='nearest'
-            )
-            axis.set_title(panel_title)
-            axis.axis('off')
-            fig.colorbar(plotted, ax=axis, label='Flux [W/m²]')
-        fig.tight_layout()
-        return fig
-
-
-class SpatialQuantileMapCallback(Callback):
-    """Log spatial quantiles without materializing attention matrices."""
-
-    def __init__(self, log_every_n_epochs=1, num_samples=5, patch_size=8):
-        super().__init__()
-        self.log_every_n_epochs = int(log_every_n_epochs)
-        self.num_samples = int(num_samples)
-        self.patch_size = int(patch_size)
-        if self.log_every_n_epochs <= 0:
-            raise ValueError("log_every_n_epochs must be positive")
-        if self.num_samples <= 0:
-            raise ValueError("num_samples must be positive")
-        if self.patch_size <= 0:
-            raise ValueError("patch_size must be positive")
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if (
-            not trainer.is_global_zero
-            or trainer.current_epoch % self.log_every_n_epochs != 0
-            or getattr(pl_module, 'uncertainty_kind', None) != 'quantile'
-        ):
-            return
-        val_ds = trainer.datamodule.val_ds if trainer.datamodule else None
-        if val_ds is None or len(val_ds) == 0:
-            return
-
-        was_training = pl_module.training
-        pl_module.eval()
-        try:
-            with torch.no_grad():
-                count = min(self.num_samples, len(val_ds))
-                indices = stratified_validation_indices(val_ds, count)
-                samples = [val_ds[index] for index in indices]
-                images = torch.stack([
-                    sample[0] for sample in samples
-                ]).to(pl_module.device)
-                # Quantile public output without attention:
-                # q50 global, all global quantiles, q50 patches, all patches.
-                _, _, _, patch_quantiles_raw = pl_module(
-                    images, return_attention=False
-                )
-
-                sxr_transform = getattr(val_ds, 'sxr_transform', None)
-                aia_transform = getattr(val_ds, 'aia_transform', None)
-                for sample_index, sample in enumerate(samples):
-                    target_norm = float(sample[1].item())
-                    if sxr_transform is not None:
-                        target_raw = float(unnormalize_sxr(
-                            target_norm,
-                            np.asarray([
-                                sxr_transform.mean, sxr_transform.std,
-                            ], dtype=np.float64),
-                        ))
-                        description = (
-                            f'{_flare_class(target_raw)} class, '
-                            f'true SXR={target_raw:.2e} W/m²'
-                        )
-                    else:
-                        description = f'normalized target={target_norm:.3g}'
-                    figure = AttentionMapCallback._plot_spatial_quantile_maps(
-                        images[sample_index],
-                        patch_quantiles_raw[sample_index],
-                        patch_size=self.patch_size,
-                        aia_transform=aia_transform,
-                        sample_description=description,
-                    )
-                    trainer.logger.experiment.log({
-                        'Spatial quantile plots': wandb.Image(figure)
-                    })
-                    plt.close(figure)
-        finally:
-            if was_training:
-                pl_module.train()
-
-
-class SpatialGaussianMapCallback(Callback):
-    """Log Gaussian patch flux/uncertainty maps without attention."""
+class SpatialUncertaintyMapCallback(Callback):
+    """Log patch flux and uncertainty maps without attention."""
 
     def __init__(self, log_every_n_epochs=1, num_samples=5, patch_size=8):
         super().__init__()
@@ -934,12 +634,11 @@ class SpatialGaussianMapCallback(Callback):
         return LogNorm(vmin=positive.min(), vmax=positive.max())
 
     @classmethod
-    def _plot_spatial_gaussian_maps(
+    def _plot_spatial_uncertainty_maps(
         cls, image, patch_flux_raw, patch_variance_raw, patch_size,
         aia_transform=None, sample_description=None,
         patch_uncertainty_title='Patch Flux Std',
         patch_uncertainty_label='Std [W/m²]',
-        component_data=None,
     ):
         height, width = image.shape[:2]
         grid_h, grid_w = height // patch_size, width // patch_size
@@ -956,79 +655,6 @@ class SpatialGaussianMapCallback(Callback):
             patch_std, nan=0.0, posinf=0.0, neginf=0.0
         )
         total_flux = float(patch_flux.sum())
-
-        if component_data is not None:
-            excess_flux = component_data[
-                'excess_patch_flux_raw'
-            ].detach().cpu().float().numpy().reshape(grid_h, grid_w)
-            excess_variance = component_data[
-                'excess_variance_contribution_raw'
-            ].detach().cpu().float()
-            excess_uncertainty = torch.sqrt(
-                torch.clamp(excess_variance, min=0)
-            ).numpy().reshape(grid_h, grid_w)
-            excess_flux = np.nan_to_num(
-                excess_flux, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            excess_uncertainty = np.nan_to_num(
-                excess_uncertainty, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            background_flux = float(
-                component_data['background_flux_raw'].item()
-            )
-            background_std = float(torch.sqrt(torch.clamp(
-                component_data['background_variance_raw'].detach().cpu(),
-                min=0,
-            )).item())
-
-            fig, axes = plt.subplots(1, 5, figsize=(24, 4.5))
-            title = (
-                'Background + Local Excess Components'
-                f' | whole-image B={background_flux:.2e} W/m²'
-                f', sqrt(V_B)={background_std:.2e} W/m²'
-            )
-            if sample_description:
-                title += f'\n{sample_description}'
-            fig.suptitle(title, fontsize=14)
-
-            axes[0].imshow(AttentionMapCallback._display_image(
-                image, aia_transform
-            ))
-            axes[0].set_title('AIA Image')
-            axes[0].axis('off')
-            component_panels = (
-                (
-                    axes[1], excess_flux,
-                    f'Learned Local Excess\nsum={excess_flux.sum():.2e}',
-                    'Excess flux [W/m²]', 'viridis',
-                ),
-                (
-                    axes[2], patch_flux,
-                    f'Total Accounting Map\nsum={total_flux:.2e}',
-                    'Accounting flux [W/m²]', 'viridis',
-                ),
-                (
-                    axes[3], excess_uncertainty,
-                    'Sqrt Local Excess\nVariance Contribution',
-                    'Sqrt variance contribution [W/m²]', 'magma',
-                ),
-                (
-                    axes[4], patch_std,
-                    'Sqrt Total Global\nVariance Attribution',
-                    'Sqrt variance attribution [W/m²]', 'magma',
-                ),
-            )
-            for axis, values, panel_title, label, cmap in component_panels:
-                plotted = axis.imshow(
-                    values, cmap=cmap,
-                    norm=cls._positive_log_norm(values),
-                    interpolation='nearest',
-                )
-                axis.set_title(panel_title)
-                axis.axis('off')
-                fig.colorbar(plotted, ax=axis, label=label)
-            fig.tight_layout()
-            return fig
 
         patch_fraction = np.divide(
             patch_flux,
@@ -1078,6 +704,59 @@ class SpatialGaussianMapCallback(Callback):
         fig.tight_layout()
         return fig
 
+    @classmethod
+    def _plot_global_patch_adjustment(
+        cls, image, corrected_patch_flux, log10_adjustment, patch_size,
+        max_abs_adjustment, aia_transform=None, sample_description=None,
+    ):
+        height, width = image.shape[:2]
+        grid_shape = (height // patch_size, width // patch_size)
+        corrected = corrected_patch_flux.detach().cpu().float().numpy().reshape(
+            grid_shape
+        )
+        adjustment = log10_adjustment.detach().cpu().float().numpy().reshape(
+            grid_shape
+        )
+        local = corrected / np.power(10.0, adjustment)
+        positive = np.concatenate((local[local > 0], corrected[corrected > 0]))
+        shared_norm = (
+            LogNorm(vmin=positive.min(), vmax=positive.max())
+            if positive.size and positive.max() > positive.min() else None
+        )
+
+        fig, axes = plt.subplots(1, 4, figsize=(20, 4.5))
+        title = 'Local and Globally Adjusted Patch Flux'
+        if sample_description:
+            title += f'\n{sample_description}'
+        fig.suptitle(title, fontsize=14)
+        axes[0].imshow(AttentionMapCallback._display_image(
+            image, aia_transform
+        ))
+        axes[0].set_title('AIA Image')
+        axes[0].axis('off')
+
+        for axis, values, label in (
+            (axes[1], local, 'Local Patch Flux'),
+            (axes[2], corrected, 'Adjusted Patch Flux'),
+        ):
+            image_plot = axis.imshow(
+                values, cmap='viridis', norm=shared_norm,
+                interpolation='nearest',
+            )
+            axis.set_title(f'{label}\ntotal={values.sum():.2e} W/m²')
+            axis.axis('off')
+            fig.colorbar(image_plot, ax=axis, label='Flux [W/m²]')
+
+        image_plot = axes[3].imshow(
+            adjustment, cmap='coolwarm', interpolation='nearest',
+            vmin=-max_abs_adjustment, vmax=max_abs_adjustment,
+        )
+        axes[3].set_title('Global Patch Adjustment')
+        axes[3].axis('off')
+        fig.colorbar(image_plot, ax=axes[3], label='log10 multiplier [dex]')
+        fig.tight_layout()
+        return fig
+
     def on_validation_epoch_end(self, trainer, pl_module):
         if (
             not trainer.is_global_zero
@@ -1099,25 +778,13 @@ class SpatialGaussianMapCallback(Callback):
                 images = torch.stack([
                     sample[0] for sample in samples
                 ]).to(pl_module.device)
-                has_components = bool(getattr(
-                    pl_module,
-                    'predicts_background_excess_components',
-                    False,
-                ))
-                if has_components:
-                    (
-                        prediction_raw, _, patch_flux_raw,
-                        patch_variance_raw, component_batch,
-                    ) = pl_module(
-                        images,
-                        return_attention=False,
-                        return_components=True,
-                    )
-                else:
-                    prediction_raw, _, patch_flux_raw, patch_variance_raw = (
-                        pl_module(images, return_attention=False)
-                    )
-                    component_batch = None
+                prediction_raw, _, patch_flux_raw, patch_variance_raw = (
+                    pl_module(images, return_attention=False)
+                )
+                network = getattr(pl_module, 'model', None)
+                global_adjustment = getattr(
+                    network, 'last_log10_global_patch_adjustment', None
+                )
                 is_variance_attribution = getattr(
                     pl_module, 'patch_uncertainty_semantics', None
                 ) == 'variance_attribution'
@@ -1140,7 +807,7 @@ class SpatialGaussianMapCallback(Callback):
                         )
                     else:
                         description = f'normalized target={target_norm:.3g}'
-                    figure = self._plot_spatial_gaussian_maps(
+                    figure = self._plot_spatial_uncertainty_maps(
                         images[sample_index],
                         patch_flux_raw[sample_index],
                         patch_variance_raw[sample_index],
@@ -1157,18 +824,29 @@ class SpatialGaussianMapCallback(Callback):
                             if is_variance_attribution
                             else 'Std [W/m²]'
                         ),
-                        component_data=(
-                            {
-                                key: value[sample_index]
-                                for key, value in component_batch.items()
-                            }
-                            if component_batch is not None else None
-                        ),
                     )
                     trainer.logger.experiment.log({
-                        'Spatial Gaussian plots': wandb.Image(figure)
+                        'Spatial uncertainty plots': wandb.Image(figure)
                     })
                     plt.close(figure)
+                    if global_adjustment is not None:
+                        adjustment_figure = self._plot_global_patch_adjustment(
+                            images[sample_index],
+                            patch_flux_raw[sample_index],
+                            global_adjustment[sample_index],
+                            patch_size=self.patch_size,
+                            max_abs_adjustment=(
+                                network.max_abs_log10_global_adjustment
+                            ),
+                            aia_transform=aia_transform,
+                            sample_description=description,
+                        )
+                        trainer.logger.experiment.log({
+                            'Global patch adjustment plots': wandb.Image(
+                                adjustment_figure
+                            )
+                        })
+                        plt.close(adjustment_figure)
         finally:
             if was_training:
                 pl_module.train()

@@ -20,7 +20,7 @@ epochs: 25
 seed: 42
 accumulate_grad_batches: 1
 
-model_type: gaussian_nll
+model_type: uncertainty
 
 uncertainty:
   huber_delta: 0.15
@@ -51,7 +51,7 @@ optimizer:
 
 loss:
   # This legacy deterministic-model block is retained to match the original
-  # logged configuration; gaussian_nll does not use it.
+  # logged configuration; the uncertainty model does not use it.
   base_weights:
     quiet: 1.0
     c_class: 1.77
@@ -89,12 +89,9 @@ callbacks:
   per_class_metrics_enabled: true
   sxr_plot_enabled: true
   sxr_plot_num_samples: 5
-  spatial_quantile_enabled: false
-  spatial_quantile_num_samples: 5
-  spatial_quantile_log_every_n_epochs: 1
-  spatial_gaussian_enabled: true
-  spatial_gaussian_num_samples: 5
-  spatial_gaussian_log_every_n_epochs: 1
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5
+  spatial_uncertainty_log_every_n_epochs: 1
   attention_enabled: false
   attention_num_samples: 8
   attention_log_every_n_epochs: 1

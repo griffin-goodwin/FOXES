@@ -1,0 +1,14 @@
+# Small-subset uncertainty run; every attention block excludes its nearby 3x3 patches.
+base_config: subset_base.yaml
+
+vit_architecture:
+  mask_mode: inverted
+  local_window: 3
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-Subset-Inverted-3-LR1e5/
+
+wandb:
+  run_name: OG-Subset-Inverted-3-LR1e5
+  tags: [subset-og-quick, foxes-og, uncertainty, positive-patch-mean, inverted-attention, inverted-window-3, lr-1e-5]
+  notes: Small-subset uncertainty model at learning rate 0.00001 with a 3x3 inverted attention mask in all 12 layers; inspect validation patch-flux maps.

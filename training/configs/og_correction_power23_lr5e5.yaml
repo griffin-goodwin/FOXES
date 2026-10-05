@@ -1,0 +1,150 @@
+# =============================================================================
+# FOXES correction-head intermediate-weight experiment
+# =============================================================================
+# Used by train.py to train the ViTLocal model on paired AIA/SXR .npy data.
+# Expects aia_dir/sxr_dir to each have train/val/test subfolders (that's what
+# data/build_dataset.py produces).
+#
+# Usage:
+#   python training/train.py --config training/configs/og_correction_power23_lr5e5.yaml
+# =============================================================================
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+
+# GPU configuration:
+#   0 (or any int)  - that single GPU
+#   [0, 1]          - those specific GPUs
+#   "all"           - every available GPU
+#   -1              - CPU only
+gpu_ids: "all"
+
+batch_size: 48
+epochs: 25
+seed: 42
+accumulate_grad_batches: 1
+
+# Canonical model with configurable patch-mean parameterization and detached
+# Gaussian patch uncertainty.
+model_type: uncertainty
+mean_parameterization: positive  # original, multiplier, or positive
+
+uncertainty:
+  enabled: true
+  # Train uncertainty immediately alongside the mean model.
+  start_epoch: 0
+  # The shared head sees only each detached mean-head patch logit and predicts
+  # log10 relative standard deviation for that patch. These dimensionless values
+  # scale physical patch flux before independent variance contributions sum.
+  initial_relative_std: 1.0
+  min_log10_relative_std: -6.0
+  max_log10_relative_std: 6.0
+  uncertainty_hidden_dim: 16
+  # Huber is the only mean objective. Class weights are calculated from the
+  # configured training split and normalized to mean sample weight one.
+  huber_delta: 0.15
+  class_weighting: power_inverse_frequency
+  class_weight_exponent: 0.6666666666666666
+
+# Deterministic-model-only option: compute its legacy class weights from the
+# training data before starting. Both probabilistic models ignore it.
+calculate_base_weights: false
+
+vit_architecture:
+  embed_dim: 512
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  hidden_dim: 2048
+  num_heads: 8
+  num_layers: 12
+  dropout: 0.1
+  learning_rate: 0.00005
+  # Self-attention masking - one of:
+  #   inverted - the released model's behavior: each patch attends to DISTANT
+  #              patches (the flipped local-attention mask it was trained with)
+  #   local    - true local attention: each patch attends to its neighborhood
+  #   none     - standard full/global attention (no masking)
+  mask_mode: local
+  local_window: 3   # neighbourhood side length (patches), used by inverted/local
+  global_patch_adjustment: true
+  max_abs_log10_global_adjustment: 1.5
+
+optimizer:
+  weight_decay: 0.00001   # Match the first correction-head run
+  gradient_clip_val: null
+  scheduler:              # CosineAnnealingLR, stepped once per epoch
+    T_max: 25            # decay to eta_min over all 25 epochs
+    eta_min: 0.000001
+
+loss:
+  # Everything in this block belongs to the deterministic legacy model only.
+  base_weights:
+    quiet: 1.0
+    c_class: 1.77
+    m_class: 3.20
+    x_class: 14.75
+
+  huber_delta: 0.3
+  window_size: 15000        # rolling error-history length per flare class
+  diagnostic_every_n_steps: 200   # how often to log per-class adaptive weights
+
+  # Note: quiet/C/M/X flux boundaries (1e-6/1e-5/1e-4 W/m^2) are the fixed GOES
+  # flare-class definition, not configurable here — see
+  # SXRRegressionDynamicLoss.CLASS_THRESHOLDS in forecasting/model.py.
+
+  # Deterministic-model advanced option: per-class {max_multiplier, min_multiplier, sensitivity,
+  # min_samples, recent_window} controlling how far recent performance can
+  # move a class's weight from its base_weight. Leave null to use
+  # SXRRegressionDynamicLoss.DEFAULT_ADAPTIVE_MULTIPLIERS.
+  adaptive_multipliers: null
+
+checkpoint:
+  # Keep every epoch to compare MSE, X error, coverage, and spatial maps.
+  monitor: val/mse
+  mode: min
+  save_top_k: -1
+  save_last: true
+  include_step_in_filename: false
+  include_monitor_in_filename: true
+
+early_stopping:
+  enabled: false
+  monitor: val_class/macro_mse_dex2
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
+
+logging:
+  log_every_n_steps: 10   # Trainer step-logging interval
+
+callbacks:
+  per_class_metrics_enabled: true  # validation metrics for <B/B/C/M/X
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100          # validation samples shown in the pred-vs-true SXR plot
+  # Low-memory uncertainty patch flux/std maps. Leave off when the attention
+  # callback is enabled because that callback already contains these maps.
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5  # one per <B/B/C/M/X when available
+  spatial_uncertainty_log_every_n_epochs: 1
+  attention_enabled: false
+  attention_num_samples: 8         # validation samples visualized per attention-map epoch
+  attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
+
+data:
+  aia_dir: "/data/FOXES_OG/AIA_processed"
+  sxr_dir: "/data/FOXES_OG/SXR_processed"
+  sxr_norm_path: "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
+  # Must be computed from the training split only.
+  aia_norm_path: #"/data/aia_q90_asinh_q99999_norm_streamed.npz"
+  checkpoints_dir: "/data/checkpoints/FOXES-OG-CORRECTION-POWER23-LR5E5/"
+  num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
+
+wandb:
+  entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
+  project: FOXES-SDOML
+  job_type: training
+  tags: [full-data, foxes-og, embed-512, layers-12, local-3, positive-patch-mean, power23-weighted-huber, detached-patch-uncertainty, lr-5e-5]
+  run_name: OG-Correction-Power23-LR5e5
+  notes: From-scratch 25-epoch intermediate weighting run; class weight exponent 2/3, LR 5e-5, AdamW decay 1e-5, and matched cosine T_max 25.

@@ -1,0 +1,14 @@
+# Matched local-attention control for the two inverted-window runs.
+base_config: subset_base.yaml
+
+vit_architecture:
+  mask_mode: local
+  local_window: 3
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-Subset-Local-3-LR1e5/
+
+wandb:
+  run_name: OG-Subset-Local-3-LR1e5
+  tags: [subset-og-quick, foxes-og, uncertainty, positive-patch-mean, local-attention, local-window-3, lr-1e-5]
+  notes: Matched small-subset local 3x3 control at learning rate 0.00001 for inverted-attention window comparison.

@@ -1,0 +1,43 @@
+# Run from the repository root:
+# python training/train.py --config training/configs/finetune_power23_epoch14_unweighted.yaml
+# Five NEW epochs. Load model weights only; do not pass --ckpt-path.
+base_config: og_correction_power23_lr5e5.yaml
+
+epochs: 5
+
+uncertainty:
+  class_weighting: none
+  class_weight_exponent: null
+  huber_delta: 0.15
+  # Keep the existing detached uncertainty branch; it cannot update the mean.
+  enabled: true
+  start_epoch: 0
+
+vit_architecture:
+  learning_rate: 0.00001
+
+optimizer:
+  weight_decay: 0.00001
+  gradient_clip_val: null
+  scheduler:
+    T_max: 5
+    eta_min: 0.000001
+
+checkpoint:
+  initialize_from: /data/checkpoints/FOXES-OG-CORRECTION-POWER23-LR5E5/last.ckpt
+  resume_from: null
+  monitor: val/mse
+  mode: min
+  save_top_k: -1
+  save_last: true
+
+early_stopping:
+  enabled: false
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-POWER23-E14-FINETUNE-UNWEIGHTED-LR1E5/
+
+wandb:
+  run_name: OG-Power23-E14-Finetune-Unweighted-LR1e5
+  tags: [full-data, foxes-og, finetune, positive-patch-mean, local-3, unweighted-huber, detached-patch-uncertainty, lr-1e-5]
+  notes: Five new epochs from power23 epoch 14; weights-only initialization, fresh AdamW and cosine schedule, unweighted Huber delta 0.15. Select using validation MSE and MAE.

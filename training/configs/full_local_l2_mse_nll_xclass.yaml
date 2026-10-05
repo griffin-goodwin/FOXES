@@ -24,9 +24,10 @@ epochs: 25
 seed: 42
 accumulate_grad_batches: 1
 
-model_type: gaussian_nll
+model_type: uncertainty
 
 uncertainty:
+  start_epoch: 0
   # The point head is trained directly with MSE. Gaussian NLL trains the
   # uncertainty head with the point prediction and shared features detached,
   # so uncertainty gradients cannot move the point prediction/backbone.
@@ -34,9 +35,13 @@ uncertainty:
   train_uncertainty: true
   beta_nll_beta: 0.0
 
-  relative_std_floor: 0.0025
-  relative_std_max: 20.0
-  patch_scale_floor_fraction: 1.0
+  # Logit-conditioned relative patch-standard-deviation parameterization.
+  # Initialize each patch to 100% relative standard deviation; there is no
+  # sqrt(num_patches) scaling.
+  initial_relative_std: 1.0
+  min_log10_relative_std: -4.0
+  max_log10_relative_std: 4.0
+  uncertainty_hidden_dim: 16
   patch_flux_scale_multiplier: 1.0
   max_abs_log10_patch_multiplier: 8.0
   mean_huber_delta: 1.0
@@ -94,12 +99,9 @@ callbacks:
   per_class_metrics_enabled: true
   sxr_plot_enabled: true
   sxr_plot_num_samples: 5
-  spatial_quantile_enabled: false
-  spatial_quantile_num_samples: 5
-  spatial_quantile_log_every_n_epochs: 1
-  spatial_gaussian_enabled: true
-  spatial_gaussian_num_samples: 5
-  spatial_gaussian_log_every_n_epochs: 1
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5
+  spatial_uncertainty_log_every_n_epochs: 1
   attention_enabled: false
   attention_num_samples: 8
   attention_log_every_n_epochs: 1

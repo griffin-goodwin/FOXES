@@ -14,6 +14,9 @@ Usage:
     python training/train.py --config training/train_config.yaml
     python training/train.py --config training/train_config.yaml \
         --ckpt-path /path/to/checkpoint.ckpt
+
+For fine-tuning with a fresh optimizer, set checkpoint.initialize_from in the
+YAML instead of --ckpt-path/checkpoint.resume_from. epochs then counts NEW epochs.
 """
 
 import argparse
@@ -36,28 +39,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from training.callbacks import (
     AttentionMapCallback,
     ImagePredictionLogger_SXR,
-    PerClassQuantileValidationMetrics,
     PerClassValidationMetrics,
-    SpatialGaussianMapCallback,
-    SpatialQuantileMapCallback,
+    SpatialUncertaintyMapCallback,
 )
 from forecasting.dataset import AIAGOESDataModule
 from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
-from forecasting.model_uncertainty import GaussianNLLViTLocal
-from forecasting.model_uncertainty_background_excess import (
-    BackgroundExcessGaussianNLLViTLocal,
-)
-from forecasting.model_uncertainty_og import OGGaussianNLLViTLocal
-from forecasting.model_quantile import QuantileViTLocal
+from forecasting.uncertainty_model import GaussianNLLViTLocal
+from training.strategies import TrainingStreamDDPStrategy
 
 
-FIVE_CLASS_KEYS = (
-    'below_b', 'b_class', 'c_class', 'm_class', 'x_class',
-)
 FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
-GAUSSIAN_MODEL_TYPES = {
-    'gaussian_nll', 'gaussian_nll_background_excess', 'gaussian_nll_og',
-}
 
 
 def resolve_config_variables(config_dict):
@@ -91,6 +82,41 @@ def resolve_config_variables(config_dict):
             return substitute_value(obj, variables)
 
     return recursive_substitute(config_dict, variables)
+
+
+def _deep_merge_config(base, overrides):
+    """Recursively merge YAML overrides without mutating either input."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_training_config(config_path):
+    """Load a training YAML, optionally inheriting from ``base_config``."""
+    config_path = Path(config_path).expanduser().resolve()
+
+    def load_one(path, ancestors):
+        if path in ancestors:
+            chain = ' -> '.join(str(item) for item in (*ancestors, path))
+            raise ValueError(f"Circular base_config chain: {chain}")
+        with path.open('r') as stream:
+            current = yaml.safe_load(stream) or {}
+        if not isinstance(current, dict):
+            raise ValueError(f"Training config must be a mapping: {path}")
+        base_reference = current.pop('base_config', None)
+        if base_reference is None:
+            return current
+        base_path = Path(base_reference).expanduser()
+        if not base_path.is_absolute():
+            base_path = path.parent / base_path
+        base = load_one(base_path.resolve(), (*ancestors, path))
+        return _deep_merge_config(base, current)
+
+    return resolve_config_variables(load_one(config_path, ()))
 
 
 def get_base_weights(data_module, sxr_norm):
@@ -150,77 +176,20 @@ def get_base_weights(data_module, sxr_norm):
     return weights
 
 
-def get_five_class_macro_weights(data_module):
-    """Count training targets and return exact <B/B/C/M/X macro weights.
-
-    Only the small scalar SXR files are read; AIA images and data transforms
-    are not loaded. For class ``k``, ``N / (5 * N_k)`` makes the expected
-    weighted sample mean equal the average of the five class-mean NLLs.
-    """
-    dataset = data_module.train_ds
-    counts = dict.fromkeys(FIVE_CLASS_KEYS, 0)
-    print("Calculating five-class macro-objective weights from training targets...")
-
-    for index, timestamp in enumerate(dataset.samples, start=1):
-        path = dataset.sxr_dir / f"{timestamp}.npy"
-        value = np.load(path, allow_pickle=False)
-        if value.size != 1:
-            raise ValueError(
-                f"Expected one SXR value in {path}, found {value.size}"
-            )
-        flux = float(value.reshape(-1)[0])
-        if not np.isfinite(flux):
-            raise ValueError(f"Non-finite SXR flux in {path}: {flux!r}")
-        if flux < 1e-7:
-            class_name = 'below_b'
-        elif flux < 1e-6:
-            class_name = 'b_class'
-        elif flux < 1e-5:
-            class_name = 'c_class'
-        elif flux < 1e-4:
-            class_name = 'm_class'
-        else:
-            class_name = 'x_class'
-        counts[class_name] += 1
-        if index % 10_000 == 0:
-            print(
-                f"Counted {index:,}/{len(dataset.samples):,} "
-                "training targets..."
-            )
-
-    empty = [name for name, count in counts.items() if count == 0]
-    if empty:
-        raise ValueError(
-            "The five-class macro objective requires at least one training example in "
-            f"every <B/B/C/M/X bin; empty bins: {empty}"
-        )
-    total = sum(counts.values())
-    weights = {
-        name: total / (len(FIVE_CLASS_KEYS) * counts[name])
-        for name in FIVE_CLASS_KEYS
-    }
-    print(f"Five-class training counts: {counts}")
-    print(
-        "Five-class macro weights: "
-        + ", ".join(
-            f"{name}={weights[name]:.4f}" for name in FIVE_CLASS_KEYS
-        )
-    )
-    return counts, weights
-
-
 def get_four_class_macro_weights(data_module, exponent=1.0):
     """Return quiet/C/M/X weights computed from scalar training targets.
 
     ``exponent=1`` produces inverse-frequency macro weights. ``exponent=0.5``
-    produces their square-root relative weighting. Both are normalized to an
+    produces their square-root relative weighting. Any exponent in (0, 1]
+    is supported. Weights are normalized to an
     expected sample weight of one, so changing the scheme does not silently
     change the scale of the mean loss relative to uncertainty NLL. Only SXR
     targets are read; loading all AIA images merely to count classes would
     make startup unnecessarily costly.
     """
-    if exponent not in {0.5, 1.0}:
-        raise ValueError("four-class weighting exponent must be 0.5 or 1.0")
+    if (isinstance(exponent, bool) or not isinstance(exponent, (int, float))
+            or not np.isfinite(exponent) or not 0 < exponent <= 1):
+        raise ValueError("four-class weighting exponent must be in (0, 1]")
     dataset = data_module.train_ds
     counts = dict.fromkeys(FOUR_CLASS_KEYS, 0)
     thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
@@ -290,11 +259,14 @@ def resolve_devices(gpu_config):
         return "cpu", 1, "auto"
 
     if gpu_config == "all":
-        print(f"Using all available GPUs ({torch.cuda.device_count()} GPUs)")
-        return "gpu", -1, "auto"
+        device_count = torch.cuda.device_count()
+        print(f"Using all available GPUs ({device_count} GPUs)")
+        strategy = TrainingStreamDDPStrategy() if device_count > 1 else "auto"
+        return "gpu", -1, strategy
     if isinstance(gpu_config, list):
         print(f"Using GPUs: {gpu_config}")
-        return "gpu", gpu_config, "auto"
+        strategy = TrainingStreamDDPStrategy() if len(gpu_config) > 1 else "auto"
+        return "gpu", gpu_config, strategy
     print(f"Using GPU {gpu_config}")
     return "gpu", [gpu_config], "auto"
 
@@ -329,20 +301,95 @@ def resolve_resume_checkpoint(checkpoint_config, cli_checkpoint_path=None):
 
 def build_checkpoint_callback(config_data, checkpoint_config):
     """Build the checkpoint callback shared by fresh and resumed runs."""
+    monitor = checkpoint_config.get('monitor', 'val_total_loss')
+    filename = f"{config_data['wandb']['run_name']}-epoch={{epoch:02d}}"
+    if checkpoint_config.get('include_step_in_filename', True):
+        filename += "-step={step:06d}"
+    if checkpoint_config.get('include_monitor_in_filename', False):
+        metric_label = monitor.replace('/', '_')
+        filename += f"-{metric_label}={{{monitor}:.4f}}"
     return ModelCheckpoint(
         dirpath=config_data['data']['checkpoints_dir'],
-        monitor=checkpoint_config.get('monitor', 'val_total_loss'),
+        monitor=monitor,
         mode=checkpoint_config.get('mode', 'min'),
         save_top_k=checkpoint_config.get('save_top_k', 10),
         save_last=checkpoint_config.get('save_last', False),
-        # Selection is controlled by ``monitor`` above. Avoid embedding a
-        # different metric in the filename: beta-NLL losses have incomparable
-        # scales even when runs are all selected by val/mse.
-        filename=(
-            f"{config_data['wandb']['run_name']}"
-            "-{epoch:02d}-{step:06d}"
-        ),
+        filename=filename,
+        auto_insert_metric_name=False,
     )
+
+
+def resolve_initialization_checkpoint(checkpoint_config, resume_checkpoint=None):
+    """Resolve weights-only initialization, mutually exclusive with full resume."""
+    path = checkpoint_config.get('initialize_from')
+    if path in {None, ''}:
+        return None
+    if resume_checkpoint is not None:
+        raise ValueError(
+            'checkpoint.initialize_from cannot be combined with '
+            'checkpoint.resume_from or --ckpt-path'
+        )
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f'Initialization checkpoint does not exist: {path}')
+    return str(path.resolve())
+
+
+def initialize_model_weights(model, checkpoint_path):
+    """Load a trusted local Lightning checkpoint without restoring training state.
+
+    The new model retains the configured objective, LR and scheduler. Strict
+    loading includes the uncertainty head. A patch-specific global module may
+    be new, and its replacement of the old shared-global module may leave old
+    checkpoint weights unused. No other mismatches are allowed. Normalization
+    and attention masks must match.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    state = checkpoint['state_dict']
+    current = model.state_dict()
+    for name, value in state.items():
+        if name == 'sxr_norm' or name.endswith('.attention_mask'):
+            if name in current and not torch.equal(value, current[name]):
+                raise ValueError(f'Initialization checkpoint differs in {name}')
+    saved_mean = checkpoint.get('hyper_parameters', {}).get('mean_parameterization')
+    if saved_mean is not None and saved_mean != model.hparams.get('mean_parameterization'):
+        raise ValueError('Initialization checkpoint differs in mean_parameterization')
+    result = model.load_state_dict(state, strict=False)
+    allowed_missing = {
+        name for name in current
+        if name.startswith('model.patch_global_context.')
+    }
+    replacing_old_global = (
+        getattr(model.model, 'patch_global_context', None) is not None
+        and not model.model.global_patch_adjustment
+    )
+    old_global_prefixes = (
+        'model.global_raw_patch_projection.',
+        'model.global_attention.',
+        'model.global_patch_head.',
+    )
+    allowed_unexpected = {
+        name for name in result.unexpected_keys
+        if replacing_old_global and (
+            name == 'model.global_query'
+            or name.startswith(old_global_prefixes)
+        )
+    }
+    if (set(result.unexpected_keys) - allowed_unexpected
+            or set(result.missing_keys) - allowed_missing):
+        raise RuntimeError(
+            'Initialization checkpoint is incompatible: '
+            f'missing={result.missing_keys}, unexpected={result.unexpected_keys}'
+        )
+    metadata = {
+        'source_epoch': checkpoint.get('epoch'),
+        'source_global_step': checkpoint.get('global_step'),
+    }
+    if result.missing_keys:
+        metadata['new_parameter_keys'] = list(result.missing_keys)
+    if result.unexpected_keys:
+        metadata['skipped_parameter_keys'] = list(result.unexpected_keys)
+    return metadata
 
 
 def get_resume_fit_kwargs(resume_checkpoint):
@@ -356,6 +403,53 @@ def get_resume_fit_kwargs(resume_checkpoint):
         'ckpt_path': resume_checkpoint,
         'weights_only': False,
     }
+
+
+def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
+    """Build the callback set shared by both trainable model types.
+
+    Per-class metrics, prediction plots, and attention plots use adaptive
+    callback interfaces and are identical for the deterministic and
+    uncertainty models. Only the spatial uncertainty map is model-specific.
+    """
+    callbacks_cfg = config_data.get('callbacks', {})
+    callbacks = []
+    if callbacks_cfg.get('per_class_metrics_enabled', True):
+        callbacks.append(PerClassValidationMetrics())
+    if callbacks_cfg.get('sxr_plot_enabled', True):
+        callbacks.append(ImagePredictionLogger_SXR(
+            data_module.val_ds,
+            callbacks_cfg.get('sxr_plot_num_samples', 4),
+            sxr_norm,
+        ))
+
+    patch_size = config_data.get('vit_architecture', {}).get(
+        'patch_size', 16
+    )
+    if (
+        model_type == 'uncertainty'
+        and config_data.get('uncertainty', {}).get('enabled', True)
+        and callbacks_cfg.get('spatial_uncertainty_enabled', False)
+    ):
+        callbacks.append(SpatialUncertaintyMapCallback(
+            patch_size=patch_size,
+            num_samples=callbacks_cfg.get(
+                'spatial_uncertainty_num_samples', 5
+            ),
+            log_every_n_epochs=callbacks_cfg.get(
+                'spatial_uncertainty_log_every_n_epochs', 1
+            ),
+        ))
+    if callbacks_cfg.get('attention_enabled', True):
+        callbacks.append(AttentionMapCallback(
+            patch_size=patch_size,
+            use_local_attention=True,
+            num_samples=callbacks_cfg.get('attention_num_samples', 4),
+            log_every_n_epochs=callbacks_cfg.get(
+                'attention_log_every_n_epochs', 1
+            ),
+        ))
+    return callbacks
 
 
 def main():
@@ -373,9 +467,7 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(args.config, 'r') as stream:
-        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
-    config_data: dict = resolve_config_variables(config_data)
+    config_data: dict = load_training_config(args.config)
     seed_everything(config_data.get('seed', 42), workers=True)
 
     print("Resolved paths:")
@@ -390,10 +482,12 @@ def main():
     loss_cfg = config_data.get('loss', {})
     checkpoint_cfg = config_data.get('checkpoint', {})
     logging_cfg = config_data.get('logging', {})
-    callbacks_cfg = config_data.get('callbacks', {})
     data_cfg = config_data.get('data', {})
     resume_checkpoint = resolve_resume_checkpoint(
         checkpoint_cfg, args.ckpt_path
+    )
+    initialization_checkpoint = resolve_initialization_checkpoint(
+        checkpoint_cfg, resume_checkpoint
     )
     if resume_checkpoint is not None:
         print(f"Resuming training state from: {resume_checkpoint}")
@@ -414,25 +508,44 @@ def main():
     data_module.setup()
 
     model_type = config_data.get('model_type', 'deterministic')
-    class_balanced_objective = (
-        model_type in GAUSSIAN_MODEL_TYPES
-        and config_data.get('uncertainty', {}).get('nll_weighting')
-        == 'five_class'
-    ) or (
-        model_type == 'quantile'
-        and config_data.get('quantile', {}).get('loss_weighting')
-        == 'five_class'
-    )
-    if class_balanced_objective:
-        five_class_counts, five_class_weights = get_five_class_macro_weights(
-            data_module
+    mean_parameterization = str(
+        config_data.get('mean_parameterization', 'multiplier')
+    ).lower()
+    if model_type not in {'deterministic', 'uncertainty'}:
+        raise ValueError(
+            f"Unknown model_type {model_type!r}; expected 'deterministic' "
+            "or 'uncertainty'"
         )
-        objective_key = (
-            'quantile' if model_type == 'quantile' else 'uncertainty'
+    if (
+        model_type == 'uncertainty'
+        and mean_parameterization not in
+        GaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATIONS
+    ):
+        raise ValueError(
+            'mean_parameterization must be one of '
+            f'{GaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATIONS}'
         )
-        config_data[objective_key]['five_class_weights'] = five_class_weights
-        config_data['computed_five_class_train_counts'] = five_class_counts
-
+    if model_type == 'uncertainty':
+        initialization = (
+            GaussianNLLViTLocal.NETWORK_CLASS.MEAN_HEAD_INITIALIZATIONS[
+                mean_parameterization
+            ]
+        )
+        config_data.setdefault('experiment_metadata', {}).update({
+            'mean_parameterization': mean_parameterization,
+            'mean_head_initialization': initialization,
+            'uncertainty_parameterization': (
+                'logit_conditioned_relative_log10_patch_std'
+                if config_data.get('uncertainty', {}).get('enabled', True)
+                else None
+            ),
+            'uncertainty_likelihood_space': 'normalized_log10_sxr',
+            'contrast_prior': (
+                'hot_channel_spatial_cosine'
+                if config_data.get('contrast_prior', {}).get('enabled', False)
+                else None
+            ),
+        })
     uncertainty_config = config_data.get('uncertainty', {})
     class_weighting = uncertainty_config.get(
         'class_weighting',
@@ -442,16 +555,20 @@ def main():
         }.get(uncertainty_config.get('mean_loss_weighting')),
     )
     mean_class_balanced = (
-        model_type in GAUSSIAN_MODEL_TYPES
+        model_type == 'uncertainty'
         and class_weighting
-        in {'inverse_frequency', 'sqrt_inverse_frequency'}
+        in {'inverse_frequency', 'sqrt_inverse_frequency',
+            'power_inverse_frequency'}
     )
     if mean_class_balanced:
+        exponent = {
+            'inverse_frequency': 1.0,
+            'sqrt_inverse_frequency': 0.5,
+        }.get(class_weighting)
+        if exponent is None:
+            exponent = uncertainty_config.get('class_weight_exponent')
         four_class_counts, four_class_weights = get_four_class_macro_weights(
-            data_module,
-            exponent=(
-                0.5 if class_weighting == 'sqrt_inverse_frequency' else 1.0
-            ),
+            data_module, exponent=exponent,
         )
         config_data['uncertainty']['class_weights'] = four_class_weights
         config_data['computed_four_class_train_counts'] = four_class_counts
@@ -466,55 +583,16 @@ def main():
         config=config_data,
     )
 
-    # Callbacks. Expensive visualizations can be disabled for short parameter
-    # screening runs while remaining enabled by default for normal training.
-    callbacks = []
-    if callbacks_cfg.get('per_class_metrics_enabled', True):
-        callbacks.append(
-            PerClassQuantileValidationMetrics()
-            if model_type == 'quantile'
-            else PerClassValidationMetrics()
+    callbacks = build_model_callbacks(
+        config_data, data_module, sxr_norm, model_type
+    )
+    print(
+        "Visualization callbacks: "
+        + (
+            ", ".join(type(callback).__name__ for callback in callbacks)
+            if callbacks else "none"
         )
-    if callbacks_cfg.get('sxr_plot_enabled', True):
-        callbacks.append(ImagePredictionLogger_SXR(
-            data_module.val_ds,
-            callbacks_cfg.get('sxr_plot_num_samples', 4),
-            sxr_norm,
-        ))
-    patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
-    if (
-        model_type == 'quantile'
-        and callbacks_cfg.get('spatial_quantile_enabled', False)
-    ):
-        callbacks.append(SpatialQuantileMapCallback(
-            patch_size=patch_size,
-            num_samples=callbacks_cfg.get(
-                'spatial_quantile_num_samples', 5
-            ),
-            log_every_n_epochs=callbacks_cfg.get(
-                'spatial_quantile_log_every_n_epochs', 1
-            ),
-        ))
-    if (
-        model_type in GAUSSIAN_MODEL_TYPES
-        and callbacks_cfg.get('spatial_gaussian_enabled', False)
-    ):
-        callbacks.append(SpatialGaussianMapCallback(
-            patch_size=patch_size,
-            num_samples=callbacks_cfg.get(
-                'spatial_gaussian_num_samples', 5
-            ),
-            log_every_n_epochs=callbacks_cfg.get(
-                'spatial_gaussian_log_every_n_epochs', 1
-            ),
-        ))
-    if callbacks_cfg.get('attention_enabled', True):
-        callbacks.append(AttentionMapCallback(
-            patch_size=patch_size,
-            use_local_attention=True,
-            num_samples=callbacks_cfg.get('attention_num_samples', 4),
-            log_every_n_epochs=callbacks_cfg.get('attention_log_every_n_epochs', 1),
-        ))
+    )
 
     base_weights = (get_base_weights(data_module, sxr_norm)
                     if config_data.get('calculate_base_weights') else loss_cfg.get('base_weights'))
@@ -525,27 +603,33 @@ def main():
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
     )
-    if model_type == 'gaussian_nll':
+    if model_type == 'uncertainty':
+        contrast_prior_config = dict(
+            config_data.get('contrast_prior', {})
+        )
+        contrast_wavelengths = contrast_prior_config.pop(
+            'wavelengths', []
+        )
+        missing_contrast_wavelengths = [
+            wavelength for wavelength in contrast_wavelengths
+            if wavelength not in wavelengths
+        ]
+        if missing_contrast_wavelengths:
+            raise ValueError(
+                "contrast_prior wavelengths are absent from model input: "
+                f"{missing_contrast_wavelengths}"
+            )
+        contrast_prior_config['channel_indices'] = [
+            wavelengths.index(wavelength)
+            for wavelength in contrast_wavelengths
+        ]
         model = GaussianNLLViTLocal(
             **common_model_kwargs,
             uncertainty_kwargs=config_data.get('uncertainty', {}),
+            mean_parameterization=mean_parameterization,
+            contrast_prior_kwargs=contrast_prior_config,
         )
-    elif model_type == 'gaussian_nll_background_excess':
-        model = BackgroundExcessGaussianNLLViTLocal(
-            **common_model_kwargs,
-            uncertainty_kwargs=config_data.get('uncertainty', {}),
-        )
-    elif model_type == 'gaussian_nll_og':
-        model = OGGaussianNLLViTLocal(
-            **common_model_kwargs,
-            uncertainty_kwargs=config_data.get('uncertainty', {}),
-        )
-    elif model_type == 'quantile':
-        model = QuantileViTLocal(
-            **common_model_kwargs,
-            quantile_kwargs=config_data.get('quantile', {}),
-        )
-    elif model_type == 'deterministic':
+    else:
         model = ViTLocal(
             **common_model_kwargs,
             diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
@@ -555,12 +639,23 @@ def main():
                 'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
             },
         )
-    else:
-        raise ValueError(
-            f"Unknown model_type {model_type!r}; expected 'deterministic', "
-            "'gaussian_nll', 'gaussian_nll_background_excess', "
-            "'gaussian_nll_og', or 'quantile'"
+    if initialization_checkpoint is not None:
+        source = initialize_model_weights(model, initialization_checkpoint)
+        wandb_logger.log_hyperparams({'initialization': {
+            'checkpoint': initialization_checkpoint, **source,
+            'restore_optimizer': False, 'restore_scheduler': False,
+        }})
+        print(
+            f'Initialized model weights from: {initialization_checkpoint}; '
+            'starting at epoch 0 with a fresh optimizer and scheduler'
         )
+
+    trainable_modules = config_data.get('finetune', {}).get('trainable_modules')
+    if trainable_modules is not None:
+        if model_type != 'uncertainty':
+            raise ValueError('finetune.trainable_modules requires uncertainty model')
+        model.freeze_except(trainable_modules)
+        print(f'Training only modules: {trainable_modules}')
 
     checkpoint_callback = build_checkpoint_callback(
         config_data, checkpoint_cfg

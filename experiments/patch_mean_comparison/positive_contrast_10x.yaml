@@ -1,0 +1,13 @@
+# Stronger spatial-prior follow-up; differs from positive_contrast only in weight.
+base_config: positive_contrast.yaml
+
+contrast_prior:
+  weight: 0
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-MEAN-POSITIVE-CONTRAST-10X/
+
+wandb:
+  tags: [patch-mean-comparison, mean-only, positive-patch-mean, hot-channel-contrast-prior, contrast-10x]
+  run_name: FOXES-PATCH-MEAN-POSITIVE-CONTRAST-10X
+  notes: Positive mean-only follow-up with the 94/131 spatial cosine prior increased from 0.001 to 0.01.

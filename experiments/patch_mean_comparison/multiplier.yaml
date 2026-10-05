@@ -1,0 +1,25 @@
+# Arm B: each patch predicts a log10 multiplier of its equal-flux baseline.
+base_config: ../../training/train_config.yaml
+
+epochs: 15
+mean_parameterization: multiplier
+uncertainty:
+  enabled: false
+  start_epoch: null
+
+optimizer:
+  scheduler:
+    T_max: 15
+
+data:
+  aia_dir: /data/FOXES_screening/subset-og-quick/AIA_processed
+  sxr_dir: /data/FOXES_screening/subset-og-quick/SXR_processed
+  sxr_norm_path: /data/FOXES_screening/subset-og-quick/SXR_processed/normalized_sxr.npy
+  # FOXES_OG subset arrays are already scaled to [-1, 1].
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-MEAN-MULTIPLIER/
+
+wandb:
+  tags: [patch-mean-comparison, mean-only, multiplier-patch-mean]
+  run_name: FOXES-PATCH-MEAN-MULTIPLIER
+  notes: Matched mean-only arm using log10 multiplier/scaler patch predictions.

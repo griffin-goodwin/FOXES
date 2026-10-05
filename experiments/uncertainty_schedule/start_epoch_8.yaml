@@ -1,0 +1,25 @@
+# Arm B: the same uncertainty head remains dormant through epoch 7.
+base_config: ../patch_mean_comparison/original.yaml
+
+uncertainty:
+  enabled: true
+  start_epoch: 8
+
+callbacks:
+  # The combined figure contains attention, patch flux, and patch uncertainty.
+  # Disable the uncertainty-only figure to avoid logging duplicate maps.
+  spatial_uncertainty_enabled: false
+  attention_enabled: true
+  attention_num_samples: 5
+
+checkpoint:
+  monitor: val_class/macro_nll
+  mode: min
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-UNCERTAINTY-START-8/
+
+wandb:
+  tags: [uncertainty-schedule, original-patch-mean, gaussian, independent-patch-variance, start-8]
+  run_name: FOXES-UNCERTAINTY-START-8
+  notes: Original FOXES mean with detached Gaussian independent patch variance beginning at epoch 8.

@@ -1,0 +1,110 @@
+# Standalone subset experiment: original_matched
+# Original clamped head and inverted 9x9 attention with fixed square-root class-weighted Huber. Compare with original_legacy to assess objective/wrapper differences.
+# Uncertainty settings select the mean objective; no uncertainty head is trained.
+# The loss block applies only to original_legacy (model_type: deterministic).
+# gpu_ids: [0] means one visible GPU; the runner sets CUDA_VISIBLE_DEVICES.
+wavelengths:
+- 94
+- 131
+- 171
+- 193
+- 211
+- 304
+- 335
+gpu_ids:
+- 0
+batch_size: 48
+accumulate_grad_batches: 1
+epochs: 20
+seed: 42
+model_type: uncertainty
+mean_parameterization: original
+calculate_base_weights: false
+uncertainty:
+  enabled: false
+  start_epoch: null
+  class_weighting: sqrt_inverse_frequency
+  class_weight_exponent: null
+  huber_delta: 0.3
+  max_abs_log10_patch_multiplier: 8.0
+vit_architecture:
+  embed_dim: 256
+  hidden_dim: 1024
+  num_layers: 8
+  num_heads: 8
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  dropout: 0.1
+  learning_rate: 0.0001
+  mask_mode: inverted
+  local_window: 9
+  global_patch_adjustment: false
+  max_abs_log10_global_adjustment: 0.3
+  global_patch_head_init_std: 0.0
+  independent_local_global: false
+  patch_global_context:
+    enabled: false
+optimizer:
+  weight_decay: 0.0001
+  gradient_clip_val: null
+  scheduler:
+    T_max: 20
+    eta_min: 1.0e-06
+loss:
+  base_weights:
+    quiet: 6.643528005464481
+    c_class: 1.626986450317832
+    m_class: 4.724573441010383
+    x_class: 43.13137472283814
+  huber_delta: 0.3
+  window_size: 15000
+  diagnostic_every_n_steps: 200
+  adaptive_multipliers: null
+contrast_prior:
+  enabled: false
+finetune:
+  trainable_modules: null
+checkpoint:
+  initialize_from: null
+  resume_from: null
+  monitor: val/mae
+  mode: min
+  save_top_k: 1
+  save_last: true
+  include_step_in_filename: false
+  include_monitor_in_filename: true
+early_stopping:
+  enabled: false
+logging:
+  log_every_n_steps: 10
+callbacks:
+  per_class_metrics_enabled: true
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100
+  spatial_uncertainty_enabled: false
+  attention_enabled: true
+  attention_num_samples: 5
+  attention_log_every_n_epochs: 5
+data:
+  aia_dir: /data/FOXES_screening/subset-og-quick/AIA_processed
+  sxr_dir: /data/FOXES_screening/subset-og-quick/SXR_processed
+  sxr_norm_path: /data/FOXES_screening/subset-og-quick/SXR_processed/normalized_sxr.npy
+  aia_norm_path: null
+  num_workers: 8
+  checkpoints_dir: /data/checkpoints/FOXES-OG-BACKBONE-SUBSET/b48-e20/original_matched/
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  project: FOXES-SDOML
+  job_type: training
+  run_name: OG-Backbone-Subset-original_matched-B48-E20
+  tags:
+  - og-backbone-comparison
+  - subset-og-quick
+  - mean-only
+  - original_matched
+  notes: Original clamped head and inverted 9x9 attention with fixed square-root class-weighted Huber.
+    Compare with original_legacy to assess objective/wrapper differences. All arms share the published
+    backbone dimensions, seed, subset, batch size, optimizer, and 20-epoch budget. Uncertainty is disabled
+    to isolate mean prediction.

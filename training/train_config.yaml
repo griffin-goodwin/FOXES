@@ -17,22 +17,33 @@ wavelengths: [94, 131, 171, 193, 211, 304, 335]
 #   -1              - CPU only
 gpu_ids: "all"
 
-batch_size: 32
+batch_size: 48
 epochs: 50
 seed: 42
 # Two GPUs x microbatch 16 x two accumulated batches preserves the selected
 # screening run's effective batch size of 64.
 accumulate_grad_batches: 1
 
-# Canonical model: log-space patch multipliers form the global mean and
-# detached patch variances form the global predictive uncertainty.
-model_type: gaussian_nll
+# Canonical model with configurable patch-mean parameterization and detached
+# Gaussian patch uncertainty.
+model_type: uncertainty
+mean_parameterization: positive  # original, multiplier, or positive
 
 uncertainty:
+  enabled: true
+  # Train uncertainty immediately alongside the mean model.
+  start_epoch: 0
+  # The shared head sees only each detached mean-head patch logit and predicts
+  # log10 relative standard deviation for that patch. These dimensionless values
+  # scale physical patch flux before independent variance contributions sum.
+  initial_relative_std: 1.0
+  min_log10_relative_std: -6.0
+  max_log10_relative_std: 6.0
+  uncertainty_hidden_dim: 16
   # Huber is the only mean objective. Class weights are calculated from the
   # configured training split and normalized to mean sample weight one.
   huber_delta: 0.15
-  class_weighting: sqrt_inverse_frequency
+  class_weighting: inverse_frequency
 
 # Deterministic-model-only option: compute its legacy class weights from the
 # training data before starting. Both probabilistic models ignore it.
@@ -48,17 +59,19 @@ vit_architecture:
   num_heads: 8
   num_layers: 12
   dropout: 0.1
-  learning_rate: 0.0001
+  learning_rate: 0.00005
   # Self-attention masking - one of:
   #   inverted - the released model's behavior: each patch attends to DISTANT
   #              patches (the flipped local-attention mask it was trained with)
   #   local    - true local attention: each patch attends to its neighborhood
   #   none     - standard full/global attention (no masking)
   mask_mode: local
-  local_window: 3   # neighbourhood side length (patches), used by inverted/local
+  local_window: 9   # neighbourhood side length (patches), used by inverted/local
+  global_patch_adjustment: false
+  max_abs_log10_global_adjustment: 1.5
 
 optimizer:
-  weight_decay: 0.00001   # AdamW weight decay
+  weight_decay: 0.0000001   # AdamW weight decay
   gradient_clip_val: null
   scheduler:              # CosineAnnealingLR, stepped once per epoch
     T_max: 50            # decay from the initial LR to eta_min over the run
@@ -87,10 +100,12 @@ loss:
   adaptive_multipliers: null
 
 checkpoint:
-  # Select by the rare-class point metric; coverage and NLL remain diagnostics.
-  monitor: val_class/macro_mse_dex2
+  # Select by the full validation objective and show that epoch's loss in the filename.
+  monitor: val/total_loss
   mode: min
-  save_top_k: 10   # how many best checkpoints to keep on disk
+  save_top_k: -1   # how many best checkpoints to keep on disk
+  include_step_in_filename: false
+  include_monitor_in_filename: true
 
 early_stopping:
   enabled: false
@@ -107,28 +122,23 @@ logging:
 callbacks:
   per_class_metrics_enabled: true  # validation metrics for <B/B/C/M/X
   sxr_plot_enabled: true
-  sxr_plot_num_samples: 5          # validation samples shown in the pred-vs-true SXR plot
-  # Optional low-memory map-only callback. AttentionMapCallback already logs
-  # these maps when attention_enabled is true, so leave this off for full runs.
-  spatial_quantile_enabled: false
-  spatial_quantile_num_samples: 5  # one per <B/B/C/M/X when available
-  spatial_quantile_log_every_n_epochs: 1
-  # Low-memory Gaussian patch flux/std maps. Leave off when the attention
+  sxr_plot_num_samples: 100          # validation samples shown in the pred-vs-true SXR plot
+  # Low-memory uncertainty patch flux/std maps. Leave off when the attention
   # callback is enabled because that callback already contains these maps.
-  spatial_gaussian_enabled: true
-  spatial_gaussian_num_samples: 5  # one per <B/B/C/M/X when available
-  spatial_gaussian_log_every_n_epochs: 1
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5  # one per <B/B/C/M/X when available
+  spatial_uncertainty_log_every_n_epochs: 1
   attention_enabled: false
   attention_num_samples: 8         # validation samples visualized per attention-map epoch
   attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
 
 data:
-  aia_dir: "/data/AIA_processed"
-  sxr_dir: "/data/SXR_processed"
-  sxr_norm_path: "/data/SXR_processed/normalized_sxr.npy"
+  aia_dir: "/data/FOXES_OG/AIA_processed"
+  sxr_dir: "/data/FOXES_OG/SXR_processed"
+  sxr_norm_path: "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
   # Must be computed from the training split only.
-  aia_norm_path: "/data/aia_q90_asinh_q99999_norm_streamed.npz"
-  checkpoints_dir: "/data/checkpoints/SDOML-EMBED512-LAYERS12-HEADS8-LOCAL3-WEIGHTED-HUBER015-INV-SQRT/"
+  aia_norm_path: #"/data/aia_q90_asinh_q99999_norm_streamed.npz"
+  checkpoints_dir: "/data/checkpoints/FOXES-OG-Uncertainty-Correction-Head-LR/"
   num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
 
 wandb:
@@ -136,5 +146,5 @@ wandb:
   project: FOXES-SDOML
   job_type: training
   tags: [full-data, foxes-og, embed-512, layers-8, local-3, multiplier-patch-mean, weighted-huber, detached-patch-uncertainty]
-  run_name: SDOML-EMBED512-LAYERS12-HEADS8-LOCAL3-WEIGHTED-HUBER015-INV-SQRT
+  run_name: OG-Uncertainty-Correction-Head-LowerLR-INVR
   notes: Canonical multiplier patch model with inverse-frequency weighted Huber and detached patch uncertainty.

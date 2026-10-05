@@ -1,0 +1,21 @@
+# Follow-up: positive patch mean with weak 94/131 spatial contrast guidance.
+base_config: positive.yaml
+
+contrast_prior:
+  enabled: false
+  weight: 1
+  wavelengths: [94, 131, 171, 193, 211, 304, 335]
+  minimum_contrast_sum: 0.000001
+
+callbacks:
+  spatial_uncertainty_enabled: false
+  attention_enabled: true
+  attention_num_samples: 5
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-MEAN-POSITIVE-CONTRAST/
+
+wandb:
+  tags: [patch-mean-comparison, mean-only, positive-patch-mean, hot-channel-contrast-prior]
+  run_name: FOXES-PATCH-MEAN-POSITIVE-CONTRAST
+  notes: Positive mean-only follow-up with a weak spatial cosine prior from within-image 94/131 patch contrast.

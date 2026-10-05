@@ -1,0 +1,14 @@
+# Equally weighted local/global objectives with no global gradient into local.
+# python training/train.py --config training/configs/finetune_patch_global_independent.yaml
+base_config: finetune_patch_global_full_unfrozen.yaml
+
+vit_architecture:
+  independent_local_global: true
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-PATCH-GLOBAL-INDEPENDENT/
+
+wandb:
+  run_name: OG-PatchGlobal-Independent
+  tags: [full-data, foxes-og, finetune, sqrt-weighted-huber, patch-specific-global-attention, independent-local-global, equal-loss-weights]
+  notes: Matched full-unfreeze configuration with two Huber losses at weight 1 each. The uncorrected local flux sum and corrected global flux sum each predict GOES. All local features, shared raw features, positions, and base flux are detached in the global branch. Uncertainty NLL remains detached from both mean objectives. Select by final corrected validation MSE.

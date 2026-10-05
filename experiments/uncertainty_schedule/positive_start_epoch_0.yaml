@@ -1,0 +1,24 @@
+# Positive patch mean with detached independent patch variance from epoch 0.
+base_config: ../patch_mean_comparison/positive.yaml
+
+uncertainty:
+  enabled: true
+  start_epoch: 0
+
+callbacks:
+  # This combined figure contains attention, patch flux, and patch uncertainty.
+  spatial_uncertainty_enabled: true
+  attention_enabled: true
+  attention_num_samples: 10
+
+checkpoint:
+  monitor: val_class/total_loss
+  mode: min
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-UNCERTAINTY/
+
+wandb:
+  tags: [uncertainty-schedule, positive-patch-mean, gaussian, independent-patch-variance, start-0]
+  run_name: FOXES-POSITIVE-UNCERTAINTY-START-0
+  notes: Positive patch mean with detached Gaussian independent patch variance trained from epoch 0.

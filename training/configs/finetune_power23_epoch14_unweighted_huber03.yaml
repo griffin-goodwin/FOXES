@@ -1,0 +1,27 @@
+# Run from the repository root:
+# python training/train.py --config training/configs/finetune_power23_epoch14_unweighted_huber03.yaml
+# Ten NEW epochs with a fresh optimizer/scheduler; do not pass --ckpt-path.
+base_config: finetune_power23_epoch14_unweighted.yaml
+
+epochs: 10
+
+optimizer:
+  scheduler:
+    T_max: 10
+
+uncertainty:
+  class_weighting: none
+  huber_delta: 0.3
+
+checkpoint:
+  # Pin epoch 14 explicitly: the parent config currently points to last.ckpt.
+  initialize_from: /data/checkpoints/FOXES-OG-CORRECTION-POWER23-LR5E5/OG-Correction-Power23-LR5e5-epoch=14-val_mse=0.0162.ckpt
+  resume_from: null
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-POWER23-E14-FINETUNE-UNWEIGHTED-HUBER03-LR1E5-10EP/
+
+wandb:
+  run_name: OG-Power23-E14-Finetune-Unweighted-Huber03-LR1e5-10ep
+  tags: [full-data, foxes-og, finetune, positive-patch-mean, local-3, unweighted-huber, huber-0.3, detached-patch-uncertainty, lr-1e-5]
+  notes: Ten new epochs from the explicit power23 epoch-14 checkpoint; weights-only initialization, fresh AdamW at 1e-5 and cosine T_max 10, unweighted Huber delta 0.3. Save every epoch and compare validation MSE and MAE.

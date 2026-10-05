@@ -6,12 +6,73 @@ from matplotlib.colors import LogNorm
 from forecasting.dataset import AIANormTransform
 from training.callbacks import (
     AttentionMapCallback,
-    PerClassQuantileValidationMetrics,
+    ImagePredictionLogger_SXR,
     PerClassValidationMetrics,
-    SpatialGaussianMapCallback,
-    SpatialQuantileMapCallback,
+    SpatialUncertaintyMapCallback,
     stratified_validation_indices,
 )
+from training.train import build_model_callbacks
+
+
+def test_model_types_share_all_compatible_callbacks():
+    class DataModule:
+        val_ds = [object()]
+
+    config = {
+        'vit_architecture': {'patch_size': 8},
+        'uncertainty': {'enabled': True},
+        'callbacks': {
+            'per_class_metrics_enabled': True,
+            'sxr_plot_enabled': True,
+            'spatial_uncertainty_enabled': True,
+            'attention_enabled': True,
+        },
+    }
+    deterministic = build_model_callbacks(
+        config, DataModule(), np.array([-6.0, 1.0]), 'deterministic'
+    )
+    uncertain = build_model_callbacks(
+        config, DataModule(), np.array([-6.0, 1.0]), 'uncertainty'
+    )
+
+    common_types = (
+        PerClassValidationMetrics,
+        ImagePredictionLogger_SXR,
+        AttentionMapCallback,
+    )
+    assert tuple(type(callback) for callback in deterministic) == common_types
+    assert tuple(
+        type(callback) for callback in uncertain
+        if not isinstance(callback, SpatialUncertaintyMapCallback)
+    ) == common_types
+    assert sum(
+        isinstance(callback, SpatialUncertaintyMapCallback)
+        for callback in uncertain
+    ) == 1
+
+
+def test_mean_only_uncertainty_arm_uses_exact_common_callback_set():
+    class DataModule:
+        val_ds = [object()]
+
+    config = {
+        'vit_architecture': {'patch_size': 8},
+        'uncertainty': {'enabled': False},
+        'callbacks': {
+            'per_class_metrics_enabled': True,
+            'sxr_plot_enabled': True,
+            'spatial_uncertainty_enabled': True,
+            'attention_enabled': True,
+        },
+    }
+    deterministic = build_model_callbacks(
+        config, DataModule(), np.array([-6.0, 1.0]), 'deterministic'
+    )
+    mean_only = build_model_callbacks(
+        config, DataModule(), np.array([-6.0, 1.0]), 'uncertainty'
+    )
+
+    assert tuple(map(type, deterministic)) == tuple(map(type, mean_only))
 
 
 def test_display_image_inverts_aia_normalization():
@@ -58,31 +119,98 @@ def test_patch_flux_map_uses_log_scale_for_positive_dynamic_range():
     plt.close(fig)
 
 
-def test_background_excess_plot_distinguishes_learned_and_accounting_maps():
-    image = torch.zeros(2, 2, 7)
-    accounting_flux = torch.tensor([3e-7, 4e-7, 5e-7, 6e-7])
-    variance_attribution = accounting_flux.square()
-    component_data = {
-        'background_flux_raw': torch.tensor(1e-6),
-        'background_variance_raw': torch.tensor(1e-14),
-        'excess_patch_flux_raw': torch.tensor([5e-8, 1.5e-7, 2.5e-7, 3.5e-7]),
-        'excess_variance_contribution_raw': torch.full((4,), 1e-15),
-    }
-
-    fig = SpatialGaussianMapCallback._plot_spatial_gaussian_maps(
-        image,
-        accounting_flux,
-        variance_attribution,
-        patch_size=1,
-        component_data=component_data,
+def test_global_patch_plot_compares_local_and_adjusted_flux_on_one_scale():
+    corrected = torch.tensor([1e-9, 2e-9, 3e-9, 4e-9])
+    adjustment = torch.tensor([0.0, 0.1, -0.1, 0.2])
+    fig = SpatialUncertaintyMapCallback._plot_global_patch_adjustment(
+        torch.zeros(2, 2, 7), corrected, adjustment,
+        patch_size=1, max_abs_adjustment=0.3,
     )
 
-    titles = [axis.get_title() for axis in fig.axes[:5]]
-    assert any('Learned Local Excess' in title for title in titles)
-    assert any('Total Accounting Map' in title for title in titles)
-    assert 'whole-image B=' in fig._suptitle.get_text()
-    assert all('Background Map' not in title for title in titles)
+    local_image = fig.axes[1].images[0]
+    adjusted_image = fig.axes[2].images[0]
+    assert local_image.norm is adjusted_image.norm
+    assert isinstance(local_image.norm, LogNorm)
+    np.testing.assert_allclose(
+        local_image.get_array(),
+        (corrected / torch.pow(10.0, adjustment)).reshape(2, 2),
+    )
+    np.testing.assert_allclose(
+        adjusted_image.get_array(), corrected.reshape(2, 2),
+    )
     plt.close(fig)
+
+
+def test_attention_callback_forwards_visualization_samples_one_at_a_time(
+    monkeypatch,
+):
+    class Dataset:
+        _callback_flare_class_indices = {
+            'Below-B': [0, 1, 2], 'B': [], 'C': [], 'M': [], 'X': [],
+        }
+
+        def __len__(self):
+            return 3
+
+        def __getitem__(self, index):
+            return torch.zeros(2, 2, 7), torch.tensor(float(index))
+
+    class Experiment:
+        def __init__(self):
+            self.logged = []
+
+        def log(self, value):
+            self.logged.append(value)
+
+    class Module(torch.nn.Module):
+        predicts_uncertainty = True
+        patch_uncertainty_semantics = 'variance_attribution'
+
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.tensor(0.0))
+            self.batch_sizes = []
+
+        @property
+        def device(self):
+            return self.anchor.device
+
+        def forward(self, images, return_attention=False):
+            assert return_attention is True
+            batch_size = images.shape[0]
+            self.batch_sizes.append(batch_size)
+            patch_flux = torch.ones(batch_size, 4)
+            patch_variance = torch.ones(batch_size, 4)
+            attention = [torch.ones(batch_size, 1, 4, 4)]
+            return (
+                patch_flux.sum(dim=1, keepdim=True),
+                patch_variance.sum(dim=1),
+                attention,
+                patch_flux,
+                patch_variance,
+            )
+
+    experiment = Experiment()
+    trainer = type('Trainer', (), {
+        'current_epoch': 0,
+        'datamodule': type('DataModule', (), {'val_ds': Dataset()})(),
+        'logger': type('Logger', (), {'experiment': experiment})(),
+    })()
+    model = Module()
+    model.train()
+    callback = AttentionMapCallback(
+        num_samples=3, patch_size=1, use_local_attention=True
+    )
+    monkeypatch.setattr(
+        callback, '_plot_attention_map', lambda *args, **kwargs: plt.figure()
+    )
+    monkeypatch.setattr('training.callbacks.wandb.Image', lambda figure: figure)
+
+    callback._visualize_attention(trainer, model)
+
+    assert model.batch_sizes == [1, 1, 1]
+    assert len(experiment.logged) == 3
+    assert model.training is True
 
 
 def test_validation_sampling_covers_and_balances_available_flare_classes():
@@ -179,146 +307,36 @@ def test_per_class_validation_logs_five_class_and_macro_nll():
     assert module.log_kwargs["on_epoch"] is True
 
 
-def test_per_class_quantile_validation_logs_coverage_and_pinball():
+def test_per_class_validation_logs_mean_metrics_without_uncertainty():
     class Trainer:
         sanity_checking = False
 
     class Module:
         device = torch.device("cpu")
         sxr_norm = torch.tensor([-6.0, 1.0])
+        predicts_uncertainty = False
 
         def log_dict(self, metrics, **kwargs):
             self.metrics = metrics
-            self.log_kwargs = kwargs
 
-    callback = PerClassQuantileValidationMetrics()
-    trainer = Trainer()
+    callback = PerClassValidationMetrics()
     module = Module()
-    target_raw = torch.tensor([5e-8, 5e-7, 5e-6, 5e-5, 5e-4])
-    quantiles = torch.tensor(
-        [[-2.0, -1.0, 0.0, 1.0, 2.0]] * 5
-    )
     outputs = {
-        "target_raw": target_raw,
+        "target_raw": torch.tensor([5e-8, 5e-7, 5e-6, 5e-5, 5e-4]),
         "target_norm": torch.zeros(5),
         "mean_norm": torch.zeros(5),
-        "prediction_raw": target_raw,
-        "quantiles_norm": quantiles,
-        "pinball_per_sample": torch.full((5,), 0.084),
+        "prediction_raw": torch.tensor([5e-8, 5e-7, 5e-6, 5e-5, 5e-4]),
     }
 
-    callback.on_validation_epoch_start(trainer, module)
-    callback.on_validation_batch_end(trainer, module, outputs, None, 0)
-    callback.on_validation_epoch_end(trainer, module)
+    callback.on_validation_epoch_start(Trainer(), module)
+    callback.on_validation_batch_end(Trainer(), module, outputs, None, 0)
+    callback.on_validation_epoch_end(Trainer(), module)
 
-    for name in ("Below-B", "B", "C", "M", "X"):
-        np.testing.assert_allclose(
-            module.metrics[f"val_class/{name}/pinball"], 0.084
-        )
-        np.testing.assert_allclose(
-            module.metrics[f"val_class/{name}/coverage_68"], 1.0
-        )
-        np.testing.assert_allclose(
-            module.metrics[f"val_class/{name}/coverage_95"], 1.0
-        )
-        np.testing.assert_allclose(
-            module.metrics[f"val_class/{name}/mean_width_68_dex"], 2.0
-        )
-        np.testing.assert_allclose(
-            module.metrics[f"val_class/{name}/mean_width_95_dex"], 4.0
-        )
-    np.testing.assert_allclose(
-        module.metrics["val_class/macro_pinball"], 0.084
-    )
-    assert module.log_kwargs["on_epoch"] is True
+    assert module.metrics["val_class/macro_mse_dex2"] == 0.0
+    assert "val_class/macro_nll" not in module.metrics
 
 
-def test_spatial_quantile_plot_contains_median_and_interval_width_maps():
-    image = torch.zeros(2, 2, 7)
-    patch_quantiles = torch.tensor([
-        [1e-9, 2e-9, 3e-9, 4e-9, 5e-9],
-        [2e-9, 3e-9, 4e-9, 5e-9, 6e-9],
-        [3e-9, 4e-9, 5e-9, 6e-9, 7e-9],
-        [4e-9, 5e-9, 6e-9, 7e-9, 8e-9],
-    ])
-
-    fig = AttentionMapCallback._plot_spatial_quantile_maps(
-        image, patch_quantiles, patch_size=1
-    )
-
-    titles = {axis.get_title() for axis in fig.axes}
-    assert 'q50 Patch Flux' in titles
-    assert 'Patch 68% Interval Width' in titles
-    assert 'Patch 95% Interval Width' in titles
-    plt.close(fig)
-
-
-def test_spatial_quantile_callback_does_not_request_attention():
-    class Dataset:
-        _callback_flare_class_indices = {
-            'Below-B': [0], 'B': [1], 'C': [2], 'M': [3], 'X': [4],
-        }
-
-        def __len__(self):
-            return 5
-
-        def __getitem__(self, index):
-            return torch.zeros(2, 2, 7), torch.tensor(float(index))
-
-    class Experiment:
-        def __init__(self):
-            self.logged = []
-
-        def log(self, value):
-            self.logged.append(value)
-
-    class Module(torch.nn.Module):
-        uncertainty_kind = 'quantile'
-
-        def __init__(self):
-            super().__init__()
-            self.anchor = torch.nn.Parameter(torch.tensor(0.0))
-            self.return_attention_values = []
-
-        @property
-        def device(self):
-            return self.anchor.device
-
-        def forward(self, images, return_attention=False):
-            self.return_attention_values.append(return_attention)
-            batch_size = images.shape[0]
-            patch_q50 = torch.full((batch_size, 4), 3e-9)
-            offsets = torch.tensor([1e-9, 2e-9, 3e-9, 4e-9, 5e-9])
-            patch_quantiles = offsets.reshape(1, 1, 5).expand(
-                batch_size, 4, 5
-            )
-            global_quantiles = patch_quantiles.sum(dim=1)
-            return (
-                global_quantiles[:, 2:3], global_quantiles,
-                patch_q50, patch_quantiles,
-            )
-
-    experiment = Experiment()
-    trainer = type('Trainer', (), {
-        'is_global_zero': True,
-        'current_epoch': 0,
-        'datamodule': type('DataModule', (), {'val_ds': Dataset()})(),
-        'logger': type('Logger', (), {'experiment': experiment})(),
-    })()
-    model = Module()
-    model.train()
-    callback = SpatialQuantileMapCallback(
-        num_samples=5, patch_size=1, log_every_n_epochs=1
-    )
-
-    callback.on_validation_epoch_end(trainer, model)
-
-    assert model.return_attention_values == [False]
-    assert len(experiment.logged) == 5
-    assert model.training is True
-
-
-def test_spatial_gaussian_callback_logs_each_class_without_attention():
+def test_spatial_uncertainty_callback_logs_each_class_without_attention():
     class Dataset:
         _callback_flare_class_indices = {
             'Below-B': [0], 'B': [1], 'C': [2], 'M': [3], 'X': [4],
@@ -369,7 +387,7 @@ def test_spatial_gaussian_callback_logs_each_class_without_attention():
     })()
     model = Module()
     model.train()
-    callback = SpatialGaussianMapCallback(
+    callback = SpatialUncertaintyMapCallback(
         num_samples=5, patch_size=1, log_every_n_epochs=1
     )
 

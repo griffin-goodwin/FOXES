@@ -33,12 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.dataset import AIAGOESDataset, AIANormTransform
 from forecasting.model import ViTLocal, normalize_sxr, unnormalize_sxr
-from forecasting.model_uncertainty import GaussianNLLViTLocal
-from forecasting.model_uncertainty_background_excess import (
-    BackgroundExcessGaussianNLLViTLocal,
-)
-from forecasting.model_uncertainty_og import OGGaussianNLLViTLocal
-from forecasting.model_quantile import QuantileViTLocal
+from forecasting.uncertainty_model import GaussianNLLViTLocal
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -56,36 +51,18 @@ def _unwrap_model(model):
 
 
 def _auto_checkpoint_model_class(checkpoint):
-    """Identify a Lightning checkpoint from its guarded output heads."""
+    """Distinguish the original model from the uncertainty model."""
     state_dict = checkpoint.get('state_dict', {})
     state_keys = state_dict.keys()
-    is_quantile = any(
-        'patch_quantile_width_head' in key for key in state_keys
+    has_uncertainty_head = any(
+        'patch_uncertainty_head' in key for key in state_keys
     )
-    is_gaussian = any(
-        'global_uncertainty_head' in key
-        or 'patch_uncertainty_head' in key
-        for key in state_keys
+    hyperparameters = checkpoint.get('hyper_parameters', {})
+    is_uncertainty_checkpoint = (
+        'uncertainty_kwargs' in hyperparameters
+        or 'mean_parameterization' in hyperparameters
     )
-    mean_version = state_dict.get('model.mean_parameterization_version')
-    mean_version_value = (
-        int(mean_version.item()) if mean_version is not None else None
-    )
-    if is_quantile:
-        return QuantileViTLocal
-    if (
-        is_gaussian
-        and mean_version_value
-        == BackgroundExcessGaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATION_VERSION
-    ):
-        return BackgroundExcessGaussianNLLViTLocal
-    if (
-        is_gaussian
-        and mean_version_value
-        == OGGaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATION_VERSION
-    ):
-        return OGGaussianNLLViTLocal
-    if is_gaussian:
+    if has_uncertainty_head or is_uncertainty_checkpoint:
         return GaussianNLLViTLocal
     return ViTLocal
 
@@ -187,34 +164,6 @@ def uncertainty_from_prediction(prediction_raw, variance_normalized, sxr_norm):
     }
 
 
-def quantile_uncertainty_from_prediction(global_quantiles_raw, sxr_norm):
-    """Format ordered global quantiles for inference CSV output."""
-    global_quantiles_raw = global_quantiles_raw.float()
-    quantiles_normalized = normalize_sxr(
-        global_quantiles_raw, sxr_norm
-    )
-    return {
-        'prediction_normalized': quantiles_normalized[:, 2],
-        'q025_normalized': quantiles_normalized[:, 0],
-        'q16_normalized': quantiles_normalized[:, 1],
-        'q50_normalized': quantiles_normalized[:, 2],
-        'q84_normalized': quantiles_normalized[:, 3],
-        'q975_normalized': quantiles_normalized[:, 4],
-        'lower_68': global_quantiles_raw[:, 1],
-        'upper_68': global_quantiles_raw[:, 3],
-        'lower_95': global_quantiles_raw[:, 0],
-        'upper_95': global_quantiles_raw[:, 4],
-        'width_68_dex': (
-            quantiles_normalized[:, 3] - quantiles_normalized[:, 1]
-        ) * sxr_norm[1].float(),
-        'width_95_dex': (
-            quantiles_normalized[:, 4] - quantiles_normalized[:, 0]
-        ) * sxr_norm[1].float(),
-    }
-
-
-
-
 def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_data=None,
                               save_weights=True, input_size=512, patch_size=16,
                               save_flux=False, save_patch_uncertainty=False):
@@ -250,10 +199,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     tuple
         Deterministic models retain the existing five-item tuple
         ``(prediction, ground_truth, attention_map, flux_map, global_index)``.
-        Gaussian and quantile models append an uncertainty dictionary as item
-        six. Quantile spatial maps are saved as compressed ``.npz`` files.
-        Background-plus-excess models can additionally save explicitly named
-        whole-image and local components through ``component_flux_path``.
+        The uncertainty model appends an uncertainty dictionary as item six.
     """
     model.eval()
     data_device = next(model.parameters()).device
@@ -270,13 +216,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     base_model = _unwrap_model(model)
     predicts_uncertainty = bool(
         getattr(base_model, 'predicts_uncertainty', False)
-    )
-    predicts_background_excess_components = bool(getattr(
-        base_model, 'predicts_background_excess_components', False
-    ))
-    uncertainty_kind = getattr(
-        base_model, 'uncertainty_kind',
-        'gaussian' if predicts_uncertainty else None,
     )
     loader_kwargs = {
         'batch_size': batch_size,
@@ -320,14 +259,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     if save_patch_uncertainty and config_data.get('patch_uncertainty_path'):
         uncertainty_dir = Path(config_data['patch_uncertainty_path'])
         uncertainty_dir.mkdir(parents=True, exist_ok=True)
-    component_flux_dir = None
-    if (
-        predicts_background_excess_components
-        and config_data.get('component_flux_path')
-    ):
-        component_flux_dir = Path(config_data['component_flux_path'])
-        component_flux_dir.mkdir(parents=True, exist_ok=True)
-
     try:
       with torch.inference_mode():
         for batch_idx, batch in enumerate(loader):
@@ -349,42 +280,16 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 dtype=amp_dtype,
                 enabled=use_amp,
             ):
-                forward_kwargs = {'return_attention': save_weights}
-                if predicts_background_excess_components:
-                    forward_kwargs['return_components'] = True
-                pred = active_model(aia_imgs, **forward_kwargs)
-
-            component_batch = None
-            if predicts_background_excess_components:
-                component_batch = pred[-1]
-                pred = pred[:-1]
+                pred = active_model(
+                    aia_imgs, return_attention=save_weights
+                )
 
             # Gaussian and deterministic models intentionally have different
             # tuple layouts. Branch explicitly so variance is never mistaken
             # for an attention or flux map.
             variance_normalized = None
             patch_variance_raw = None
-            global_quantiles_raw = None
-            patch_quantiles_raw = None
-            if uncertainty_kind == 'quantile':
-                if save_weights:
-                    (
-                        predictions, global_quantiles_raw, weights,
-                        all_flux_contributions, patch_quantiles_raw,
-                    ) = pred
-                else:
-                    (
-                        predictions, global_quantiles_raw,
-                        all_flux_contributions, patch_quantiles_raw,
-                    ) = pred
-                    weights = None
-                flux_contributions = (
-                    all_flux_contributions if save_flux else None
-                )
-                uncertainty_batch = quantile_uncertainty_from_prediction(
-                    global_quantiles_raw, base_model.sxr_norm
-                )
-            elif predicts_uncertainty:
+            if predicts_uncertainty:
                 if save_weights:
                     (
                         predictions, variance_normalized, weights,
@@ -402,38 +307,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 uncertainty_batch = uncertainty_from_prediction(
                     predictions, variance_normalized, base_model.sxr_norm
                 )
-                if component_batch is not None:
-                    background_flux = component_batch[
-                        'background_flux_raw'
-                    ]
-                    excess_flux = component_batch[
-                        'excess_patch_flux_raw'
-                    ].sum(dim=-1)
-                    background_variance = component_batch[
-                        'background_variance_raw'
-                    ]
-                    excess_variance = component_batch[
-                        'excess_variance_contribution_raw'
-                    ].sum(dim=-1)
-                    uncertainty_batch.update({
-                        'background_flux_raw': background_flux,
-                        'excess_flux_raw': excess_flux,
-                        'background_fraction': background_flux / (
-                            background_flux + excess_flux
-                        ).clamp_min(torch.finfo(torch.float32).tiny),
-                        'background_cap_fraction': component_batch[
-                            'background_cap_fraction'
-                        ],
-                        'background_std_raw': torch.sqrt(
-                            background_variance.clamp_min(0)
-                        ),
-                        'summed_excess_variance_raw': excess_variance,
-                        'background_variance_fraction': (
-                            background_variance / (
-                                background_variance + excess_variance
-                            ).clamp_min(torch.finfo(torch.float32).tiny)
-                        ),
-                    })
             elif isinstance(pred, tuple) and len(pred) >= 3:
                 predictions = pred[0]
                 weights = pred[1] if save_weights else None
@@ -487,37 +360,12 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
 
             patch_std_maps_cpu = None
             if save_patch_uncertainty and patch_variance_raw is not None:
-                # For background+excess this is sqrt of each patch's additive
-                # contribution to global variance, not a marginal patch std.
+                # Save the square root of each additive variance contribution.
                 patch_std_maps_cpu = torch.sqrt(
                     torch.clamp(patch_variance_raw.detach(), min=0)
                 ).reshape(
                     current_batch_size, grid_h, grid_w
                 ).float().cpu().numpy()
-
-            patch_quantile_maps_cpu = None
-            if save_patch_uncertainty and patch_quantiles_raw is not None:
-                patch_quantile_maps_cpu = patch_quantiles_raw.detach().reshape(
-                    current_batch_size, grid_h, grid_w, 5
-                ).float().cpu().numpy()
-
-            component_batch_cpu = None
-            if component_flux_dir is not None and component_batch is not None:
-                component_map_keys = {
-                    'excess_patch_flux_raw',
-                    'background_allocation_raw',
-                    'total_accounting_patch_flux_raw',
-                    'excess_variance_contribution_raw',
-                    'total_variance_attribution_raw',
-                }
-                component_batch_cpu = {}
-                for key, value in component_batch.items():
-                    cpu_value = value.detach().float().cpu().numpy()
-                    if key in component_map_keys:
-                        cpu_value = cpu_value.reshape(
-                            current_batch_size, grid_h, grid_w
-                        )
-                    component_batch_cpu[key] = cpu_value
 
             # Drop the CUDA output tree before yielding individual CPU records.
             # Keep allocator blocks cached so the next batch can reuse them.
@@ -528,9 +376,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             all_flux_contributions = None
             variance_normalized = None
             patch_variance_raw = None
-            global_quantiles_raw = None
-            patch_quantiles_raw = None
-            component_batch = None
 
             for i in range(current_batch_size):
                 global_idx = batch_idx * batch_size + i
@@ -567,53 +412,6 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                             f"Warning: could not save Gaussian patch "
                             f"uncertainty for sample {global_idx}: {exc}"
                         )
-                elif patch_quantile_maps_cpu is not None:
-                    try:
-                        patch_maps = patch_quantile_maps_cpu[i]
-                        if uncertainty_dir is not None and global_idx < len(times):
-                            np.savez_compressed(
-                                uncertainty_dir / f"{times[global_idx]}.npz",
-                                q025=patch_maps[:, :, 0],
-                                q16=patch_maps[:, :, 1],
-                                q50=patch_maps[:, :, 2],
-                                q84=patch_maps[:, :, 3],
-                                q975=patch_maps[:, :, 4],
-                                width_68=(
-                                    patch_maps[:, :, 3]
-                                    - patch_maps[:, :, 1]
-                                ),
-                                width_95=(
-                                    patch_maps[:, :, 4]
-                                    - patch_maps[:, :, 0]
-                                ),
-                            )
-                    except Exception as exc:
-                        print(
-                            f"Warning: could not save spatial quantiles for "
-                            f"sample {global_idx}: {exc}"
-                        )
-
-                if component_batch_cpu is not None:
-                    try:
-                        if (
-                            component_flux_dir is not None
-                            and global_idx < len(times)
-                        ):
-                            np.savez_compressed(
-                                component_flux_dir
-                                / f"{times[global_idx]}.npz",
-                                **{
-                                    key: value[i]
-                                    for key, value
-                                    in component_batch_cpu.items()
-                                },
-                            )
-                    except Exception as exc:
-                        print(
-                            "Warning: could not save background/excess "
-                            f"components for sample {global_idx}: {exc}"
-                        )
-
                 uncertainty_data = None
                 if uncertainty_values_cpu is not None:
                     uncertainty_data = {
@@ -666,17 +464,7 @@ def load_model_from_config(config_data):
         ).strip().lower()
         model_types = {
             'deterministic': ViTLocal,
-            'vitlocal': ViTLocal,
-            'gaussian': GaussianNLLViTLocal,
-            'gaussian_nll': GaussianNLLViTLocal,
             'uncertainty': GaussianNLLViTLocal,
-            'gaussian_background_excess': BackgroundExcessGaussianNLLViTLocal,
-            'gaussian_nll_background_excess': BackgroundExcessGaussianNLLViTLocal,
-            'gaussian_og': OGGaussianNLLViTLocal,
-            'gaussian_nll_og': OGGaussianNLLViTLocal,
-            'uncertainty_og': OGGaussianNLLViTLocal,
-            'quantile': QuantileViTLocal,
-            'quantile_regression': QuantileViTLocal,
         }
         if requested_type == 'auto':
             checkpoint = torch.load(
@@ -689,9 +477,7 @@ def load_model_from_config(config_data):
             model_class = model_types[requested_type]
         else:
             raise ValueError(
-                "model_type must be one of: auto, deterministic, "
-                "gaussian_nll, gaussian_nll_background_excess, "
-                "gaussian_nll_og, quantile"
+                "model_type must be one of: auto, deterministic, uncertainty"
             )
         print(f"Loading {model_class.__name__} model...")
         model = model_class.load_from_checkpoint(
@@ -787,9 +573,6 @@ def main():
     predicts_uncertainty = bool(
         getattr(base_model, 'predicts_uncertainty', False)
     )
-    predicts_background_excess_components = bool(getattr(
-        base_model, 'predicts_background_excess_components', False
-    ))
 
     save_weights = not no_weights
     if no_weights:
@@ -811,50 +594,29 @@ def main():
         print("No flux path specified.")
 
     save_patch_uncertainty = (
-        (
-            bool(getattr(base_model, 'predicts_patch_uncertainty', False))
-            or getattr(base_model, 'uncertainty_kind', None) == 'quantile'
-        )
+        bool(getattr(base_model, 'predicts_patch_uncertainty', False))
         and bool(config_data.get('patch_uncertainty_path'))
         and not no_patch_uncertainty
     )
     if predicts_uncertainty:
         print("Uncertainty model detected; global intervals will be saved to CSV.")
         if save_patch_uncertainty:
-            if getattr(base_model, 'uncertainty_kind', None) == 'quantile':
+            if getattr(
+                base_model, 'patch_uncertainty_semantics', None
+            ) == 'variance_attribution':
                 print(
-                    "Will save q02.5/q16/q50/q84/q97.5 spatial maps and "
-                    "68%/95% width maps as compressed NPZ files."
+                    "Will save square-root global-variance contribution "
+                    "maps in raw W/m² as NPY files."
                 )
             else:
-                if getattr(
-                    base_model, 'patch_uncertainty_semantics', None
-                ) == 'variance_attribution':
-                    print(
-                        "Will save square-root global-variance contribution "
-                        "maps in raw W/m² as NPY files (not marginal patch "
-                        "standard deviations)."
-                    )
-                else:
-                    print(
-                        "Will save Gaussian patch standard-deviation maps "
-                        "in raw W/m² as NPY files."
-                    )
+                print(
+                    "Will save Gaussian patch standard-deviation maps "
+                    "in raw W/m² as NPY files."
+                )
         else:
             print("Patch uncertainty map saving is disabled.")
     elif config_data.get('patch_uncertainty_path'):
         print("Deterministic model detected; no uncertainty maps will be produced.")
-    if predicts_background_excess_components:
-        print(
-            "Whole-image background and summed local-excess diagnostics "
-            "will be saved in the prediction CSV."
-        )
-        if config_data.get('component_flux_path'):
-            print(
-                "Will save explicit background/excess component NPZ files "
-                f"to {config_data['component_flux_path']}."
-            )
-
     torch.backends.cudnn.benchmark = True
     matmul_precision = str(
         config_data.get('matmul_precision', 'high')

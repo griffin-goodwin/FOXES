@@ -367,6 +367,7 @@ class FOXESEvaluator:
         )
         metrics_df.to_csv(metrics_path, index=False)
         self._plot_uncertainty_calibration(residual_z, valid)
+        self._plot_prediction_intervals()
         print(f"Saved uncertainty metrics to {metrics_path}")
         return metrics_df
 
@@ -442,8 +443,109 @@ class FOXESEvaluator:
         )
         metrics_df.to_csv(metrics_path, index=False)
         self._plot_quantile_calibration(metrics_df)
+        self._plot_prediction_intervals()
         print(f"Saved uncertainty metrics to {metrics_path}")
         return metrics_df
+
+    def _plot_prediction_intervals(self):
+        """Show a small, class-balanced sample of prediction intervals."""
+        interval_levels = [
+            (label, lower, upper, color)
+            for label, lower, upper, color in (
+                ('68%', 'lower_68', 'upper_68', '#43BEEA'),
+                ('95%', 'lower_95', 'upper_95', '#B899F3'),
+            )
+            if {lower, upper}.issubset(self.df.columns)
+        ]
+        if not interval_levels:
+            return
+
+        interval_columns = [column for _, lower, upper, _ in interval_levels
+                            for column in (lower, upper)]
+        intervals = self.df[interval_columns].to_numpy(dtype=float)
+        valid = np.isfinite(intervals).all(axis=1) & (intervals > 0).all(axis=1)
+        for _, lower, upper, _ in interval_levels:
+            valid &= (
+                (self.df[lower].to_numpy(dtype=float) <= self.y_pred)
+                & (self.y_pred <= self.df[upper].to_numpy(dtype=float))
+            )
+
+        rng = np.random.default_rng(42)
+        selected = []
+        for class_name, class_mask in self._class_masks().items():
+            if class_name == 'Overall':
+                continue
+            candidates = np.flatnonzero(valid & class_mask)
+            if candidates.size:
+                selected.extend(rng.choice(
+                    candidates, size=min(12, candidates.size), replace=False
+                ))
+        if not selected:
+            print("No valid raw prediction intervals to plot")
+            return
+        selected = np.asarray(selected, dtype=int)
+
+        theme = 'white' if self.plot_background in ('white', 'light') else 'black'
+        figure_color = '#FFFFFF' if theme == 'white' else '#000000'
+        axes_color = '#FFFFFF' if theme == 'white' else '#151522'
+        text_color = '#111111' if theme == 'white' else '#FFFFFF'
+        grid_color = '#BBBBBB' if theme == 'white' else '#55556B'
+
+        fig, axes = plt.subplots(
+            1, len(interval_levels), figsize=(6 * len(interval_levels), 5.5),
+            sharex=True, sharey=True, squeeze=False, facecolor=figure_color,
+        )
+        axes = axes.ravel()
+        truth = self.y_true[selected]
+        prediction = self.y_pred[selected]
+        lower_values = [self.df[lower].to_numpy(dtype=float)[selected]
+                        for _, lower, _, _ in interval_levels]
+        upper_values = [self.df[upper].to_numpy(dtype=float)[selected]
+                        for _, _, upper, _ in interval_levels]
+        x_limits = (truth.min() * 0.8, truth.max() * 1.2)
+        y_limits = (
+            min(lower.min() for lower in lower_values) * 0.8,
+            max(upper.max() for upper in upper_values) * 1.2,
+        )
+        reference_limits = (min(x_limits[0], y_limits[0]),
+                            max(x_limits[1], y_limits[1]))
+
+        for ax, (label, _, _, color), lower, upper in zip(
+                axes, interval_levels, lower_values, upper_values):
+            ax.set_facecolor(axes_color)
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            ax.plot(reference_limits, reference_limits, '--',
+                    color=grid_color, linewidth=1.2, label='Perfect prediction')
+            ax.vlines(truth, lower, upper, color=color, linewidth=1.5,
+                      alpha=0.75, label=f'{label} interval')
+            ax.scatter(truth, prediction, color='#F4A340', s=22,
+                       edgecolors=axes_color, linewidths=0.4, zorder=3,
+                       label='Prediction')
+            ax.set(xlim=x_limits, ylim=y_limits,
+                   xlabel=r'Ground Truth Flux (W/m$^{2}$)',
+                   title=f'{label} predictive interval')
+            ax.grid(alpha=0.25, color=grid_color, which='major')
+            ax.tick_params(colors=text_color)
+            ax.xaxis.label.set_color(text_color)
+            ax.title.set_color(text_color)
+            for spine in ax.spines.values():
+                spine.set_color(text_color)
+        axes[0].set_ylabel(r'Predicted Flux (W/m$^{2}$)', color=text_color)
+        axes[0].legend(fontsize=9)
+        fig.suptitle('Predictions with uncertainty intervals', color=text_color)
+        fig.text(
+            0.5, 0.02,
+            f'{len(selected)} class-balanced examples (up to 12 per class); '
+            'coverage metrics use all valid predictions.',
+            ha='center', color=text_color, fontsize=9,
+        )
+        fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+        plot_path = os.path.join(self.plots_dir, 'prediction_intervals.png')
+        fig.savefig(plot_path, dpi=300, bbox_inches='tight',
+                    facecolor=figure_color)
+        plt.close(fig)
+        print(f"Saved prediction interval plot to {plot_path}")
 
     def _plot_quantile_calibration(self, metrics_df):
         """Plot nominal versus empirical 68%/95% quantile coverage."""
@@ -593,11 +695,13 @@ class FOXESEvaluator:
         """
         setup_barlow_font()
         flare_classes = {
-            'A1.0': (1e-8, 1e-7),
-            'B1.0': (1e-7, 1e-6),
-            'C1.0': (1e-6, 1e-5),
-            'M1.0': (1e-5, 1e-4),
-            'X1.0': (1e-4, 1e-3)
+            'A1.0': 1e-8,
+            'B1.0': 1e-7,
+            'C1.0': 1e-6,
+            'M1.0': 1e-5,
+            'X1.0': 1e-4,
+            'X10.0': 1e-3,
+            'X100.0': 1e-2,
         }
 
         theme = 'white' if self.plot_background in ('white', 'light') else 'black'
@@ -610,60 +714,61 @@ class FOXESEvaluator:
         colorbar_facecolor = axis_facecolor
         figure_facecolor = '#FFFFFF' if theme == 'white' else '#000000'
 
-        def add_flare_class_axes(ax, min_val, max_val, tick_color):
+        def add_flare_class_axes(ax, tick_color):
             """Helper function to add flare class secondary axes"""
+            x_limits = ax.get_xlim()
+            y_limits = ax.get_ylim()
+
             # Create secondary axis for flare classes (top)
             ax_top = ax.twiny()
-            ax_top.set_xlim(ax.get_xlim())
+            ax_top.set_xlim(x_limits)
             ax_top.set_xscale('log')
             # Make secondary axis background transparent
             ax_top.patch.set_alpha(0.0)
 
             # Create secondary axis for flare classes (right)
             ax_right = ax.twinx()
-            ax_right.set_ylim(ax.get_ylim())
+            ax_right.set_ylim(y_limits)
             ax_right.set_yscale('log')
             # Make secondary axis background transparent
             ax_right.patch.set_alpha(0.0)
 
-            # Set flare class tick positions and labels
-            flare_positions = []
-            flare_labels = []
-            for class_name, (min_flux, max_flux) in flare_classes.items():
-                if min_flux >= min_val and min_flux <= max_val:
-                    flare_positions.append(min_flux)
-                    flare_labels.append(f'{class_name}')
-                if max_flux >= min_val and max_flux <= max_val and max_flux != min_flux:
-                    flare_positions.append(max_flux)
-                    flare_labels.append(f'{class_name}')
+            # Each secondary axis gets only the flare thresholds it displays.
+            x_ticks = [(flux, name) for name, flux in flare_classes.items()
+                       if min(x_limits) <= flux <= max(x_limits)]
+            y_ticks = [(flux, name) for name, flux in flare_classes.items()
+                       if min(y_limits) <= flux <= max(y_limits)]
 
-            if flare_positions:
-                ax_top.set_xticks(flare_positions)
-                ax_top.set_xticklabels(flare_labels, fontsize=12, color=tick_color, fontfamily='Barlow')
+            if x_ticks:
+                ax_top.set_xticks([flux for flux, _ in x_ticks])
+                ax_top.set_xticklabels([name for _, name in x_ticks], fontsize=12,
+                                      color=tick_color, fontfamily='Barlow')
                 ax_top.tick_params(colors=tick_color)
 
                 ax_top.xaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
                 ax_top.tick_params(which='minor', colors=tick_color)
 
-                ax_right.set_yticks(flare_positions)
-                ax_right.set_yticklabels(flare_labels, fontsize=12, color=tick_color, fontfamily='Barlow')
+            if y_ticks:
+                ax_right.set_yticks([flux for flux, _ in y_ticks])
+                ax_right.set_yticklabels([name for _, name in y_ticks], fontsize=12,
+                                         color=tick_color, fontfamily='Barlow')
                 ax_right.tick_params(colors=tick_color)
 
                 ax_right.yaxis.set_minor_locator(mticker.LogLocator(base=10, subs='auto', numticks=100))
                 ax_right.tick_params(which='minor', colors=tick_color)
 
-        def draw_mae_contours(plot_ax, min_val, max_val):
-            """Draw MAE contours on the 1-to-1 plot"""
+        def draw_mae_contours(plot_ax):
+            """Draw class MAE bands over the observed ground-truth range."""
             y_true = self.y_true
             y_pred = self.y_pred
 
             # Define flare classes
             flare_classes_mae = {
-                'A': (1e-8, 1e-7, "#FFAAA5"),
+                #'A': (1e-8, 1e-7, "#FFAAA5"),
                 'B': (1e-7, 1e-6, "#FFAAA5"),
                 'C': (1e-6, 1e-5, "#FFAAA5"),
                 'M': (1e-5, 1e-4, "#FFAAA5"),
-                'X': (1e-4, 1e-2, "#FFAAA5")
+                'X': (1e-4, np.inf, "#FFAAA5")
             }
 
             for class_name, (min_flux, max_flux, color) in flare_classes_mae.items():
@@ -680,12 +785,16 @@ class FOXESEvaluator:
                 log_pred = np.log10(pred_subset)
                 log_mae = mean_absolute_error(log_true, log_pred)
 
-                # Create smooth curve within this class range
-                x_class = np.logspace(np.log10(min_flux), np.log10(max_flux), 100)
+                # Extend slightly beyond the samples, without filling empty
+                # decades or crossing into a neighboring flare class.
+                buffer_factor = 1.1
+                x_start = max(min_flux, true_subset.min() / buffer_factor)
+                x_stop = min(max_flux, true_subset.max() * buffer_factor)
+                x_class = np.geomspace(x_start, x_stop, 100)
 
                 # Upper and lower MAE bounds
-                upper_bound = x_class * np.exp(log_mae)
-                lower_bound = x_class * np.exp(-log_mae)
+                upper_bound = x_class * 10 ** log_mae
+                lower_bound = x_class * 10 ** -log_mae
 
                 # Plot MAE contours on the 1-to-1 plot
                 if class_name == 'X':
@@ -720,7 +829,7 @@ class FOXESEvaluator:
                         cmap="bone", norm=shared_norm, alpha=1)
 
         # Draw MAE contours on main plot
-        draw_mae_contours(ax1, min_val, max_val)
+        draw_mae_contours(ax1)
 
         # Set plot area background to dark blue-purple that complements fire colormap
         ax1.set_facecolor(axis_facecolor)
@@ -764,7 +873,7 @@ class FOXESEvaluator:
         ax1.grid(True, which='minor', alpha=0.15, linewidth=0.25, linestyle='--', color=minor_grid_color)
 
         # Add flare class axes to main plot
-        add_flare_class_axes(ax1, min_val, max_val, text_color)
+        add_flare_class_axes(ax1, text_color)
 
         # Colorbar styling
         cbar = fig.colorbar(h1[3], ax=ax1, orientation='vertical', pad=.1)

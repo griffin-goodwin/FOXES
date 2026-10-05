@@ -1,0 +1,12 @@
+# Arm C: strictly positive normalized-log patch contributions.
+base_config: original.yaml
+
+mean_parameterization: positive
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-MEAN-POSITIVE/
+
+wandb:
+  tags: [patch-mean-comparison, mean-only, positive-patch-mean]
+  run_name: FOXES-PATCH-MEAN-POSITIVE
+  notes: Mean-only follow-up using strictly positive normalized-log patch contributions with the original head initialization.

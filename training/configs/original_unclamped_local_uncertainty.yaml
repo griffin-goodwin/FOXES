@@ -1,0 +1,52 @@
+# From the repository root, in the foxes environment:
+# python training/train.py --config training/configs/original_unclamped_local_uncertainty.yaml
+base_config: train_config.yaml
+
+model_type: uncertainty
+mean_parameterization: original_unclamped
+epochs: 50
+
+uncertainty:
+  enabled: true
+  start_epoch: 0
+  class_weighting: sqrt_inverse_frequency
+  class_weight_exponent: null
+  huber_delta: 0.30
+
+vit_architecture:
+  mask_mode: local
+  local_window: 9
+  learning_rate: 0.0001
+  global_patch_adjustment: false
+  independent_local_global: false
+  patch_global_context:
+    enabled: false
+
+finetune:
+  trainable_modules: null
+
+optimizer:
+  scheduler:
+    T_max: 50
+    eta_min: 0.000001
+
+checkpoint:
+  initialize_from: null
+  resume_from: null
+  monitor: val/mse
+  mode: min
+  save_top_k: -1
+  save_last: true
+
+early_stopping:
+  enabled: true
+  monitor: val/mse
+  patience: 5
+
+data:
+  checkpoints_dir: /data/checkpoints/Unclamped-9Local/
+
+wandb:
+  run_name: Unclamped-9Local
+  tags: [full-data, foxes-og, local-9, original-unclamped-patch-flux, sqrt-weighted-huber, detached-patch-uncertainty, lr-5e-5]
+  notes: From-scratch local-attention experiment. Each patch contributes 10^(logit * sxr_std + sxr_mean) W/m^2, with no mean-logit or raw-flux clamp and no per-patch offset subtraction or equal-share baseline. Sum physical patch fluxes directly. No global correction branches. Retain the detached relative-std uncertainty head and train it from epoch zero. The integrated target transform still uses log10(total_flux + 1e-8). Save every epoch to compare prediction error and spatial maps.

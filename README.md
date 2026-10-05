@@ -69,7 +69,8 @@ FOXES
 │   └── sxr_normalization.py     # Compute log-space mean/std over SXR .npy files for training
 ├── forecasting
 │   ├── dataset.py            # AIAGOESDataset / AIAGOESDataModule: loads paired AIA + SXR .npy files
-│   ├── model.py               # ViTLocal: Vision Transformer with patch flux heads
+│   ├── model.py               # Original deterministic FOXES model
+│   ├── uncertainty_model.py   # Single uncertainty-aware FOXES model
 │   ├── inference.py           # Run a checkpoint over a folder of data; writes predictions.csv
 │   ├── inference_config.yaml  # Config for inference.py
 │   ├── evaluation.py          # Compute metrics and generate evaluation plots
@@ -79,6 +80,8 @@ FOXES
 │   ├── train.py                # Train ViTLocal with PyTorch Lightning + Weights & Biases logging
 │   ├── train_config.yaml       # Config for train.py
 │   └── callbacks.py            # W&B callbacks: SXR pred-vs-true plots, attention map visualization
+├── experiments
+│   └── patch_mean_comparison/  # Matched patch-mean parameterization experiments
 └── requirements.txt            # Python dependencies
 ```
 
@@ -249,23 +252,20 @@ automatically alongside it whenever `flux_path` / `weight_path` are set in the
 config — set `model_params.no_flux: true` or `model_params.no_weights: true` to
 skip either.
 
-`model_type: auto` also supports standard, background-plus-excess, and original
-patch-mean Gaussian checkpoints. For those checkpoints the prediction CSV
+`model_type: auto` distinguishes the original deterministic model from the
+single uncertainty model. For uncertainty checkpoints the prediction CSV
 additionally contains normalized mean/variance,
 normalized sigma, sigma in dex, and asymmetric 68%/95% intervals in physical
 W/m². Set `patch_uncertainty_path` to save a raw-flux spatial uncertainty map
 for each image, or set `model_params.no_patch_uncertainty: true` to skip the
-maps while retaining the global uncertainty columns. Standard Gaussian maps
-are marginal patch standard deviations. Background-plus-excess maps are the
-square root of each patch's additive contribution to global variance, not
-independently calibrated patch error bars.
-
-For a background-plus-excess checkpoint, set `component_flux_path` to save a
-compressed NPZ per timestamp with the whole-image background scalar, learned
-local-excess map, fixed background allocation, total accounting map, and their
-variance decomposition. The prediction CSV also receives background/excess
-flux totals and variance-fraction diagnostics. `flux_path` remains the total
-accounting map for compatibility.
+maps while retaining the global uncertainty columns. These maps contain the
+square root of each patch's contribution to global raw-flux variance in W/m².
+The shared uncertainty head sees only each detached mean-head patch logit, so
+uncertainty gradients cannot alter the mean prediction. It predicts a
+dimensionless relative standard deviation for that patch,
+which scales the patch's physical flux before independent variance
+contributions are summed. Because training has only a global SXR target, the
+maps are variance attributions, not independently calibrated local error bars.
 
 ### 3) Evaluate
 

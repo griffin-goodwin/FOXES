@@ -1,0 +1,16 @@
+# Local patch evidence with a bounded global AIA correction at each patch.
+base_config: ../inverted_attention_windows/subset_base.yaml
+
+vit_architecture:
+  mask_mode: local
+  local_window: 3
+  global_patch_adjustment: true
+  max_abs_log10_global_adjustment: 1.5
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-Subset-Local-GlobalPatch-LR1e5/
+
+wandb:
+  run_name: OG-Subset-Local-GlobalPatch-LR1e5
+  tags: [subset-og-quick, foxes-og, uncertainty, positive-patch-mean, local-attention, global-aia-summary, per-patch-adjustment, lr-1e-5]
+  notes: Local 3x3 patch flux map with bounded per-patch correction from a global summary of the original seven-channel AIA image.

@@ -1,0 +1,19 @@
+# Shared FOXES-OG screening subset setup for matched attention-mask runs.
+base_config: ../../training/train_config.yaml
+
+epochs: 15
+batch_size: 32
+
+vit_architecture:
+  learning_rate: 0.00001
+
+optimizer:
+  scheduler:
+    T_max: 15
+
+data:
+  aia_dir: /data/FOXES_screening/subset-og-quick/AIA_processed
+  sxr_dir: /data/FOXES_screening/subset-og-quick/SXR_processed
+  sxr_norm_path: /data/FOXES_screening/subset-og-quick/SXR_processed/normalized_sxr.npy
+  # These subset AIA arrays were already scaled to [-1, 1].
+  aia_norm_path: null

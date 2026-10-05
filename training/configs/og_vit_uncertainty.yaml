@@ -1,0 +1,139 @@
+# Published ViT architecture with unclamped flux and detached uncertainty.
+# Run from the repository root:
+# python training/train.py --config training/configs/og_vit_uncertainty.yaml
+
+wavelengths: [94, 131, 171, 193, 211, 304, 335]
+# Use all available GPUs; batch_size is per device.
+gpu_ids: "all"
+seed: 42
+
+model_type: uncertainty
+# Positive physical flux: 10^(z * std + mean), with no per-patch offset/clamp.
+mean_parameterization: original_unclamped
+batch_size: 16
+accumulate_grad_batches: 1
+epochs: 50
+
+# Legacy deterministic-model option; unused by the uncertainty model.
+calculate_base_weights: false
+
+uncertainty:
+  enabled: true
+  start_epoch: 0
+  initial_relative_std: 1.0
+  min_log10_relative_std: -6.0
+  max_log10_relative_std: 6.0
+  uncertainty_hidden_dim: 16
+  # Current uncertainty-model mean objective, not the published adaptive loss.
+  class_weighting: sqrt_inverse_frequency
+  class_weight_exponent: null
+  huber_delta: 0.30
+
+vit_architecture:
+  embed_dim: 256
+  hidden_dim: 1024
+  num_layers: 8
+  num_heads: 8
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  dropout: 0.1
+  learning_rate: 0.0001
+  # Released model behavior: block the 9x9 neighborhood in attention.
+  # Residual connections still retain each patch's own features.
+  mask_mode: inverted
+  local_window: 9
+  global_patch_adjustment: false
+  max_abs_log10_global_adjustment: 1.5  # Inactive with correction disabled.
+  independent_local_global: false
+  patch_global_context:
+    enabled: false
+
+optimizer:
+  # New-run choice; weight decay was absent from the published run export.
+  weight_decay: 0.0001
+  gradient_clip_val: null
+  scheduler:
+    T_max: 50
+    eta_min: 0.000001
+
+contrast_prior:
+  enabled: false
+
+# Legacy deterministic-model settings, retained explicitly but unused here.
+# The active mean-loss settings are in the uncertainty block above.
+loss:
+  base_weights:
+    quiet: 1.0
+    c_class: 1.77
+    m_class: 3.20
+    x_class: 14.75
+  huber_delta: 0.3
+  window_size: 15000
+  diagnostic_every_n_steps: 200
+  adaptive_multipliers: null
+
+finetune:
+  trainable_modules: null
+
+checkpoint:
+  initialize_from: null
+  resume_from: null
+  monitor: val/mse
+  mode: min
+  save_top_k: 5
+  save_last: true
+  include_step_in_filename: false
+  include_monitor_in_filename: true
+
+# Allow the full schedule despite short-term validation fluctuations.
+early_stopping:
+  enabled: false
+  # Inactive while enabled is false.
+  monitor: val_class/macro_mse_dex2
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
+
+logging:
+  log_every_n_steps: 10
+
+callbacks:
+  per_class_metrics_enabled: true
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5
+  spatial_uncertainty_log_every_n_epochs: 1
+  attention_enabled: false
+  attention_num_samples: 8
+  attention_log_every_n_epochs: 1
+
+data:
+  aia_dir: /data/FOXES_OG/AIA_processed
+  sxr_dir: /data/FOXES_OG/SXR_processed
+  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+  aia_norm_path: null  # Use the existing preprocessed AIA arrays.
+  checkpoints_dir: /data/checkpoints/FOXES-OG-VIT-UNCLAMPED-UNCERTAINTY/
+  num_workers: 8
+
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  project: FOXES-SDOML
+  job_type: training
+  run_name: OG-ViT-Unclamped-Uncertainty-B48
+  tags: [full-data, og-vit, embed-256, layers-8, inverted-9, original-unclamped-patch-flux, sqrt-weighted-huber, detached-patch-uncertainty, batch-48, lr-1e-4, wd-1e-4]
+  notes: >-
+    Fresh training with the published ViT dimensions (256 embedding, 1024 hidden,
+    8 layers, 8 heads, 8-pixel patches, 7 channels, dropout 0.1), released
+    inverted 9x9 attention, and unclamped positive exponential patch flux
+    without per-patch offset subtraction or division by the patch count.
+    Add detached relative-std patch uncertainty from epoch zero; no global
+    correction branches. Batch size 48 per device, no gradient accumulation.
+    Use the current square-root class-weighted Huber mean loss (delta 0.30),
+    not the published adaptive loss. LR 1e-4, new-run weight decay 1e-4,
+    150-epoch cosine schedule, and no early stopping. Retain current FOXES_OG
+    data paths; this is an architecture comparison, not an exact paper rerun.

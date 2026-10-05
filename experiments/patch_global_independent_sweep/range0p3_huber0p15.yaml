@@ -1,0 +1,125 @@
+# Standalone subset sweep: range0p3_huber0p15
+# Scale limit: vit_architecture.patch_global_context.max_abs_adjustment (dex).
+# uncertainty.huber_delta applies to BOTH independent mean objectives.
+wavelengths:
+- 94
+- 131
+- 171
+- 193
+- 211
+- 304
+- 335
+gpu_ids:
+- 0
+batch_size: 8
+epochs: 8
+seed: 42
+accumulate_grad_batches: 6
+model_type: uncertainty
+mean_parameterization: positive
+uncertainty:
+  enabled: true
+  start_epoch: 0
+  initial_relative_std: 1.0
+  min_log10_relative_std: -6.0
+  max_log10_relative_std: 6.0
+  uncertainty_hidden_dim: 16
+  huber_delta: 0.15
+  class_weighting: sqrt_inverse_frequency
+  class_weight_exponent: null
+calculate_base_weights: false
+vit_architecture:
+  embed_dim: 512
+  num_channels: 7
+  num_classes: 1
+  patch_size: 8
+  num_patches: 4096
+  hidden_dim: 2048
+  num_heads: 8
+  num_layers: 12
+  dropout: 0.1
+  learning_rate: 5.0e-05
+  mask_mode: local
+  local_window: 3
+  global_patch_adjustment: false
+  max_abs_log10_global_adjustment: 1.5
+  patch_global_context:
+    enabled: true
+    grid_size: 32
+    attention_dim: 128
+    num_heads: 4
+    max_abs_adjustment: 0.3
+    dropout: 0.0
+  independent_local_global: true
+optimizer:
+  weight_decay: 1.0e-05
+  gradient_clip_val: null
+  scheduler:
+    T_max: 8
+    eta_min: 1.0e-07
+loss:
+  base_weights:
+    quiet: 1.0
+    c_class: 1.77
+    m_class: 3.2
+    x_class: 14.75
+  huber_delta: 0.3
+  window_size: 15000
+  diagnostic_every_n_steps: 200
+  adaptive_multipliers: null
+checkpoint:
+  monitor: val/mae
+  mode: min
+  save_top_k: 1
+  save_last: true
+  include_step_in_filename: false
+  include_monitor_in_filename: true
+  initialize_from: /data/checkpoints/FOXES-OG-SQRT-E10-PATCH-GLOBAL-REPLACEMENT/last.ckpt
+  resume_from: null
+early_stopping:
+  enabled: false
+  monitor: val_class/macro_mse_dex2
+  mode: min
+  patience: 5
+  min_delta: 0.0
+  check_finite: true
+  verbose: true
+logging:
+  log_every_n_steps: 10
+callbacks:
+  per_class_metrics_enabled: true
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_num_samples: 5
+  spatial_uncertainty_log_every_n_epochs: 1
+  attention_enabled: false
+  attention_num_samples: 8
+  attention_log_every_n_epochs: 1
+data:
+  aia_dir: /data/FOXES_screening/subset-og-quick/AIA_processed
+  sxr_dir: /data/FOXES_screening/subset-og-quick/SXR_processed
+  sxr_norm_path: /data/FOXES_screening/subset-og-quick/SXR_processed/normalized_sxr.npy
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-GLOBAL-INDEPENDENT-SUBSET/e8/range0p3_huber0p15/
+  num_workers: 4
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  project: FOXES-SDOML
+  job_type: training
+  tags:
+  - patch-global-independent-sweep
+  - subset-og-quick
+  - independent-local-global
+  - detached-uncertainty
+  - epochs-8
+  - range0p3_huber0p15
+  run_name: PatchGlobal-Independent-Subset-E8-range0p3_huber0p15
+  notes: Subset fine-tuning sweep of OG-PatchGlobal-Independent. Shared initialization checkpoint and
+    12-layer/512-wide backbone. Patch-specific global correction +/-0.3 dex; Huber delta 0.15 for both
+    equally weighted local/global objectives. Global gradients do not enter the local branch. Detached
+    uncertainty enabled. Microbatch 8, accumulation 6, 8 epochs, select corrected validation MAE. Changing
+    the range also changes the initial correction from loaded global weights; this tests fine-tuning behavior,
+    not identical initial predictions.
+finetune:
+  trainable_modules: null

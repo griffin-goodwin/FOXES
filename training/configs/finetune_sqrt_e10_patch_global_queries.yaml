@@ -1,0 +1,59 @@
+# From the repository root:
+# python training/train.py --config training/configs/finetune_sqrt_e10_patch_global_queries.yaml
+# Each local patch gets its own attention query over a 16x16 global feature grid.
+base_config: og_correction_power23_lr5e5.yaml
+
+epochs: 10
+batch_size: 48
+accumulate_grad_batches: 1  # Effective batch stays 48, with room for new attention.
+
+uncertainty:
+  class_weighting: sqrt_inverse_frequency
+  class_weight_exponent: null
+  huber_delta: 0.15
+  enabled: true
+  # Keep the checkpoint's uncertainty head for inference, but focus training
+  # exclusively on the new mean correction. Recalibrate uncertainty afterward.
+  start_epoch: 100
+
+vit_architecture:
+  learning_rate: 0.0005
+  global_patch_adjustment: false
+  patch_global_context:
+    enabled: true
+    grid_size: 16
+    attention_dim: 128
+    num_heads: 4
+    max_abs_adjustment: 1.5
+    dropout: 0.0
+
+finetune:
+  trainable_modules: [model.patch_global_context]
+
+optimizer:
+  weight_decay: 0.00001
+  gradient_clip_val: 1.0
+  scheduler:
+    T_max: 10
+    eta_min: 0.000005
+
+checkpoint:
+  initialize_from: /data/checkpoints/FOXES-OG-Uncertainty-Correction-Head/OG-Uncertainty-Correction-Head-epoch=10-val_total_loss=-1.0763.ckpt
+  resume_from: null
+  monitor: val/mse
+  mode: min
+  save_top_k: -1
+  save_last: true
+  include_step_in_filename: false
+  include_monitor_in_filename: true
+
+early_stopping:
+  enabled: false
+
+data:
+  checkpoints_dir: /data/checkpoints/FOXES-OG-SQRT-E10-PATCH-GLOBAL-REPLACEMENT/
+
+wandb:
+  run_name: OG-Sqrt-E10-PatchGlobalReplacement
+  tags: [full-data, foxes-og, finetune, sqrt-weighted-huber, patch-specific-global-attention, frozen-backbone]
+  notes: Five-epoch head-only test from sqrt epoch 10. Each patch queries a pooled 16x16 grid of raw AIA plus locally encoded features. The old single-query global correction is skipped; its checkpoint weights are ignored. The new correction starts at zero and can reach +/-1.5 dex. Backbone, local mean, and uncertainty parameters are frozen. Select by validation MSE and MAE.
