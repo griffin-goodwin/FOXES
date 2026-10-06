@@ -46,6 +46,7 @@ from forecasting.dataset import AIAGOESDataModule
 from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
 from forecasting.uncertainty_model import GaussianNLLViTLocal
 from training.strategies import TrainingStreamDDPStrategy
+from training.configuration import resolve_model_settings
 
 
 FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
@@ -116,7 +117,7 @@ def load_training_config(config_path):
         base = load_one(base_path.resolve(), (*ancestors, path))
         return _deep_merge_config(base, current)
 
-    return resolve_config_variables(load_one(config_path, ()))
+    return resolve_model_settings(resolve_config_variables(load_one(config_path, ())))
 
 
 def get_base_weights(data_module, sxr_norm):
@@ -301,7 +302,8 @@ def resolve_resume_checkpoint(checkpoint_config, cli_checkpoint_path=None):
 
 def build_checkpoint_callback(config_data, checkpoint_config):
     """Build the checkpoint callback shared by fresh and resumed runs."""
-    monitor = checkpoint_config.get('monitor', 'val_total_loss')
+    default_monitor = 'val/total_loss' if config_data.get('model_type') == 'uncertainty' else 'val_total_loss'
+    monitor = checkpoint_config.get('monitor', default_monitor)
     filename = f"{config_data['wandb']['run_name']}-epoch={{epoch:02d}}"
     if checkpoint_config.get('include_step_in_filename', True):
         filename += "-step={step:06d}"
@@ -339,10 +341,8 @@ def initialize_model_weights(model, checkpoint_path):
     """Load a trusted local Lightning checkpoint without restoring training state.
 
     The new model retains the configured objective, LR and scheduler. Strict
-    loading includes the uncertainty head. A patch-specific global module may
-    be new, and its replacement of the old shared-global module may leave old
-    checkpoint weights unused. No other mismatches are allowed. Normalization
-    and attention masks must match.
+    loading includes every enabled head. Architecture, normalization, and
+    attention masks must match; no legacy-head migration is performed.
     """
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     state = checkpoint['state_dict']
@@ -351,45 +351,12 @@ def initialize_model_weights(model, checkpoint_path):
         if name == 'sxr_norm' or name.endswith('.attention_mask'):
             if name in current and not torch.equal(value, current[name]):
                 raise ValueError(f'Initialization checkpoint differs in {name}')
-    saved_mean = checkpoint.get('hyper_parameters', {}).get('mean_parameterization')
-    if saved_mean is not None and saved_mean != model.hparams.get('mean_parameterization'):
-        raise ValueError('Initialization checkpoint differs in mean_parameterization')
-    result = model.load_state_dict(state, strict=False)
-    allowed_missing = {
-        name for name in current
-        if name.startswith('model.patch_global_context.')
-    }
-    replacing_old_global = (
-        getattr(model.model, 'patch_global_context', None) is not None
-        and not model.model.global_patch_adjustment
-    )
-    old_global_prefixes = (
-        'model.global_raw_patch_projection.',
-        'model.global_attention.',
-        'model.global_patch_head.',
-    )
-    allowed_unexpected = {
-        name for name in result.unexpected_keys
-        if replacing_old_global and (
-            name == 'model.global_query'
-            or name.startswith(old_global_prefixes)
-        )
-    }
-    if (set(result.unexpected_keys) - allowed_unexpected
-            or set(result.missing_keys) - allowed_missing):
-        raise RuntimeError(
-            'Initialization checkpoint is incompatible: '
-            f'missing={result.missing_keys}, unexpected={result.unexpected_keys}'
-        )
-    metadata = {
+    model.on_load_checkpoint(checkpoint)
+    model.load_state_dict(state, strict=True)
+    return {
         'source_epoch': checkpoint.get('epoch'),
         'source_global_step': checkpoint.get('global_step'),
     }
-    if result.missing_keys:
-        metadata['new_parameter_keys'] = list(result.missing_keys)
-    if result.unexpected_keys:
-        metadata['skipped_parameter_keys'] = list(result.unexpected_keys)
-    return metadata
 
 
 def get_resume_fit_kwargs(resume_checkpoint):
@@ -508,43 +475,15 @@ def main():
     data_module.setup()
 
     model_type = config_data.get('model_type', 'deterministic')
-    mean_parameterization = str(
-        config_data.get('mean_parameterization', 'multiplier')
-    ).lower()
     if model_type not in {'deterministic', 'uncertainty'}:
         raise ValueError(
             f"Unknown model_type {model_type!r}; expected 'deterministic' "
             "or 'uncertainty'"
         )
-    if (
-        model_type == 'uncertainty'
-        and mean_parameterization not in
-        GaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATIONS
-    ):
-        raise ValueError(
-            'mean_parameterization must be one of '
-            f'{GaussianNLLViTLocal.NETWORK_CLASS.MEAN_PARAMETERIZATIONS}'
-        )
     if model_type == 'uncertainty':
-        initialization = (
-            GaussianNLLViTLocal.NETWORK_CLASS.MEAN_HEAD_INITIALIZATIONS[
-                mean_parameterization
-            ]
-        )
         config_data.setdefault('experiment_metadata', {}).update({
-            'mean_parameterization': mean_parameterization,
-            'mean_head_initialization': initialization,
-            'uncertainty_parameterization': (
-                'logit_conditioned_relative_log10_patch_std'
-                if config_data.get('uncertainty', {}).get('enabled', True)
-                else None
-            ),
+            'architecture': 'independent_multiplier_v1',
             'uncertainty_likelihood_space': 'normalized_log10_sxr',
-            'contrast_prior': (
-                'hot_channel_spatial_cosine'
-                if config_data.get('contrast_prior', {}).get('enabled', False)
-                else None
-            ),
         })
     uncertainty_config = config_data.get('uncertainty', {})
     class_weighting = uncertainty_config.get(
@@ -599,39 +538,18 @@ def main():
     common_model_kwargs = dict(
         model_kwargs=config_data['vit_architecture'],
         sxr_norm=sxr_norm,
-        base_weights=base_weights,
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
     )
     if model_type == 'uncertainty':
-        contrast_prior_config = dict(
-            config_data.get('contrast_prior', {})
-        )
-        contrast_wavelengths = contrast_prior_config.pop(
-            'wavelengths', []
-        )
-        missing_contrast_wavelengths = [
-            wavelength for wavelength in contrast_wavelengths
-            if wavelength not in wavelengths
-        ]
-        if missing_contrast_wavelengths:
-            raise ValueError(
-                "contrast_prior wavelengths are absent from model input: "
-                f"{missing_contrast_wavelengths}"
-            )
-        contrast_prior_config['channel_indices'] = [
-            wavelengths.index(wavelength)
-            for wavelength in contrast_wavelengths
-        ]
         model = GaussianNLLViTLocal(
             **common_model_kwargs,
             uncertainty_kwargs=config_data.get('uncertainty', {}),
-            mean_parameterization=mean_parameterization,
-            contrast_prior_kwargs=contrast_prior_config,
         )
     else:
         model = ViTLocal(
             **common_model_kwargs,
+            base_weights=base_weights,
             diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
             loss_kwargs={
                 'window_size': loss_cfg.get('window_size', 15000),
@@ -650,23 +568,17 @@ def main():
             'starting at epoch 0 with a fresh optimizer and scheduler'
         )
 
-    trainable_modules = config_data.get('finetune', {}).get('trainable_modules')
-    if trainable_modules is not None:
-        if model_type != 'uncertainty':
-            raise ValueError('finetune.trainable_modules requires uncertainty model')
-        model.freeze_except(trainable_modules)
-        print(f'Training only modules: {trainable_modules}')
-
     checkpoint_callback = build_checkpoint_callback(
         config_data, checkpoint_cfg
     )
     callbacks.append(checkpoint_callback)
 
     early_stopping_cfg = config_data.get('early_stopping', {})
+    default_monitor = 'val/total_loss' if model_type == 'uncertainty' else 'val_total_loss'
     if early_stopping_cfg.get('enabled', False):
         callbacks.append(EarlyStopping(
             monitor=early_stopping_cfg.get(
-                'monitor', checkpoint_cfg.get('monitor', 'val_total_loss')
+                'monitor', checkpoint_cfg.get('monitor', default_monitor)
             ),
             mode=early_stopping_cfg.get(
                 'mode', checkpoint_cfg.get('mode', 'min')

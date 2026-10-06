@@ -1,54 +1,27 @@
-# =============================================================================
-# FOXES Training Configuration
-# =============================================================================
-# Used by train.py to train the ViTLocal model on paired AIA/SXR .npy data.
-# Expects aia_dir/sxr_dir to each have train/val/test subfolders (that's what
-# data/build_dataset.py produces).
-#
-# Usage:
-#   python training/train.py --config training/train_config.yaml
-# =============================================================================
-wavelengths: [94, 131, 171, 193, 211, 304, 335]
-
-# GPU configuration:
-#   0 (or any int)  - that single GPU
-#   [0, 1]          - those specific GPUs
-#   "all"           - every available GPU
-#   -1              - CPU only
-gpu_ids: "all"
-
+# Independent local multipliers, global correction, and uncertainty.
+# Toggle global_head.enabled and uncertainty.enabled; both default to true.
+# Local/global heads use PyTorch default random initialization.
+# mean_loss.huber_delta controls both independent mean objectives.
+wavelengths:
+- 94
+- 131
+- 171
+- 193
+- 211
+- 304
+- 335
+gpu_ids: all
 batch_size: 48
 epochs: 50
-seed: 42
-# Two GPUs x microbatch 16 x two accumulated batches preserves the selected
-# screening run's effective batch size of 64.
+seed: 1
 accumulate_grad_batches: 1
-
-# Canonical model with configurable patch-mean parameterization and detached
-# Gaussian patch uncertainty.
 model_type: uncertainty
-mean_parameterization: positive  # original, multiplier, or positive
-
 uncertainty:
   enabled: true
-  # Train uncertainty immediately alongside the mean model.
-  start_epoch: 0
-  # The shared head sees only each detached mean-head patch logit and predicts
-  # log10 relative standard deviation for that patch. These dimensionless values
-  # scale physical patch flux before independent variance contributions sum.
   initial_relative_std: 1.0
   min_log10_relative_std: -6.0
   max_log10_relative_std: 6.0
-  uncertainty_hidden_dim: 16
-  # Huber is the only mean objective. Class weights are calculated from the
-  # configured training split and normalized to mean sample weight one.
-  huber_delta: 0.15
-  class_weighting: inverse_frequency
-
-# Deterministic-model-only option: compute its legacy class weights from the
-# training data before starting. Both probabilistic models ignore it.
-calculate_base_weights: false
-
+  uncertainty_hidden_dim: 128
 vit_architecture:
   embed_dim: 512
   num_channels: 7
@@ -59,54 +32,36 @@ vit_architecture:
   num_heads: 8
   num_layers: 12
   dropout: 0.1
-  learning_rate: 0.00005
-  # Self-attention masking - one of:
-  #   inverted - the released model's behavior: each patch attends to DISTANT
-  #              patches (the flipped local-attention mask it was trained with)
-  #   local    - true local attention: each patch attends to its neighborhood
-  #   none     - standard full/global attention (no masking)
+  learning_rate: 5.0e-05
   mask_mode: local
-  local_window: 9   # neighbourhood side length (patches), used by inverted/local
-  global_patch_adjustment: false
-  max_abs_log10_global_adjustment: 1.5
-
-optimizer:
-  weight_decay: 0.0000001   # AdamW weight decay
-  gradient_clip_val: null
-  scheduler:              # CosineAnnealingLR, stepped once per epoch
-    T_max: 50            # decay from the initial LR to eta_min over the run
-    eta_min: 0.000001
-
-loss:
-  # Everything in this block belongs to the deterministic legacy model only.
-  base_weights:
-    quiet: 1.0
-    c_class: 1.77
-    m_class: 3.20
-    x_class: 14.75
-
+  local_window: 3
+local_head:
+  max_abs_log10_multiplier: 8.0
+global_head:
+  enabled: true
+  grid_size: 32
+  attention_dim: 128
+  num_heads: 4
+  max_abs_adjustment: 1.5
+  dropout: 0.0
+  num_layers: 1
+  hidden_dim: 128
+  mlp_depth: 1
+mean_loss:
   huber_delta: 0.3
-  window_size: 15000        # rolling error-history length per flare class
-  diagnostic_every_n_steps: 200   # how often to log per-class adaptive weights
-
-  # Note: quiet/C/M/X flux boundaries (1e-6/1e-5/1e-4 W/m^2) are the fixed GOES
-  # flare-class definition, not configurable here — see
-  # SXRRegressionDynamicLoss.CLASS_THRESHOLDS in forecasting/model.py.
-
-  # Deterministic-model advanced option: per-class {max_multiplier, min_multiplier, sensitivity,
-  # min_samples, recent_window} controlling how far recent performance can
-  # move a class's weight from its base_weight. Leave null to use
-  # SXRRegressionDynamicLoss.DEFAULT_ADAPTIVE_MULTIPLIERS.
-  adaptive_multipliers: null
-
+  class_weighting: inverse_frequency
+optimizer:
+  weight_decay: 1.0e-07
+  gradient_clip_val: null
+  scheduler:
+    T_max: 50
+    eta_min: 1.0e-06
 checkpoint:
-  # Select by the full validation objective and show that epoch's loss in the filename.
   monitor: val/total_loss
   mode: min
-  save_top_k: -1   # how many best checkpoints to keep on disk
+  save_top_k: -1
   include_step_in_filename: false
   include_monitor_in_filename: true
-
 early_stopping:
   enabled: false
   monitor: val_class/macro_mse_dex2
@@ -115,36 +70,37 @@ early_stopping:
   min_delta: 0.0
   check_finite: true
   verbose: true
-
 logging:
-  log_every_n_steps: 10   # Trainer step-logging interval
-
+  log_every_n_steps: 10
 callbacks:
-  per_class_metrics_enabled: true  # validation metrics for <B/B/C/M/X
+  per_class_metrics_enabled: true
   sxr_plot_enabled: true
-  sxr_plot_num_samples: 100          # validation samples shown in the pred-vs-true SXR plot
-  # Low-memory uncertainty patch flux/std maps. Leave off when the attention
-  # callback is enabled because that callback already contains these maps.
+  sxr_plot_num_samples: 100
   spatial_uncertainty_enabled: true
-  spatial_uncertainty_num_samples: 5  # one per <B/B/C/M/X when available
+  spatial_uncertainty_num_samples: 10
   spatial_uncertainty_log_every_n_epochs: 1
   attention_enabled: false
-  attention_num_samples: 8         # validation samples visualized per attention-map epoch
-  attention_log_every_n_epochs: 1  # how often (in epochs) to log attention maps
-
+  attention_num_samples: 8
+  attention_log_every_n_epochs: 1
 data:
-  aia_dir: "/data/FOXES_OG/AIA_processed"
-  sxr_dir: "/data/FOXES_OG/SXR_processed"
-  sxr_norm_path: "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
-  # Must be computed from the training split only.
-  aia_norm_path: #"/data/aia_q90_asinh_q99999_norm_streamed.npz"
-  checkpoints_dir: "/data/checkpoints/FOXES-OG-Uncertainty-Correction-Head-LR/"
-  num_workers: 8   # DataLoader worker processes; defaults to min(8, cpu_count()) if omitted
-
+  aia_dir: /data/FOXES_OG/AIA_processed
+  sxr_dir: /data/FOXES_OG/SXR_processed
+  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/FOXES-INDEPENDENT-LOCAL-GLOBAL/
+  num_workers: 8
 wandb:
-  entity: "ggoodwin5-georgia-state-university"  # your W&B username or team name
+  entity: ggoodwin5-georgia-state-university
   project: FOXES-SDOML
   job_type: training
-  tags: [full-data, foxes-og, embed-512, layers-8, local-3, multiplier-patch-mean, weighted-huber, detached-patch-uncertainty]
-  run_name: OG-Uncertainty-Correction-Head-LowerLR-INVR
-  notes: Canonical multiplier patch model with inverse-frequency weighted Huber and detached patch uncertainty.
+  tags:
+  - full-data
+  - foxes-og
+  - embed-512
+  - layers-12
+  - local-3
+  - multiplier-patch-mean
+  - weighted-huber
+  - detached-patch-uncertainty
+  run_name: Independent-Local-Global-Uncertainty
+  notes: Independent local multipliers and patch-specific global correction, with detached uncertainty.

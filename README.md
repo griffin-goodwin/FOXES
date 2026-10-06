@@ -291,6 +291,11 @@ Unlike inference, training expects `aia_dir`/`sxr_dir` each to have `train/`,
 
 Edit `training/train_config.yaml`:
 
+The uncertainty model now uses independent local multipliers, a configurable
+global correction head, and detached uncertainty. See
+[the model and metric reference](training/INDEPENDENT_MODEL.md) for the
+`global_head`, `mean_loss`, and `uncertainty` settings and loss definitions.
+
 ```yaml
 base_data_dir: "/path/to/processed_data"        # holds AIA_processed/ and SXR_processed/
 base_checkpoint_dir: "/path/to/checkpoints"

@@ -16,18 +16,19 @@ import yaml
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
+from training.configuration import resolve_model_settings
 from experiments.og_backbone_comparison.run_comparison import (
     SUBSET, assign_gpus, check_data, run_jobs,
 )
 
 ARMS = {f'range{r:.1f}_huber{d:.2f}'.replace('.', 'p'): (r, d)
-        for r in (0.3, 1.5, 3.0) for d in (0.15, 0.30)}
+        for r in (1.5,) for d in (0.15, 0.30, 1.0)}
 
 
 def comparison_payload(config):
     c = deepcopy(config)
-    c['vit_architecture']['patch_global_context'].pop('max_abs_adjustment')
     c['uncertainty'].pop('huber_delta')
+    c.pop('mean_loss', None)
     c['data'].pop('checkpoints_dir')
     c.pop('wandb')
     return c
@@ -36,19 +37,18 @@ def comparison_payload(config):
 def validate_configs(directory=HERE):
     configs = {}
     for name, (limit, delta) in ARMS.items():
-        c = yaml.safe_load((directory/f'{name}.yaml').read_text())
+        raw_config = yaml.safe_load((directory/f'{name}.yaml').read_text())
+        c = resolve_model_settings(raw_config)
         if 'base_config' in c:
             raise ValueError('Sweep configs must be standalone')
         a = c['vit_architecture']
-        if c['model_type'] != 'uncertainty' or c['mean_parameterization'] != 'positive':
-            raise ValueError(f'{name}: preserve the successful positive mean model')
-        if not a['independent_local_global'] or a['global_patch_adjustment']:
-            raise ValueError(f'{name}: use independent patch-specific global correction')
+        if c['model_type'] != 'uncertainty':
+            raise ValueError(f'{name}: use the independent flat-field multiplier model')
         p = a['patch_global_context']
-        if not p['enabled'] or p['max_abs_adjustment'] != limit or c['uncertainty']['huber_delta'] != delta:
+        if type(p['enabled']) is not bool or p['max_abs_adjustment'] != limit or c['uncertainty']['huber_delta'] != delta:
             raise ValueError(f'{name}: incorrect sweep factors')
-        if not c['uncertainty']['enabled'] or c['uncertainty']['start_epoch'] != 0:
-            raise ValueError(f'{name}: retain detached uncertainty from epoch zero')
+        if type(c['uncertainty']['enabled']) is not bool:
+            raise ValueError(f'{name}: use a boolean uncertainty toggle')
         for key, value in dict(embed_dim=512, hidden_dim=2048, num_layers=12,
                                num_heads=8, patch_size=8, num_patches=4096,
                                mask_mode='local', local_window=3).items():
@@ -70,12 +70,12 @@ def validate_configs(directory=HERE):
             raise ValueError(f'{name}: match the full cosine schedule without early stopping')
         if c['checkpoint']['monitor'] != 'val/mae' or c['checkpoint']['mode'] != 'min':
             raise ValueError(f'{name}: select corrected validation MAE')
-        if c['checkpoint']['resume_from'] is not None or c['finetune']['trainable_modules'] is not None:
-            raise ValueError(f'{name}: use fresh optimizers and all trainable modules')
+        if c['checkpoint']['initialize_from'] is not None or c['checkpoint']['resume_from'] is not None:
+            raise ValueError(f'{name}: start from scratch without any checkpoint')
         configs[name] = c
     reference = comparison_payload(next(iter(configs.values())))
     if any(comparison_payload(c) != reference for c in configs.values()):
-        raise ValueError('Arms differ outside scaling range, Huber delta, and output metadata')
+        raise ValueError('Arms differ outside Huber delta and output metadata')
     for section, key in [('data', 'checkpoints_dir'), ('wandb', 'run_name')]:
         if len({c[section][key] for c in configs.values()}) != len(configs):
             raise ValueError('Every arm needs distinct output names')

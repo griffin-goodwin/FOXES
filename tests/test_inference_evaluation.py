@@ -28,7 +28,7 @@ def make_uncertainty_model(uncertainty_kwargs=None):
             'patch_size': 1,
             'num_patches': 4,
             'dropout': 0.0,
-            'mask_mode': 'none',
+            'mask_mode': 'local',
         },
         sxr_norm=np.array([-6.0, 1.0], dtype=np.float32),
         uncertainty_kwargs=uncertainty_kwargs,

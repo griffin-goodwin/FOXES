@@ -1,9 +1,11 @@
 import numpy as np
+import pytest
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
 from forecasting.dataset import AIANormTransform
+from forecasting.uncertainty_model import GaussianNLLViTLocal
 from training.callbacks import (
     AttentionMapCallback,
     ImagePredictionLogger_SXR,
@@ -395,4 +397,46 @@ def test_spatial_uncertainty_callback_logs_each_class_without_attention():
 
     assert model.return_attention_values == [False]
     assert len(experiment.logged) == 5
+    assert model.training is True
+
+
+@pytest.mark.parametrize('global_enabled', [False, True])
+def test_spatial_callback_uses_global_head_adjustment_limit(monkeypatch, global_enabled):
+    from types import SimpleNamespace
+
+    model = GaussianNLLViTLocal(
+        model_kwargs=dict(
+            embed_dim=8, hidden_dim=16, num_channels=7, num_heads=1,
+            num_layers=1, patch_size=1, num_patches=4, dropout=0.0,
+            patch_global_context=dict(
+                enabled=global_enabled, grid_size=2, attention_dim=8,
+                num_heads=2, max_abs_adjustment=0.7,
+            ),
+        ),
+        sxr_norm=[-6.0, 1.0],
+    )
+    logged = []
+    trainer = SimpleNamespace(
+        is_global_zero=True, current_epoch=0,
+        datamodule=SimpleNamespace(
+            val_ds=[(torch.zeros(2, 2, 7), torch.tensor(0.0))],
+        ),
+        logger=SimpleNamespace(experiment=SimpleNamespace(log=logged.append)),
+    )
+    callback = SpatialUncertaintyMapCallback(
+        num_samples=1, patch_size=1, log_every_n_epochs=1,
+    )
+    adjustment_limits = []
+    plot_adjustment = callback._plot_global_patch_adjustment
+
+    def capture_adjustment(*args, **kwargs):
+        figure = plot_adjustment(*args, **kwargs)
+        adjustment_limits.append(figure.axes[3].images[0].get_clim())
+        return figure
+
+    monkeypatch.setattr(callback, '_plot_global_patch_adjustment', capture_adjustment)
+    callback.on_validation_epoch_end(trainer, model)
+
+    assert adjustment_limits == ([(-0.7, 0.7)] if global_enabled else [])
+    assert len(logged) == (2 if global_enabled else 1)
     assert model.training is True

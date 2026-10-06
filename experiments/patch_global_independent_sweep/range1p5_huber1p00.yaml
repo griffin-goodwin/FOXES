@@ -49,7 +49,7 @@ global_head:
   hidden_dim: 128
   mlp_depth: 1
 mean_loss:
-  huber_delta: 0.3
+  huber_delta: 1.0
   class_weighting: sqrt_inverse_frequency
   class_weight_exponent: null
 optimizer:
@@ -92,7 +92,7 @@ data:
   sxr_dir: /data/FOXES_screening/subset-og-quick/SXR_processed
   sxr_norm_path: /data/FOXES_screening/subset-og-quick/SXR_processed/normalized_sxr.npy
   aia_norm_path: null
-  checkpoints_dir: /data/checkpoints/FOXES-PATCH-GLOBAL-INDEPENDENT-SUBSET/independent-clean-e8/range1p5_huber0p30/
+  checkpoints_dir: /data/checkpoints/FOXES-PATCH-GLOBAL-INDEPENDENT-SUBSET/independent-clean-e8/range1p5_huber1p00/
   num_workers: 4
 wandb:
   entity: ggoodwin5-georgia-state-university
@@ -104,9 +104,9 @@ wandb:
   - independent-local-global
   - detached-uncertainty
   - epochs-8
-  - range1p5_huber0p30
-  run_name: PatchGlobal-Independent-Subset-Independent-Clean-E8-range1p5_huber0p30
+  - range1p5_huber1p00
+  run_name: PatchGlobal-Independent-Subset-Independent-Clean-E8-range1p5_huber1p00
   notes: From-scratch Huber-only subset experiment. Fixed global correction limit +/-1.5 dex; Huber delta
-    0.3 applies to both equally weighted independent mean objectives. Fresh model weights, optimizer and
+    1.0 applies to both equally weighted independent mean objectives. Fresh model weights, optimizer and
     scheduler in every arm; no checkpoint initialization. Identical backbone, detached uncertainty and
     subset. Batch 48, no gradient accumulation, 8 epochs, select corrected validation MAE.

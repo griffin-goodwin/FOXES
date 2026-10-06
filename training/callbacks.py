@@ -783,7 +783,7 @@ class SpatialUncertaintyMapCallback(Callback):
                 )
                 network = getattr(pl_module, 'model', None)
                 global_adjustment = getattr(
-                    network, 'last_log10_global_patch_adjustment', None
+                    network, 'last_log10_patch_global_adjustment', None
                 )
                 is_variance_attribution = getattr(
                     pl_module, 'patch_uncertainty_semantics', None
@@ -836,7 +836,7 @@ class SpatialUncertaintyMapCallback(Callback):
                             global_adjustment[sample_index],
                             patch_size=self.patch_size,
                             max_abs_adjustment=(
-                                network.max_abs_log10_global_adjustment
+                                network.patch_global_context.max_abs_adjustment
                             ),
                             aia_transform=aia_transform,
                             sample_description=description,
