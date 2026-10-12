@@ -7,6 +7,7 @@ import numpy as np
 from pathlib import Path
 import glob
 import os
+from tqdm import tqdm
 
 
 def compute_sxr_norm(sxr_dir):
@@ -57,7 +58,7 @@ def compute_sxr_norm(sxr_dir):
         raise ValueError(f"No SXR files found in {sxr_dir}")
 
     sxr_values = []
-    for f in sxr_files:
+    for f in tqdm(sxr_files, desc="Computing SXR normalization", unit="file"):
         try:
             sxr = np.load(f)
             sxr = np.atleast_1d(sxr).flatten()[0]
