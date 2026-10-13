@@ -13,9 +13,15 @@ conversion instead of a per-row Python loop.
 
 Usage:
     python download/hugging_face_data_download.py --config download/hf_download_config.yaml
+
+Repair already-converted flattened AIA ``.npy`` files in place (header-only;
+the multi-terabyte pixel payload is not rewritten):
+    python download/hugging_face_data_download.py \
+        --config download/hf_download_config.yaml --repair-existing-numpy
 """
 
 import argparse
+from io import BytesIO
 import logging
 import os
 import time
@@ -23,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from numpy.lib import format as npy_format
 import pyarrow.parquet as pq
 import yaml
 from datasets import load_dataset
@@ -32,6 +39,21 @@ from huggingface_hub import login
 # HuggingFace uses "validation"; local pipeline directories use "val"
 HF_TO_LOCAL = {"validation": "val"}
 LOCAL_TO_HF = {v: k for k, v in HF_TO_LOCAL.items()}
+AIA_SHAPE = (7, 512, 512)
+AIA_SIZE = int(np.prod(AIA_SHAPE))
+
+
+def _restore_aia_shape(array: np.ndarray) -> np.ndarray:
+    """Restore flattened parquet AIA rows to channel-first image stacks."""
+    array = np.asarray(array, dtype=np.float32)
+    if array.shape == AIA_SHAPE:
+        return array
+    if array.size == AIA_SIZE:
+        return array.reshape(AIA_SHAPE)
+    raise ValueError(
+        f"Expected AIA shape {AIA_SHAPE} or {AIA_SIZE} flattened values, "
+        f"got shape {array.shape} ({array.size} values)"
+    )
 
 
 def load_config(path: str) -> dict:
@@ -48,8 +70,8 @@ def _write_arrays(filename: str, aia_arr: np.ndarray, sxr_arr: np.ndarray,
     if os.path.exists(aia_path) and os.path.exists(sxr_path):
         return False
 
-    np.save(aia_path, aia_arr)
-    np.save(sxr_path, sxr_arr)
+    np.save(aia_path, _restore_aia_shape(aia_arr))
+    np.save(sxr_path, np.asarray(sxr_arr, dtype=np.float32).reshape(-1))
     return True
 
 

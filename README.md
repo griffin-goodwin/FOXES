@@ -37,10 +37,35 @@ https://huggingface.co/spaces/griffingoodwin04/FOXES-model
 
 https://huggingface.co/datasets/griffingoodwin04/FOXES-Data
 
-### Abstract
+### Original FOXES abstract
 The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity, used for the classification of flare strength. As a result, the flare class, along with the SXR light curve, are routinely used as the primary input to many forecasting methods, from coronal mass ejection speed to energetic particle output. However, the SXR irradiance lacks spatial information leading to dubious classification during periods of high activity, and is  applicable only for observations from Earth orbit, hindering forecasting for other places in the heliosphere. This work introduces the Framework for Operational X-ray Emission Synthesis (FOXES), a Vision Transformer-based approach for translating Extreme Ultraviolet (EUV) spatially-resolved observations into SXR irradiance predictions. The model produces two outputs: (1) a global SXR flux prediction and (2) per-patch flux contributions, which offer a spatially resolved interpretation of where the model attributes SXR emission. This paves the way for EUV-based flare detection to be extended beyond Earth's line of sight, allowing for a more comprehensive and reliable flare catalog to support robust, scalable, and real-time forecasting, extending our monitoring into a true multiviewpoint system.
 
 **Team**: Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger, Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, Lorien Pratt
+
+---
+
+## Current local + global FOXES model
+
+The maintained model in this repository extends the released FOXES patch
+predictor. Local attention builds a feature for each AIA image patch. A global
+query then summarizes the full AIA image and uses that context, together with
+each patch's local features, to adjust its flux contribution. The corrected
+patch fluxes sum to the full-disk SXR prediction.
+
+This local + global design produces **visually better spatial flux maps** in
+the examples examined so far. It also predicts a global Gaussian uncertainty
+and a map of each patch's contribution to that variance. The uncertainty map
+is an attribution of global uncertainty; there are no patch-level SXR labels
+to establish calibrated local error bars.
+
+The tradeoff is **somewhat worse global SXR prediction performance** than the
+original released FOXES model in the evaluations run so far. The visual map
+improvement is qualitative, and this repository does not yet include a
+matched, held-out benchmark quantifying the accuracy difference.
+
+The three bundled checkpoints below are the **original released models**.
+The local + global Gaussian model is `CoupledGaussianViTLocal`; provide its
+trained checkpoint separately through `forecasting/inference_config.yaml`.
 
 ---
 
@@ -69,16 +94,18 @@ FOXES
 │   └── sxr_normalization.py     # Compute log-space mean/std over SXR .npy files for training
 ├── forecasting
 │   ├── dataset.py            # AIAGOESDataset / AIAGOESDataModule: loads paired AIA + SXR .npy files
-│   ├── model.py               # ViTLocal: Vision Transformer with patch flux heads
+│   ├── model.py               # Released deterministic and current local + global Gaussian models
 │   ├── inference.py           # Run a checkpoint over a folder of data; writes predictions.csv
 │   ├── inference_config.yaml  # Config for inference.py
 │   ├── evaluation.py          # Compute metrics and generate evaluation plots
 │   ├── evaluation_config.yaml # Config for evaluation.py
-│   └── trained_weights_and_normalization/  # 3 released checkpoints + normalized_sxr.npy (see below)
+│   └── trained_weights_and_normalization/  # Original released checkpoints and SXR normalization
 ├── training
-│   ├── train.py                # Train ViTLocal with PyTorch Lightning + Weights & Biases logging
-│   ├── train_config.yaml       # Config for train.py
-│   └── callbacks.py            # W&B callbacks: SXR pred-vs-true plots, attention map visualization
+│   ├── train.py                # Train released deterministic or current local + global model
+│   ├── train_config.yaml       # Points to the maintained coupled Gaussian config
+│   ├── train_coupled_gaussian.yaml
+│   ├── train_deterministic.yaml
+│   └── callbacks.py            # W&B prediction, attention, and spatial-map callbacks
 └── requirements.txt            # Python dependencies
 ```
 
@@ -158,6 +185,15 @@ more things, both off by default and only relevant if you're training:
 - `sxr_normalization.compute: true` — computes SXR normalization stats from
   the train split (requires `steps.split` to have run first).
 
+To regenerate only the SXR normalization artifact for an existing split (the
+training convention is `log10(SXR + 1e-8)`), run:
+
+```bash
+python data/sxr_normalization.py \
+  --sxr-dir /data/SXR_processed/train \
+  --output /data/SXR_processed/normalized_sxr.npy
+```
+
 ### 1) Data format
 
 Point `inference.py` at a folder of paired `.npy` files, one file per timestamp:
@@ -182,11 +218,10 @@ If you don't have ground-truth SXR data (e.g. scoring new/live data), set
 
 ### 2) Run inference
 
-Three released checkpoints are included under
+The three original released checkpoints are included under
 `forecasting/trained_weights_and_normalization/`, differing only in the
-self-attention mask they were trained with (see `mask_mode` in
-`training/train_config.yaml`) — each checkpoint carries its own mask, so
-nothing else needs to change to switch between them, just `checkpoint_path`:
+self-attention mask they were trained with. Each checkpoint carries its own
+mask, so switch between those original models with `checkpoint_path`:
 
 | Checkpoint | `mask_mode` | Description |
 | --- | --- | --- |
@@ -204,6 +239,13 @@ data:
   checkpoint_path: "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
 output_path: "/path/to/predictions.csv"
+
+device: auto      # auto selects CUDA, Apple MPS, or CPU; set mps to require MPS
+
+# Optional: run a reproducible random subset of eligible images.
+sampling:
+  count: 1000    # or use fraction: 0.1; leave both null for all images
+  seed: 42
 ```
 
 Then run:
@@ -218,6 +260,24 @@ automatically alongside it whenever `flux_path` / `weight_path` are set in the
 config — set `model_params.no_flux: true` or `model_params.no_weights: true` to
 skip either.
 
+For the current local + global model, set `data.checkpoint_path` to its trained
+checkpoint and use `model_type: coupled_uncertainty` (or `auto` to detect the
+maintained model type from the checkpoint). The implementation is
+`CoupledGaussianViTLocal` in `forecasting/model.py`; the checkpoint supplies
+its layer count, attention heads, and local window size. The prediction CSV
+additionally contains normalized mean/variance,
+normalized sigma, sigma in dex, and asymmetric 68%/95% intervals in physical
+W/m². Set `patch_uncertainty_path` to save a raw-flux spatial uncertainty map
+for each image, or set `model_params.no_patch_uncertainty: true` to skip the
+maps while retaining the global uncertainty columns. These maps contain the
+square root of each patch's contribution to global raw-flux variance in W/m².
+The shared uncertainty head sees only each detached mean-head patch logit, so
+uncertainty gradients cannot alter the mean prediction. It predicts a
+dimensionless relative standard deviation for that patch,
+which scales the patch's physical flux before independent variance
+contributions are summed. Because training has only a global SXR target, the
+maps are variance attributions, not independently calibrated local error bars.
+
 ### 3) Evaluate
 
 Edit `forecasting/evaluation_config.yaml` to point at the predictions
@@ -227,7 +287,21 @@ CSV and data directories, then run:
 python forecasting/evaluation.py --config forecasting/evaluation_config.yaml
 ```
 
-This computes metrics (MSE, MAE, R²) and generates plots under `evaluation.output_dir`.
+This computes metrics (MSE, MAE, R²) and generates plots under
+`evaluation.output_dir`. When the CSV contains Gaussian uncertainty columns,
+evaluation also writes `metrics/uncertainty_metrics.csv` with NLL, 68%/95%
+coverage, sharpness, and standardized-residual diagnostics for the full dataset
+and each Quiet/C/M/X class. The corresponding reliability curve and residual
+histogram are saved as `plots/uncertainty_calibration.png`.
+
+Set `plotting.inference_patch_dir` to inference's patch output folder to save
+one figure per matching CSV timestamp under `plots/patch_maps/`. Each figure
+shows available flux and square-root variance contribution maps. Set
+`plotting.aia_dir` and `plotting.aia_wavelength` to place the matching AIA
+channel beside them. All panels use the lower-left image origin;
+`plotting.max_patch_maps` can limit large runs. Flux and uncertainty panels
+share one logarithmic scale from the smallest positive to largest value
+across all matching patch maps. Zero values are masked on the log scale.
 
 ### 4) Train your own model (optional)
 
@@ -235,34 +309,24 @@ Unlike inference, training expects `aia_dir`/`sxr_dir` each to have `train/`,
 `val/`, and `test/` subfolders of paired `.npy` files — exactly what
 `data/build_dataset.py` and the Hugging Face download path produce.
 
-Edit `training/train_config.yaml`:
+The maintained local + global Gaussian model uses one global query and a
+weighted final-prediction Huber loss. Edit
+`training/train_coupled_gaussian.yaml` for its architecture, mean loss,
+uncertainty settings, data paths, and W&B settings. `training/train_config.yaml`
+points to that config. For the released deterministic model, use
+`training/train_deterministic.yaml`.
 
-```yaml
-base_data_dir: "/path/to/processed_data"        # holds AIA_processed/ and SXR_processed/
-base_checkpoint_dir: "/path/to/checkpoints"
-
-gpu_ids: -1        # -1 = CPU, 0 = GPU 0, [0,1] = specific GPUs, "all" = every GPU
-batch_size: 6
-epochs: 150
-
-vit_architecture:
-  mask_mode: inverted   # inverted (released model) | local | none (full/global attention)
-  local_window: 9
-
-wandb:
-  entity: ""   # your W&B username or team name
-```
-
-Then run:
+Optional `vit_architecture.global_attention_heads`,
+`global_head_hidden_dim`, and `global_attention_dropout` change only the
+coupled model's global head. Omit them to use the architecture defaults saved
+in the maintained checkpoint.
 
 ```bash
 python training/train.py --config training/train_config.yaml
 ```
 
-Training logs to Weights & Biases (predicted-vs-true SXR plots and attention
-map visualizations each validation epoch — see `training/callbacks.py`) and
-saves the top 10 checkpoints by validation loss to `data.checkpoints_dir`,
-ready to point `forecasting/inference_config.yaml` at.
+Training logs to Weights & Biases and saves checkpoints to
+`data.checkpoints_dir`.
 
 ---
 

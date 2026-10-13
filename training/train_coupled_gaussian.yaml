@@ -1,0 +1,92 @@
+# Fresh coupled single-query run: 4 local blocks, 4 heads, 9x9 attention windows.
+# The Local2 run label is historical; its saved checkpoint has 4 local blocks.
+# The global head still reads all raw AIA patches with one shared query.
+wavelengths:
+- 94
+- 131
+- 171
+- 193
+- 211
+- 304
+- 335
+gpu_ids: all
+seed: 42
+batch_size: 52
+accumulate_grad_batches: 1
+epochs: 50
+model_type: coupled_uncertainty
+mean_loss:
+  class_weighting: inverse_frequency
+  huber_delta: 0.30
+uncertainty:
+  enabled: true
+  initial_relative_std: 1
+  max_log10_relative_std: 6
+  min_log10_relative_std: -6
+  start_epoch: 0
+  uncertainty_hidden_dim: 16
+vit_architecture:
+  dropout: 0.1
+  embed_dim: 512
+  global_patch_adjustment: true
+  # Optional global-head overrides; omitted values reproduce OG/Local2:
+  # global_attention_heads: 4       # defaults to num_heads
+  # global_head_hidden_dim: 256     # defaults to embed_dim / 2
+  # global_attention_dropout: 0.1   # defaults to dropout
+  hidden_dim: 2048
+  learning_rate: 0.0001
+  local_window: 9
+  mask_mode: local
+  max_abs_log10_global_adjustment: 1.5
+  num_channels: 7
+  num_classes: 1
+  num_heads: 4
+  num_layers: 4
+  num_patches: 4096
+  patch_size: 8
+optimizer:
+  gradient_clip_val: null
+  scheduler:
+    T_max: 50
+    eta_min: 1.0e-06
+  weight_decay: 1.0e-05
+checkpoint:
+  include_monitor_in_filename: true
+  include_step_in_filename: false
+  mode: min
+  monitor: val/total_loss
+  save_top_k: -1
+  save_last: true
+logging:
+  log_every_n_steps: 10
+callbacks:
+  attention_enabled: false
+  per_class_metrics_enabled: true
+  spatial_uncertainty_enabled: true
+  spatial_uncertainty_log_every_n_epochs: 1
+  spatial_uncertainty_num_samples: 5
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100
+data:
+  aia_dir: /data/FOXES_OG/AIA_processed
+  aia_norm_path: null
+  checkpoints_dir: /data/checkpoints/FOXES-LOCAL4-COUPLED-SINGLE-QUERY/
+  num_workers: 8
+  sxr_dir: /data/FOXES_OG/SXR_processed
+  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+wandb:
+  entity: ggoodwin5-georgia-state-university
+  job_type: training
+  notes: From scratch coupled single-query architecture with four local 9x9 transformer blocks,
+    four attention heads, the one-query full-image global correction, coupled final-prediction
+    inverse-frequency Huber (delta 0.30), and detached uncertainty NLL.
+    Local2 is the historical run label; the architecture uses four blocks.
+  project: FOXES-SDOML
+  run_name: Local2-Coupled-SingleQuery-Uncertainty
+  tags:
+  - single-query-depth-ablation
+  - local-9
+  - four-blocks
+  - single-query-global
+  - coupled-loss
+  - from-scratch

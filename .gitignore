@@ -77,6 +77,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+notebooks/.cache/
+notebooks/outputs/
 
 # IPython
 profile_default/
@@ -175,3 +177,8 @@ forecasting/models/test_vit_mask.py
 forecasting/griffin_config.yaml
 /data/foxes_data
 *.nc
+*.codex
+*.agents
+forecasting/foxes_data/
+analysis/
+training/configs

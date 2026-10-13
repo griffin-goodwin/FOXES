@@ -1,21 +1,7 @@
-"""
-Training script for the AIA-GOES multimodal solar flare forecasting model using PyTorch Lightning.
-
-This script:
-1. Loads configuration from a YAML file with variable substitution (e.g., ${base_dir} references).
-2. Initializes the AIA-GOES DataModule.
-3. Configures logging with Weights & Biases.
-4. Builds and trains a Vision Transformer (ViTLocal) model.
-5. Optionally computes dynamic base class weights for flare categories (Quiet, C, M, X).
-6. Saves model checkpoints (.ckpt).
-
-Usage:
-    python training/train.py --config training/train_config.yaml
-"""
+"""Train the released deterministic or coupled Gaussian FOXES model."""
 
 import argparse
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -23,106 +9,181 @@ import numpy as np
 import torch
 import wandb
 import yaml
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
-PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from training.callbacks import AttentionMapCallback, ImagePredictionLogger_SXR
 from forecasting.dataset import AIAGOESDataModule
-from forecasting.model import ViTLocal, SXRRegressionDynamicLoss, unnormalize_sxr
+from forecasting.model import (
+    CoupledGaussianViTLocal, ViTLocal, SXRRegressionDynamicLoss,
+)
+from training.callbacks import (
+    AttentionMapCallback, ImagePredictionLogger_SXR,
+    PerClassValidationMetrics, SpatialUncertaintyMapCallback,
+)
+from training.strategies import TrainingStreamDDPStrategy
+
+COUPLED_MODEL_TYPES = frozenset({
+    'coupled_uncertainty', 'og_uncertainty', 'uncertainty_coupled_single_query',
+})
+FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
 
 
-def resolve_config_variables(config_dict):
-    """
-    Recursively resolve ${variable} references within the config.
-
-    This function processes configuration dictionaries to substitute variable
-    references of the form ${variable_name} with their actual values defined
-    elsewhere in the configuration.
-    """
-    variables = {}
-    for key, value in config_dict.items():
-        if isinstance(value, str) and not value.startswith('${'):
-            variables[key] = value
-
-    def substitute_value(value, variables):
-        if isinstance(value, str):
-            pattern = r'\$\{([^}]+)\}'
-            for match in re.finditer(pattern, value):
-                var_name = match.group(1)
-                if var_name in variables:
-                    value = value.replace(f'${{{var_name}}}', variables[var_name])
-        return value
-
-    def recursive_substitute(obj, variables):
-        if isinstance(obj, dict):
-            return {k: recursive_substitute(v, variables) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [recursive_substitute(item, variables) for item in obj]
+def _deep_merge_config(base, overrides):
+    """Recursively merge YAML overrides without mutating either input."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(merged[key], value)
         else:
-            return substitute_value(obj, variables)
+            merged[key] = value
+    return merged
 
-    return recursive_substitute(config_dict, variables)
+
+def load_training_config(config_path):
+    """Load a training YAML, optionally inheriting from ``base_config``."""
+    config_path = Path(config_path).expanduser().resolve()
+
+    def load_one(path, ancestors):
+        if path in ancestors:
+            chain = ' -> '.join(str(item) for item in (*ancestors, path))
+            raise ValueError(f"Circular base_config chain: {chain}")
+        with path.open('r') as stream:
+            current = yaml.safe_load(stream) or {}
+        if not isinstance(current, dict):
+            raise ValueError(f"Training config must be a mapping: {path}")
+        base_reference = current.pop('base_config', None)
+        if base_reference is None:
+            return current
+        base_path = Path(base_reference).expanduser()
+        if not base_path.is_absolute():
+            base_path = path.parent / base_path
+        base = load_one(base_path.resolve(), (*ancestors, path))
+        return _deep_merge_config(base, current)
+
+    return load_one(config_path, ())
 
 
-def get_base_weights(data_module, sxr_norm):
+def get_four_class_macro_weights(data_module, exponent=1.0,
+                                 require_all_classes=True):
+    """Return quiet/C/M/X weights computed from scalar training targets.
+
+    ``exponent=1`` produces inverse-frequency macro weights. ``exponent=0.5``
+    produces their square-root relative weighting. Any exponent in (0, 1]
+    is supported.
     """
-    Compute inverse-frequency weights for flare classes based on training data.
-
-    The weights help balance loss contributions from imbalanced flare categories
-    by making rare classes (M/X flares) count for more in the loss.
-
-    Parameters
-    ----------
-    data_module : AIAGOESDataModule
-        Initialized DataModule providing the train_dataloader.
-    sxr_norm : np.ndarray
-        Normalization parameters for SXR.
-
-    Returns
-    -------
-    dict
-        Class weights for quiet, C, M, and X classes.
-    """
-    print("Calculating base weights from training data...")
-    # Fixed GOES flare-class boundaries — same source of truth the loss uses.
+    if (isinstance(exponent, bool) or not isinstance(exponent, (int, float))
+            or not np.isfinite(exponent) or not 0 < exponent <= 1):
+        raise ValueError("four-class weighting exponent must be in (0, 1]")
+    dataset = data_module.train_ds
+    counts = dict.fromkeys(FOUR_CLASS_KEYS, 0)
     thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
-    c_threshold, m_threshold, x_threshold = thresholds['c'], thresholds['m'], thresholds['x']
+    print("Calculating quiet/C/M/X macro weights from training targets...")
 
-    quiet_count = c_count = m_count = x_count = total = 0
-    train_loader = data_module.train_dataloader()
-    print(f"Processing {len(train_loader)} batches...")
+    for index, timestamp in enumerate(dataset.samples, start=1):
+        path = dataset.sxr_dir / f"{timestamp}.npy"
+        value = np.load(path, allow_pickle=False)
+        if value.size != 1:
+            raise ValueError(
+                f"Expected one SXR value in {path}, found {value.size}"
+            )
+        flux = float(value.reshape(-1)[0])
+        if not np.isfinite(flux):
+            raise ValueError(f"Non-finite SXR flux in {path}: {flux!r}")
+        if flux < thresholds['c']:
+            class_name = 'quiet'
+        elif flux < thresholds['m']:
+            class_name = 'c_class'
+        elif flux < thresholds['x']:
+            class_name = 'm_class'
+        else:
+            class_name = 'x_class'
+        counts[class_name] += 1
+        if index % 10_000 == 0:
+            print(
+                f"Counted {index:,}/{len(dataset.samples):,} "
+                "training targets..."
+            )
 
-    for batch_idx, (aia_batch, sxr_batch) in enumerate(train_loader):
-        if batch_idx % 50 == 0:
-            print(f"Processed {batch_idx}/{len(train_loader)} batches...")
-
-        sxr_un = unnormalize_sxr(sxr_batch, sxr_norm)
-        sxr_un_flat = sxr_un.reshape(-1)
-
-        total += len(sxr_un_flat)
-        quiet_count += (sxr_un_flat < c_threshold).sum()
-        c_count += ((sxr_un_flat >= c_threshold) & (sxr_un_flat < m_threshold)).sum()
-        m_count += ((sxr_un_flat >= m_threshold) & (sxr_un_flat < x_threshold)).sum()
-        x_count += (sxr_un_flat >= x_threshold).sum()
-
-    quiet_count, c_count, m_count, x_count = (max(c, 1) for c in (quiet_count, c_count, m_count, x_count))
-
-    weights = {
-        'quiet': total / quiet_count,
-        'c_class': total / c_count,
-        'm_class': total / m_count,
-        'x_class': total / x_count,
+    empty = [name for name, count in counts.items() if count == 0]
+    if empty and require_all_classes:
+        raise ValueError(
+            "The four-class macro mean objective requires at least one "
+            f"training example in every quiet/C/M/X bin; empty bins: {empty}"
+        )
+    total = sum(counts.values())
+    if total == 0:
+        raise ValueError("Cannot compute class weights from an empty training set")
+    raw_weights = {
+        name: (total / max(counts[name], 1)) ** exponent
+        for name in FOUR_CLASS_KEYS
     }
-    print(f"Total samples: {total}")
-    print(f"Quiet: {quiet_count} (weight {weights['quiet']:.4f}), "
-          f"C: {c_count} (weight {weights['c_class']:.4f}), "
-          f"M: {m_count} (weight {weights['m_class']:.4f}), "
-          f"X: {x_count} (weight {weights['x_class']:.4f})")
-    return weights
+    expected_weight = sum(
+        counts[name] * raw_weights[name] for name in FOUR_CLASS_KEYS
+    ) / total
+    weights = {
+        name: raw_weights[name] / expected_weight
+        for name in FOUR_CLASS_KEYS
+    }
+    print(f"Four-class training counts: {counts}")
+    print(
+        "Four-class macro mean weights: "
+        + ", ".join(
+            f"{name}={weights[name]:.4f}" for name in FOUR_CLASS_KEYS
+        )
+    )
+    return counts, weights
+
+
+def configure_class_weights(config, data_module, model_type):
+    """Compute mean-loss class weights once for either maintained model."""
+    coupled = model_type in COUPLED_MODEL_TYPES
+    mean_loss = config.get('mean_loss', {})
+    uncertainty = dict(config.get('uncertainty', {}))
+    loss = config.get('loss', {})
+    weighting = mean_loss.get('class_weighting')
+    if weighting is None:
+        if coupled:
+            weighting = uncertainty.get('class_weighting', 'none')
+        else:
+            weighting = (
+                'inverse_frequency' if config.get('calculate_base_weights')
+                else 'none'
+            )
+    if weighting not in {
+        'none', 'inverse_frequency', 'sqrt_inverse_frequency',
+        'power_inverse_frequency',
+    }:
+        raise ValueError(f'Unsupported mean_loss.class_weighting: {weighting!r}')
+    if coupled:
+        uncertainty['class_weighting'] = weighting
+        if 'huber_delta' in mean_loss:
+            uncertainty['huber_delta'] = mean_loss['huber_delta']
+
+    base_weights = loss.get('base_weights') if not coupled else None
+    if weighting != 'none':
+        exponent = {
+            'inverse_frequency': 1.0,
+            'sqrt_inverse_frequency': 0.5,
+        }.get(
+            weighting,
+            mean_loss.get('class_weight_exponent',
+                          uncertainty.get('class_weight_exponent')),
+        )
+        counts, weights = get_four_class_macro_weights(
+            data_module, exponent=exponent,
+            require_all_classes=coupled,
+        )
+        config['computed_four_class_train_counts'] = counts
+        config['computed_four_class_train_weights'] = weights
+        if coupled:
+            uncertainty['class_weights'] = weights
+        else:
+            base_weights = weights
+    return base_weights, uncertainty
 
 
 def resolve_devices(gpu_config):
@@ -136,115 +197,199 @@ def resolve_devices(gpu_config):
         return "cpu", 1, "auto"
 
     if gpu_config == "all":
-        print(f"Using all available GPUs ({torch.cuda.device_count()} GPUs)")
-        return "gpu", -1, "auto"
+        device_count = torch.cuda.device_count()
+        print(f"Using all available GPUs ({device_count} GPUs)")
+        strategy = TrainingStreamDDPStrategy() if device_count > 1 else "auto"
+        return "gpu", -1, strategy
     if isinstance(gpu_config, list):
         print(f"Using GPUs: {gpu_config}")
-        return "gpu", gpu_config, "auto"
+        strategy = TrainingStreamDDPStrategy() if len(gpu_config) > 1 else "auto"
+        return "gpu", gpu_config, strategy
     print(f"Using GPU {gpu_config}")
     return "gpu", [gpu_config], "auto"
 
 
+def build_checkpoint_callback(config_data, checkpoint_config):
+    """Build the checkpoint callback for training."""
+    default_monitor = 'val/total_loss' if config_data.get('model_type') in COUPLED_MODEL_TYPES else 'val_total_loss'
+    monitor = checkpoint_config.get('monitor', default_monitor)
+    filename = f"{config_data['wandb']['run_name']}-epoch={{epoch:02d}}"
+    if checkpoint_config.get('include_step_in_filename', True):
+        filename += "-step={step:06d}"
+    if checkpoint_config.get('include_monitor_in_filename', False):
+        metric_label = monitor.replace('/', '_')
+        filename += f"-{metric_label}={{{monitor}:.4f}}"
+    return ModelCheckpoint(
+        dirpath=config_data['data']['checkpoints_dir'],
+        monitor=monitor,
+        mode=checkpoint_config.get('mode', 'min'),
+        save_top_k=checkpoint_config.get('save_top_k', 10),
+        save_last=checkpoint_config.get('save_last', False),
+        filename=filename,
+        auto_insert_metric_name=False,
+    )
+
+
+def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
+    """Build the callback set shared by both trainable model types.
+
+    Per-class metrics, prediction plots, and attention plots use adaptive
+    callback interfaces and are identical for the deterministic and
+    uncertainty models. Only the spatial uncertainty map is model-specific.
+    """
+    callbacks_cfg = config_data.get('callbacks', {})
+    callbacks = []
+    if callbacks_cfg.get('per_class_metrics_enabled', True):
+        callbacks.append(PerClassValidationMetrics())
+    if callbacks_cfg.get('sxr_plot_enabled', True):
+        callbacks.append(ImagePredictionLogger_SXR(
+            data_module.val_ds,
+            callbacks_cfg.get('sxr_plot_num_samples', 4),
+            sxr_norm,
+        ))
+
+    patch_size = config_data.get('vit_architecture', {}).get(
+        'patch_size', 8
+    )
+    if (
+        model_type in COUPLED_MODEL_TYPES
+        and config_data.get('uncertainty', {}).get('enabled', True)
+        and callbacks_cfg.get('spatial_uncertainty_enabled', False)
+    ):
+        callbacks.append(SpatialUncertaintyMapCallback(
+            patch_size=patch_size,
+            num_samples=callbacks_cfg.get(
+                'spatial_uncertainty_num_samples', 5
+            ),
+            log_every_n_epochs=callbacks_cfg.get(
+                'spatial_uncertainty_log_every_n_epochs', 1
+            ),
+        ))
+    if callbacks_cfg.get('attention_enabled', True):
+        callbacks.append(AttentionMapCallback(
+            patch_size=patch_size,
+            use_local_attention=True,
+            num_samples=callbacks_cfg.get('attention_num_samples', 4),
+            log_every_n_epochs=callbacks_cfg.get(
+                'attention_log_every_n_epochs', 1
+            ),
+        ))
+    return callbacks
+
 def main():
-    parser = argparse.ArgumentParser(description='Train the FOXES ViTLocal model.')
-    parser.add_argument('--config', type=str, default='training/train_config.yaml', required=True,
-                        help='Path to train_config.yaml')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True, help='Training YAML')
     args = parser.parse_args()
 
-    with open(args.config, 'r') as stream:
-        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
-    config_data: dict = resolve_config_variables(config_data)
+    config = load_training_config(args.config)
+    model_type = config.get('model_type', 'deterministic')
+    if model_type not in COUPLED_MODEL_TYPES | {'deterministic'}:
+        raise ValueError(
+            f'Unsupported model_type {model_type!r}; use deterministic or '
+            'coupled_uncertainty. Older experiments use '
+            'python -m training.experimental.train.'
+        )
+    checkpoint_cfg = config.get('checkpoint', {})
+    supported_checkpoint_keys = {
+        'monitor', 'mode', 'save_top_k', 'save_last',
+        'include_step_in_filename', 'include_monitor_in_filename',
+    }
+    unknown_checkpoint_keys = set(checkpoint_cfg) - supported_checkpoint_keys
+    if unknown_checkpoint_keys:
+        raise ValueError(
+            f'Unsupported checkpoint settings: {sorted(unknown_checkpoint_keys)}'
+        )
+    seed_everything(config.get('seed', 42), workers=True)
 
-    print("Resolved paths:")
-    print(f"AIA dir: {config_data['data']['aia_dir']}")
-    print(f"SXR dir: {config_data['data']['sxr_dir']}")
-    print(f"Checkpoints dir: {config_data['data']['checkpoints_dir']}")
-
-    sxr_norm = np.load(config_data['data']['sxr_norm_path'])
-    wavelengths = config_data['wavelengths']
-
-    optimizer_cfg = config_data.get('optimizer', {})
-    loss_cfg = config_data.get('loss', {})
-    checkpoint_cfg = config_data.get('checkpoint', {})
-    logging_cfg = config_data.get('logging', {})
-    callbacks_cfg = config_data.get('callbacks', {})
-    data_cfg = config_data.get('data', {})
+    data_cfg = config['data']
+    print(f"AIA dir: {data_cfg['aia_dir']}")
+    print(f"SXR dir: {data_cfg['sxr_dir']}")
+    print(f"Checkpoints dir: {data_cfg['checkpoints_dir']}")
+    sxr_norm = np.load(data_cfg['sxr_norm_path'])
+    optimizer_cfg = config.get('optimizer', {})
+    loss_cfg = config.get('loss', {})
 
     data_module = AIAGOESDataModule(
-        aia_train_dir=config_data['data']['aia_dir'] + "/train",
-        aia_val_dir=config_data['data']['aia_dir'] + "/val",
-        aia_test_dir=config_data['data']['aia_dir'] + "/test",
-        sxr_train_dir=config_data['data']['sxr_dir'] + "/train",
-        sxr_val_dir=config_data['data']['sxr_dir'] + "/val",
-        sxr_test_dir=config_data['data']['sxr_dir'] + "/test",
-        batch_size=config_data['batch_size'],
+        aia_train_dir=data_cfg['aia_dir'] + '/train',
+        aia_val_dir=data_cfg['aia_dir'] + '/val',
+        aia_test_dir=data_cfg['aia_dir'] + '/test',
+        sxr_train_dir=data_cfg['sxr_dir'] + '/train',
+        sxr_val_dir=data_cfg['sxr_dir'] + '/val',
+        sxr_test_dir=data_cfg['sxr_dir'] + '/test',
+        batch_size=config['batch_size'],
         num_workers=data_cfg.get('num_workers', min(8, os.cpu_count() or 1)),
         sxr_norm=sxr_norm,
-        wavelengths=wavelengths,
+        aia_norm_path=data_cfg.get('aia_norm_path'),
+        wavelengths=config['wavelengths'],
     )
     data_module.setup()
 
-    wandb_logger = WandbLogger(
-        entity=config_data['wandb']['entity'],
-        project=config_data['wandb']['project'],
-        job_type=config_data['wandb']['job_type'],
-        tags=config_data['wandb']['tags'],
-        name=config_data['wandb']['run_name'],
-        notes=config_data['wandb']['notes'],
-        config=config_data,
+    base_weights, uncertainty_cfg = configure_class_weights(
+        config, data_module, model_type,
     )
-
-    # Callbacks
-    sxr_plot_callback = ImagePredictionLogger_SXR(
-        data_module.val_ds, callbacks_cfg.get('sxr_plot_num_samples', 4), sxr_norm)
-    patch_size = config_data.get('vit_architecture', {}).get('patch_size', 16)
-    attention_callback = AttentionMapCallback(
-        patch_size=patch_size,
-        use_local_attention=True,
-        num_samples=callbacks_cfg.get('attention_num_samples', 4),
-        log_every_n_epochs=callbacks_cfg.get('attention_log_every_n_epochs', 1),
-    )
-
-    base_weights = (get_base_weights(data_module, sxr_norm)
-                    if config_data.get('calculate_base_weights') else loss_cfg.get('base_weights'))
-    model = ViTLocal(
-        model_kwargs=config_data['vit_architecture'],
+    common_kwargs = dict(
+        model_kwargs=config['vit_architecture'],
         sxr_norm=sxr_norm,
         base_weights=base_weights,
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
-        loss_kwargs={
-            'window_size': loss_cfg.get('window_size', 15000),
-            'huber_delta': loss_cfg.get('huber_delta', 0.3),
-            'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
-        },
-        diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
     )
+    if model_type in COUPLED_MODEL_TYPES:
+        model = CoupledGaussianViTLocal(
+            **common_kwargs,
+            uncertainty_kwargs=uncertainty_cfg,
+        )
+    else:
+        model = ViTLocal(
+            **common_kwargs,
+            loss_kwargs={
+                'window_size': loss_cfg.get('window_size', 15000),
+                'huber_delta': loss_cfg.get('huber_delta', 0.3),
+                'adaptive_multipliers': loss_cfg.get('adaptive_multipliers'),
+            },
+            diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
+        )
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=config_data['data']['checkpoints_dir'],
-        monitor=checkpoint_cfg.get('monitor', 'val_total_loss'),
-        mode=checkpoint_cfg.get('mode', 'min'),
-        save_top_k=checkpoint_cfg.get('save_top_k', 10),
-        filename=f"{config_data['wandb']['run_name']}-{{epoch:02d}}-{{val_total_loss:.4f}}",
+    logger = WandbLogger(
+        entity=config['wandb']['entity'],
+        project=config['wandb']['project'],
+        job_type=config['wandb']['job_type'],
+        tags=config['wandb']['tags'],
+        name=config['wandb']['run_name'],
+        notes=config['wandb']['notes'],
+        config=config,
     )
-
-    accelerator, devices, strategy = resolve_devices(config_data.get('gpu_ids', -1))
-
+    callbacks = build_model_callbacks(config, data_module, sxr_norm, model_type)
+    callbacks.append(build_checkpoint_callback(config, checkpoint_cfg))
+    early_stopping = config.get('early_stopping', {})
+    if early_stopping.get('enabled', False):
+        callbacks.append(EarlyStopping(
+            monitor=early_stopping.get('monitor', checkpoint_cfg.get(
+                'monitor', 'val/total_loss' if model_type in COUPLED_MODEL_TYPES
+                else 'val_total_loss')),
+            mode=early_stopping.get('mode', 'min'),
+            patience=early_stopping.get('patience', 8),
+            min_delta=early_stopping.get('min_delta', 0.0),
+            check_finite=early_stopping.get('check_finite', True),
+            verbose=early_stopping.get('verbose', True),
+        ))
+    accelerator, devices, strategy = resolve_devices(config.get('gpu_ids', -1))
     trainer = Trainer(
-        default_root_dir=config_data['data']['checkpoints_dir'],
+        default_root_dir=data_cfg['checkpoints_dir'],
         accelerator=accelerator,
         devices=devices,
         strategy=strategy,
-        max_epochs=config_data['epochs'],
-        callbacks=[sxr_plot_callback, attention_callback, checkpoint_callback],
-        logger=wandb_logger,
-        log_every_n_steps=logging_cfg.get('log_every_n_steps', 10),
-        gradient_clip_val=optimizer_cfg.get('gradient_clip_val',None),  # None -> disabled (PyTorch Lightning default)
+        max_epochs=config['epochs'],
+        max_steps=config.get('max_steps', -1),
+        accumulate_grad_batches=config.get('accumulate_grad_batches', 1),
+        callbacks=callbacks,
+        logger=logger,
+        log_every_n_steps=config.get('logging', {}).get('log_every_n_steps', 10),
+        gradient_clip_val=optimizer_cfg.get('gradient_clip_val'),
     )
     trainer.fit(model, data_module)
     wandb.finish()
-    print(f"Training complete. Checkpoints saved to {config_data['data']['checkpoints_dir']}")
+    print(f"Training complete. Checkpoints saved to {data_cfg['checkpoints_dir']}")
 
 
 if __name__ == '__main__':

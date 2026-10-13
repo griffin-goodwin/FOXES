@@ -20,9 +20,9 @@ gpu_ids: 0
 batch_size: 16
 epochs: 250
 
-# Compute inverse-frequency loss weights (quiet/C/M/X) from the training data
-# before starting. Takes one extra pass over the training set.
-calculate_base_weights: true
+# Compute quiet/C/M/X weights from training targets before starting.
+mean_loss:
+  class_weighting: inverse_frequency
 
 vit_architecture:
   embed_dim: 256
@@ -62,18 +62,6 @@ loss:
   # Note: quiet/C/M/X flux boundaries (1e-6/1e-5/1e-4 W/m^2) are the fixed GOES
   # flare-class definition, not configurable here — see
   # SXRRegressionDynamicLoss.CLASS_THRESHOLDS in forecasting/model.py.
-
-  # Static per-class weight (multiplied by the adaptive multiplier below).
-  # Only used when calculate_base_weights: false. Leave null to fall back to
-  # SXRRegressionDynamicLoss's defaults, which were fit to the ORIGINALLY
-  # RELEASED dataset — set calculate_base_weights: true instead if training on
-  # your own data, or fill these in with weights fit to it.
-  base_weights: null
-  # base_weights:
-  #   quiet: 6.64
-  #   c_class: 1.63
-  #   m_class: 4.72
-  #   x_class: 43.13
 
   # Advanced: per-class {max_multiplier, min_multiplier, sensitivity,
   # min_samples, recent_window} controlling how far recent performance can
