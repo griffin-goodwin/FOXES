@@ -12,6 +12,7 @@ from matplotlib.colors import LogNorm
 import matplotlib.ticker as mticker
 import matplotlib.font_manager as fm
 from matplotlib import rcParams
+from tqdm import tqdm
 
 
 def _as_bool(value):
@@ -91,7 +92,8 @@ class FOXESEvaluator:
                  inference_patch_dir=None,
                  max_patch_maps=None,
                  aia_dir=None,
-                 aia_wavelength=193):
+                 aia_wavelength=193,
+                 patch_map_class_source=None):
         """
         Initialize the FOXES evaluation system.
 
@@ -102,6 +104,8 @@ class FOXESEvaluator:
             inference_patch_dir (str, optional): Parent folder containing
                 flux/ and patch_uncertainty/ NPY maps from inference.
             max_patch_maps (int, optional): Maximum number of timestamp figures.
+            patch_map_class_source (str, optional): Use groundtruth or predictions
+                to save patch-map figures in flare-class subfolders.
             aia_dir (str, optional): Folder of matching seven-channel AIA NPYs.
             aia_wavelength (int): AIA channel to show beside the patch maps.
         """
@@ -120,6 +124,11 @@ class FOXESEvaluator:
         ):
             raise ValueError("max_patch_maps must be a positive integer or null")
         self.max_patch_maps = max_patch_maps
+        if patch_map_class_source not in (None, 'groundtruth', 'predictions'):
+            raise ValueError(
+                "patch_map_class_source must be groundtruth, predictions, or null"
+            )
+        self.patch_map_class_source = patch_map_class_source
         self.aia_dir = Path(aia_dir).expanduser() if aia_dir else None
         self.aia_wavelength = int(aia_wavelength)
         if self.aia_wavelength not in self.AIA_WAVELENGTHS:
@@ -582,19 +591,58 @@ class FOXESEvaluator:
             print("No patch maps match timestamps in the prediction CSV")
             return 0
 
-        # Read the small NPY maps once. A single range across every matching
-        # timestamp and both map types keeps equal values the same color.
-        maps = {}
+        selected = available
+        if self.max_patch_maps is not None and len(available) > self.max_patch_maps:
+            indices = np.linspace(
+                0, len(available) - 1, self.max_patch_maps, dtype=int
+            )
+            selected = [available[index] for index in indices]
+
+        output_dir = Path(self.plots_dir) / 'patch_maps'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if self.patch_map_class_source is not None:
+            for class_name in self.FLARE_CLASSES:
+                (output_dir / class_name).mkdir(exist_ok=True)
+
+        pending = []
+        skipped = 0
+        for row, flux_path, uncertainty_path in selected:
+            stamp = str(row.timestamp)
+            filename = re.sub(r'[^A-Za-z0-9._-]', '_', stamp) + '.png'
+            destination = output_dir
+            if self.patch_map_class_source is not None:
+                flux = getattr(row, self.patch_map_class_source)
+                for class_name, (lower, upper) in self.FLARE_CLASSES.items():
+                    if lower <= flux < upper:
+                        destination = output_dir / class_name
+                        break
+                else:
+                    raise ValueError(
+                        f"No flare class for {self.patch_map_class_source}={flux} "
+                        f"at {stamp}"
+                    )
+            figure_path = destination / filename
+            if figure_path.is_file():
+                skipped += 1
+            else:
+                pending.append((row, flux_path, uncertainty_path, figure_path))
+        if not pending:
+            print(f"All {skipped} selected patch-map figures already exist in {output_dir}")
+            return 0
+
+        # Use every matching timestamp for one shared color scale, including
+        # timestamps whose figures already exist. Keep only one map in memory.
         minimum = np.inf
         maximum = 0.0
-        for _, flux_path, uncertainty_path in available:
+        for _, flux_path, uncertainty_path in tqdm(
+            available, desc='Scanning patch maps', unit='timestamp'
+        ):
             for path in (flux_path, uncertainty_path):
-                if not path.is_file() or path in maps:
+                if not path.is_file():
                     continue
                 patch_map = np.load(path, allow_pickle=False)
                 if patch_map.ndim != 2 or not np.isfinite(patch_map).all():
                     raise ValueError(f"Invalid 2D patch map: {path}")
-                maps[path] = patch_map
                 positive = patch_map[patch_map > 0]
                 if positive.size:
                     minimum = min(minimum, float(np.min(positive)))
@@ -609,14 +657,6 @@ class FOXESEvaluator:
             f"Patch-map color scale: {scale_min:.1e} to {scale_max:.1e} "
             "W/m²"
         )
-        if self.max_patch_maps is not None and len(available) > self.max_patch_maps:
-            indices = np.linspace(
-                0, len(available) - 1, self.max_patch_maps, dtype=int
-            )
-            available = [available[index] for index in indices]
-
-        output_dir = Path(self.plots_dir) / 'patch_maps'
-        output_dir.mkdir(parents=True, exist_ok=True)
         setup_barlow_font()
         figure_color = (
             '#FFFFFF' if self.plot_background in ('white', 'light')
@@ -624,7 +664,10 @@ class FOXESEvaluator:
         )
         text_color = '#111111' if figure_color == '#FFFFFF' else '#FFFFFF'
 
-        for row, flux_path, uncertainty_path in available:
+        saved = 0
+        for row, flux_path, uncertainty_path, figure_path in tqdm(
+            pending, desc='Plotting patch maps', unit='figure'
+        ):
             stamp = str(row.timestamp)
             panels = []
             image_shape = None
@@ -655,9 +698,10 @@ class FOXESEvaluator:
                 (uncertainty_path, 'Patch uncertainty', 'inferno',
                  r'Square-root variance contribution (W m$^{-2}$)'),
             ):
-                if path not in maps:
+                if not path.is_file():
                     continue
-                panels.append((maps[path], title, cmap, label, True))
+                panels.append((np.load(path, allow_pickle=False), title, cmap,
+                               label, True))
             if not panels:
                 continue
             if image_shape is None:
@@ -713,14 +757,15 @@ class FOXESEvaluator:
                 r'W m$^{-2}$',
                 color=text_color,
             )
-            filename = re.sub(r'[^A-Za-z0-9._-]', '_', stamp) + '.png'
             fig.savefig(
-                output_dir / filename, dpi=160,
+                figure_path, dpi=160,
                 facecolor=figure_color,
             )
             plt.close(fig)
-        print(f"Saved {len(available)} patch-map figures to {output_dir}")
-        return len(available)
+            saved += 1
+        print(f"Saved {saved} patch-map figures to {output_dir}; "
+              f"skipped {skipped} existing figures")
+        return saved
 
     def _plot_regression(self):
         """
@@ -1044,6 +1089,7 @@ def main():
         ),
         inference_patch_dir=plotting_config.get('inference_patch_dir'),
         max_patch_maps=plotting_config.get('max_patch_maps'),
+        patch_map_class_source=plotting_config.get('patch_map_class_source'),
         aia_dir=plotting_config.get('aia_dir'),
         aia_wavelength=plotting_config.get('aia_wavelength', 193),
     )

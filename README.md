@@ -318,6 +318,12 @@ channel beside them. All panels use the lower-left image origin;
 `plotting.max_patch_maps` can limit large runs. Flux and uncertainty panels
 share one logarithmic scale from the smallest positive to largest value
 across all matching patch maps. Zero values are masked on the log scale.
+Set `plotting.patch_map_class_source` to `groundtruth` or `predictions` to save
+figures under `plots/patch_maps/Below-B/`, `B/`, `C/`, `M/`, or `X/` using the
+same flux boundaries as evaluation metrics. Leave it `null` for a flat folder.
+Evaluation shows progress while scanning the maps for the shared color scale
+and while saving the figures. Existing PNGs are skipped when evaluation is
+rerun, so an interrupted plot run resumes with the remaining figures.
 
 ### 4) Train your own model (optional)
 

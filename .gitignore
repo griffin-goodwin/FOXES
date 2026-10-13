@@ -184,3 +184,4 @@ forecasting/griffin_config.yaml
 forecasting/foxes_data/
 analysis/
 training/configs
+forecasting/foxes_outputs
