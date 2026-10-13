@@ -71,12 +71,12 @@ callbacks:
   sxr_plot_enabled: true
   sxr_plot_num_samples: 100
 data:
-  aia_dir: /data/FOXES_OG/AIA_processed
+  aia_dir: ./foxes_data/AIA_processed
   aia_norm_path: null
-  checkpoints_dir: /data/checkpoints/FOXES-LOCAL4-COUPLED-SINGLE-QUERY/
+  checkpoints_dir: ./foxes_data/checkpoints/coupled_gaussian/
   num_workers: 8
-  sxr_dir: /data/FOXES_OG/SXR_processed
-  sxr_norm_path: /data/FOXES_OG/SXR_processed/normalized_sxr.npy
+  sxr_dir: ./foxes_data/SXR_processed
+  sxr_norm_path: ./foxes_data/SXR_processed/normalized_sxr.npy
 wandb:
   entity: ggoodwin5-georgia-state-university
   job_type: training

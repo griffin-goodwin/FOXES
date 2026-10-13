@@ -281,4 +281,3 @@ dependencies:
       - yte==1.9.4
       - zarr==3.1.5
       - zeep==4.3.2
-prefix: /opt/anaconda3/envs/foxes

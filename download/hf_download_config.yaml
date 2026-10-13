@@ -18,8 +18,8 @@ repo_id: "griffingoodwin04/FOXES"
 #   {aia_dir}/{local_split}/{filename}   ("validation" maps to local dir "val")
 #   {sxr_dir}/{local_split}/{filename}
 # -----------------------------------------------------------------------------
-aia_dir: "/data/FOXES_OG/AIA_processed"
-sxr_dir: "/data/FOXES_OG/SXR_processed"
+aia_dir: "./foxes_data/AIA_processed"
+sxr_dir: "./foxes_data/SXR_processed"
 
 # -----------------------------------------------------------------------------
 # Splits to download  (any subset of: train, validation, test)
@@ -51,7 +51,7 @@ shuffle_buffer_size: 10
 # Point this at the root dir containing per-split subdirs (train/, validation/
 # or val/, test/) and streaming + HF Hub login are skipped entirely.
 # -----------------------------------------------------------------------------
-local_parquet_dir: /data/FOXES_OG/parquet/default
+local_parquet_dir: null  # set to your local parquet root to skip streaming from HF Hub
 delete_parquet_after: true   # delete each parquet file once its rows are written
 
 # -----------------------------------------------------------------------------

@@ -10,19 +10,19 @@
 wavelengths: [94, 131, 171, 193, 211, 304, 335]
 
 aia:
-  raw_dir:        "/data/AIA_raw"        # raw FITS from download/download_sdo.py
-  bad_files_dir:  "/data/AIA_bad"        # bad-timestamp FITS get moved here
-  processed_dir:  "/data/FOXES_OG/AIA_processed"  # paired 512x512 .npy stacks
+  raw_dir:        "./foxes_data/AIA_raw"        # raw FITS from download/download_sdo.py
+  bad_files_dir:  "./foxes_data/AIA_bad"        # bad-timestamp FITS get moved here
+  processed_dir:  "./foxes_data/AIA_processed"  # paired 512x512 .npy stacks
 
 sxr:
-  raw_dir:      "/data/SXR_raw"         # raw netCDF from download/download_sxr.py
-  combined_dir: "/data/SXR_combined"    # one interpolated CSV per satellite
+  raw_dir:      "./foxes_data/SXR_raw"         # raw netCDF from download/download_sxr.py
+  combined_dir: "./foxes_data/SXR_combined"    # one interpolated CSV per satellite
   apply_pre_goes16_scaling: false    # apply legacy scaling to GOES-13/14/15 (pre-GOES-16) flux;
                                      # set false if your files are already scaled (e.g. NOAA's newest reprocessing)
 
 output:
-  sxr_dir:         "/data/FOXES_OG/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
-  aia_missing_dir: "/data/AIA_missing"   # AIA files with no matching SXR value
+  sxr_dir:         "./foxes_data/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
+  aia_missing_dir: "./foxes_data/AIA_missing"   # AIA files with no matching SXR value
 
 processing:
   max_processes: null    # cap worker processes; null = use all CPUs
@@ -58,16 +58,16 @@ split:
 # stats from the train split only).
 sxr_normalization:
   compute:     true
-  output_path: "/data/FOXES_OG/SXR_processed/normalized_sxr.npy"
+  output_path: "./foxes_data/SXR_processed/normalized_sxr.npy"
 
 
 # Optional training-only AIA statistics. This scans only the train split and
 # writes parameters; raw AIA arrays remain unchanged and are normalized lazily.
 aia_normalization:
   compute:          false
-  output_path:      "/data/aia_q90_asinh_q99999_norm_streamed.npz"
-  checkpoint_path:  "/data/aia_streaming_stats_checkpoint.npz"
-  summary_csv_path: "/data/aia_q90_asinh_q99999_norm_streamed.csv"
+  output_path:      "./foxes_data/aia_q90_asinh_q99999_norm_streamed.npz"
+  checkpoint_path:  "./foxes_data/aia_streaming_stats_checkpoint.npz"
+  summary_csv_path: "./foxes_data/aia_q90_asinh_q99999_norm_streamed.csv"
   batch_size:       2048
   load_workers:     16
   reduce_workers:   16

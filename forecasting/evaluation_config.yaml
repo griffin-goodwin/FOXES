@@ -3,14 +3,14 @@
 # =============================================================================
 # Used by evaluation.py to compute metrics and generate plots.
 #
-# Usage: python evaluation.py --config evaluation_config.yaml
+# Usage: python forecasting/evaluation.py --config forecasting/evaluation_config.yaml
 # =============================================================================
 
 model_predictions:
-  main_model_csv: "/Volumes/T9/updated/inference_coupled/predictions.csv"
+  main_model_csv: "./foxes_outputs/inference/predictions.csv"
 
 evaluation:
-  output_dir:  "/Volumes/T9/updated/inference_coupled/evaluation"
+  output_dir:  "./foxes_outputs/evaluation"
   # Auto-runs when Gaussian uncertainty columns are present.
   evaluate_uncertainty: true
 
@@ -18,8 +18,8 @@ plotting:
   regression_background: "black"
   # Match maps and the optional AIA image to prediction CSV timestamps.
   # Set inference_patch_dir to null to skip these figures.
-  inference_patch_dir: "/Volumes/T9/updated/inference_patch"
-  aia_dir: "/Volumes/T9/FOXES_Data/AIA_processed/test"
+  inference_patch_dir: "./foxes_outputs/inference_patch"
+  aia_dir: "./foxes_data/AIA_processed/test"
   aia_wavelength: 193
   max_patch_maps: null  # null = all matching timestamps
   # Flux and uncertainty maps share a log color scale spanning the smallest

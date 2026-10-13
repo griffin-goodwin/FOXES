@@ -44,28 +44,35 @@ The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity
 
 ---
 
-## Current local + global FOXES model
+## The Original FOXES Model
+
+The original model predicts a raw SXR flux contribution for each image patch.
+Its three trained checkpoints use **global**, **local**, or **inverted**
+attention. The model converts patch logits to flux and clamps very small
+contributions to a positive floor (`1e-15` W/m²), which can make the maps
+relatively sparse. In the evaluations run so far, global RMSE and MSE were
+good, but the spatial maps for weak flares and quiet-Sun images were less
+convincing. This motivated the updated model below.
+
+## Current FOXES Model: Local + Global Context
 
 The maintained model in this repository extends the released FOXES patch
-predictor. Local attention builds a feature for each AIA image patch. A global
-query then summarizes the full AIA image and uses that context, together with
-each patch's local features, to adjust its flux contribution. The corrected
-patch fluxes sum to the full-disk SXR prediction.
+predictor. Local attention builds a feature for each AIA image patch. Patch
+flux starts from a positive, image-wide baseline divided across the patches;
+each patch's output scales its share. A global query then summarizes the full
+AIA image and uses that context, together with each patch's local features,
+to adjust its flux contribution. The corrected patch fluxes sum to the
+full-disk SXR prediction.
 
-This local + global design produces **visually better spatial flux maps** in
-the examples examined so far. It also predicts a global Gaussian uncertainty
-and a map of each patch's contribution to that variance. The uncertainty map
-is an attribution of global uncertainty; there are no patch-level SXR labels
+This local + global design produces **less sparse, visually better spatial
+flux maps** in the examples examined so far. It also predicts a global
+Gaussian uncertainty and a map of each patch's contribution to that variance.
+The uncertainty map is an attribution of global uncertainty; there are no patch-level SXR labels
 to establish calibrated local error bars.
 
 The tradeoff is **somewhat worse global SXR prediction performance** than the
 original released FOXES model in the evaluations run so far. The visual map
-improvement is qualitative, and this repository does not yet include a
-matched, held-out benchmark quantifying the accuracy difference.
-
-The three bundled checkpoints below are the **original released models**.
-The local + global Gaussian model is `CoupledGaussianViTLocal`; provide its
-trained checkpoint separately through `forecasting/inference_config.yaml`.
+improvement is qualitative.
 
 ---
 
@@ -142,6 +149,15 @@ FOXES is run in four steps: **get data**, **inference** (run a checkpoint over
 your data), **evaluation** (score the predictions and generate plots), and
 optionally **training** your own model. All are driven by a YAML config — edit
 the config, then run the script.
+
+The checked-in configs use paths relative to the repository root:
+`./foxes_data/` for downloaded or processed data and `./foxes_outputs/` for
+predictions and plots. Run the commands below from the repository root, or
+replace those paths with locations on your machine. For inference, set
+`data.checkpoint_path` to the checkpoint you want to use. The maintained
+coupled Gaussian checkpoint is not included in the repository; the original
+deterministic checkpoints are under
+`forecasting/trained_weights_and_normalization/`.
 
 ### 0) Get data
 

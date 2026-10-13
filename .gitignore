@@ -176,6 +176,8 @@ download/test_download_sdo.py
 forecasting/models/test_vit_mask.py
 forecasting/griffin_config.yaml
 /data/foxes_data
+/foxes_data/
+/foxes_outputs/
 *.nc
 *.codex
 *.agents
