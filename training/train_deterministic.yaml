@@ -6,7 +6,7 @@
 # data/build_dataset.py produces).
 #
 # Usage:
-#   python training/train.py --config training/train_config.yaml
+#   python training/train.py --config training/train_deterministic.yaml
 # =============================================================================
 wavelengths: [94, 131, 171, 193, 211, 304, 335]
 
@@ -23,6 +23,9 @@ epochs: 250
 # Compute quiet/C/M/X weights from training targets before starting.
 mean_loss:
   class_weighting: inverse_frequency
+  # Optional mean squared signed bias across quiet/C/M/X classes in each batch.
+  # Classes present in a batch contribute equally; 0 keeps the original loss.
+  bias_penalty_weight: 0.0
 
 vit_architecture:
   embed_dim: 256

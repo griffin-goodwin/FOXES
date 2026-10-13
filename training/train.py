@@ -162,6 +162,8 @@ def configure_class_weights(config, data_module, model_type):
         uncertainty['class_weighting'] = weighting
         if 'huber_delta' in mean_loss:
             uncertainty['huber_delta'] = mean_loss['huber_delta']
+        if 'bias_penalty_weight' in mean_loss:
+            uncertainty['bias_penalty_weight'] = mean_loss['bias_penalty_weight']
 
     base_weights = loss.get('base_weights') if not coupled else None
     if weighting != 'none':
@@ -342,6 +344,9 @@ def main():
     else:
         model = ViTLocal(
             **common_kwargs,
+            bias_penalty_weight=config.get('mean_loss', {}).get(
+                'bias_penalty_weight', 0.0,
+            ),
             loss_kwargs={
                 'window_size': loss_cfg.get('window_size', 15000),
                 'huber_delta': loss_cfg.get('huber_delta', 0.3),

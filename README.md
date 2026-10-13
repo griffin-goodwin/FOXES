@@ -312,9 +312,17 @@ Unlike inference, training expects `aia_dir`/`sxr_dir` each to have `train/`,
 The maintained local + global Gaussian model uses one global query and a
 weighted final-prediction Huber loss. Edit
 `training/train_coupled_gaussian.yaml` for its architecture, mean loss,
-uncertainty settings, data paths, and W&B settings. `training/train_config.yaml`
-points to that config. For the released deterministic model, use
-`training/train_deterministic.yaml`.
+uncertainty settings, data paths, and W&B settings. For the released
+deterministic model, use `training/train_deterministic.yaml`.
+
+To encourage predictions above and below the one-to-one line to balance, set
+`mean_loss.bias_penalty_weight` in either training config. The default is `0`;
+`0.1` is a starting point for a sweep. The added loss is the weight times the
+mean of the **squared signed bias within each GOES class present in the batch**,
+using normalized log10 flux. Each represented class contributes equally; the
+existing Huber loss retains its configured class weights. Compare
+`val_class/<class>/bias_dex` with validation MSE and RMSE before choosing a
+weight. A class contributes to the penalty only in batches where it appears.
 
 Optional `vit_architecture.global_attention_heads`,
 `global_head_hidden_dim`, and `global_attention_dropout` change only the
@@ -322,7 +330,7 @@ coupled model's global head. Omit them to use the architecture defaults saved
 in the maintained checkpoint.
 
 ```bash
-python training/train.py --config training/train_config.yaml
+python training/train.py --config training/train_coupled_gaussian.yaml
 ```
 
 Training logs to Weights & Biases and saves checkpoints to

@@ -12,6 +12,32 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 SXR_LOG_OFFSET = 1e-8
 
 
+def validate_bias_penalty_weight(value):
+    """Accept only finite, nonnegative bias penalty coefficients."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise ValueError('bias_penalty_weight must be a finite, nonnegative number')
+    return float(value)
+
+
+def mean_class_signed_error_penalty(prediction, target, target_raw, weight):
+    """Average squared signed bias across the GOES classes in a batch."""
+    residual = (prediction - target).reshape(-1)
+    flux = target_raw.reshape(-1)
+    thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
+    class_index = (
+        (flux >= thresholds['c']).long()
+        + (flux >= thresholds['m']).long()
+        + (flux >= thresholds['x']).long()
+    )
+    sums = residual.new_zeros(4).scatter_add(0, class_index, residual)
+    counts = residual.new_zeros(4).scatter_add(
+        0, class_index, torch.ones_like(residual),
+    )
+    class_means = sums / counts.clamp_min(1)
+    return weight * class_means.square().sum() / (counts > 0).sum()
+
+
 def normalize_sxr(unnormalized_values, sxr_norm):
     """Convert physical flux using the FOXES ``log10(F + 1e-8)`` convention."""
     log_values = torch.log10(unnormalized_values + SXR_LOG_OFFSET)
@@ -51,6 +77,9 @@ class ViTLocal(pl.LightningModule):
     loss_kwargs : dict, optional
         Forwarded to SXRRegressionDynamicLoss (window_size, huber_delta,
         adaptive_multipliers) — see that class for defaults.
+    bias_penalty_weight : float
+        Coefficient on the mean squared class-specific signed error in
+        normalized log10 flux. Zero (the default) disables the penalty.
     diagnostic_every_n_steps : int
         How often (in training steps) to log the adaptive loss's per-class
         multipliers to the logger.
@@ -59,7 +88,8 @@ class ViTLocal(pl.LightningModule):
     DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
 
     def __init__(self, model_kwargs, sxr_norm, base_weights=None, weight_decay=1e-5,
-                 scheduler_kwargs=None, loss_kwargs=None, diagnostic_every_n_steps=200):
+                 scheduler_kwargs=None, loss_kwargs=None, diagnostic_every_n_steps=200,
+                 bias_penalty_weight=0.0):
         super().__init__()
         self.model_kwargs = model_kwargs
         self.lr = model_kwargs.get('learning_rate', model_kwargs.get('lr', 1e-4))
@@ -74,6 +104,7 @@ class ViTLocal(pl.LightningModule):
         self.scheduler_kwargs = {**self.DEFAULT_SCHEDULER_KWARGS, **(scheduler_kwargs or {})}
         self.diagnostic_every_n_steps = diagnostic_every_n_steps
         self.adaptive_loss = SXRRegressionDynamicLoss(base_weights=self.base_weights, **(loss_kwargs or {}))
+        self.bias_penalty_weight = validate_bias_penalty_weight(bias_penalty_weight)
         self.huber_delta = self.adaptive_loss.huber_delta
         self.sxr_norm = sxr_norm
 
@@ -124,9 +155,14 @@ class ViTLocal(pl.LightningModule):
         # Use adaptive rare event loss. Only train batches should feed the
         # per-class error history the adaptive multipliers are computed from --
         # otherwise val/test performance silently leaks into training dynamics.
-        loss, weights = self.adaptive_loss.calculate_loss(
+        base_loss, weights = self.adaptive_loss.calculate_loss(
             norm_preds_squeezed, sxr, sxr_un, update_tracking=(mode == "train")
         )
+        signed_error = (norm_preds_squeezed - sxr).mean()
+        bias_penalty = mean_class_signed_error_penalty(
+            norm_preds_squeezed, sxr, sxr_un, self.bias_penalty_weight,
+        )
+        loss = base_loss + bias_penalty
 
         # Also calculate huber loss for logging
         huber_loss = F.huber_loss(norm_preds_squeezed, sxr, delta=self.huber_delta)
@@ -142,6 +178,10 @@ class ViTLocal(pl.LightningModule):
                      prog_bar=True, logger=True, sync_dist=True)
             self.log("train/total_loss", loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
+            self.log("train/bias_dex", signed_error * float(self.sxr_norm[1]),
+                     on_step=True, on_epoch=True, logger=True, sync_dist=True)
+            self.log("train/bias_penalty", bias_penalty, on_step=True,
+                     on_epoch=True, logger=True, sync_dist=True)
             self.log("train/huber_loss", huber_loss, on_step=True, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
             self.log("train/mse_loss", mse_loss, on_step=True, on_epoch=True,
@@ -162,6 +202,10 @@ class ViTLocal(pl.LightningModule):
             for key, value in multipliers.items():
                 self.log(f"val/adaptive/{key}", value, on_step=False, on_epoch=True)
             self.log("val_total_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+            self.log("val/bias_dex", signed_error * float(self.sxr_norm[1]),
+                     on_step=False, on_epoch=True, logger=True, sync_dist=True)
+            self.log("val/bias_penalty", bias_penalty, on_step=False,
+                     on_epoch=True, logger=True, sync_dist=True)
             self.log("val_huber_loss", huber_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True,
                      sync_dist=True)
             self.log("val_mse_loss", mse_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
@@ -1049,6 +1093,7 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             'class_weighting',
             'class_weight_exponent',
             'class_weights',
+            'bias_penalty_weight',
         }
         # Old checkpoints include objective settings in their saved
         # hyperparameters. They do not affect inference, so accept them only
@@ -1082,6 +1127,9 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             for key in self.NETWORK_UNCERTAINTY_KEYS
             if key in uncertainty_kwargs
         }
+        self.bias_penalty_weight = validate_bias_penalty_weight(
+            uncertainty_kwargs.get('bias_penalty_weight', 0.0)
+        )
         self.model = self.NETWORK_CLASS(
             **filtered_kwargs,
             **network_uncertainty_kwargs,
@@ -1287,7 +1335,11 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             mean_norm, target_norm, target_raw,
         )
         mean_loss = global_mean_loss
-        mean_objective = mean_loss
+        signed_error = (mean_norm - target_norm).mean()
+        bias_penalty = mean_class_signed_error_penalty(
+            mean_norm, target_norm, target_raw, self.bias_penalty_weight,
+        )
+        mean_objective = mean_loss + bias_penalty
         uncertainty_active = self._uncertainty_training_is_active()
         uncertainty_loss = (
             self._uncertainty_nll_loss(
@@ -1347,6 +1399,10 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             f'{prefix}/mean_loss', mean_loss, on_step=on_step, on_epoch=True,
             logger=True, sync_dist=True,
         )
+        self.log(f'{prefix}/bias_dex', signed_error * self.sxr_norm[1],
+                 on_step=on_step, on_epoch=True, logger=True, sync_dist=True)
+        self.log(f'{prefix}/bias_penalty', bias_penalty, on_step=on_step,
+                 on_epoch=True, logger=True, sync_dist=True)
         self.log(f'{prefix}/total_loss', loss, on_step=on_step, on_epoch=True,
                  logger=True, sync_dist=True)
         self.log(f'{prefix}/mse', mse, on_step=on_step, on_epoch=True,

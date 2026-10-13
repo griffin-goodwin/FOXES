@@ -18,6 +18,9 @@ model_type: coupled_uncertainty
 mean_loss:
   class_weighting: inverse_frequency
   huber_delta: 0.30
+  # Optional mean squared signed bias across quiet/C/M/X classes in each batch.
+  # Classes present in a batch contribute equally; 0 keeps the original loss.
+  bias_penalty_weight: 0.0
 uncertainty:
   enabled: true
   initial_relative_std: 1

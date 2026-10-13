@@ -79,7 +79,10 @@ def test_mean_loss_weights_are_passed_to_coupled_model(tmp_path):
         train_ds=SimpleNamespace(samples=samples, sxr_dir=tmp_path)
     )
     config = {
-        'mean_loss': {'class_weighting': 'inverse_frequency', 'huber_delta': 0.3},
+        'mean_loss': {
+            'class_weighting': 'inverse_frequency', 'huber_delta': 0.3,
+            'bias_penalty_weight': 0.2,
+        },
         'uncertainty': {'enabled': True},
     }
 
@@ -90,6 +93,7 @@ def test_mean_loss_weights_are_passed_to_coupled_model(tmp_path):
     assert base_weights is None
     assert uncertainty['class_weighting'] == 'inverse_frequency'
     assert uncertainty['huber_delta'] == 0.3
+    assert uncertainty['bias_penalty_weight'] == 0.2
     assert uncertainty['class_weights'] == config['computed_four_class_train_weights']
 
 
@@ -97,4 +101,5 @@ def test_maintained_training_config_resolves_mean_loss():
     config = load_training_config('training/train_coupled_gaussian.yaml')
     assert config['mean_loss'] == {
         'class_weighting': 'inverse_frequency', 'huber_delta': 0.3,
+        'bias_penalty_weight': 0.0,
     }
