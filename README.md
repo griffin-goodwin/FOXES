@@ -54,7 +54,7 @@ relatively sparse. In the evaluations run so far, global RMSE and MSE were
 good, but the spatial maps for weak flares and quiet-Sun images were less
 convincing. This motivated the updated model below.
 
-## Current FOXES Model: Local + Global Context
+## The Updated (Post Publication) FOXES Model: Local + Global Context
 
 The maintained model in this repository extends the released FOXES patch
 predictor. Local attention builds a feature for each AIA image patch. Patch
@@ -73,6 +73,9 @@ to establish calibrated local error bars.
 The tradeoff is **somewhat worse global SXR prediction performance** than the
 original released FOXES model in the evaluations run so far. The visual map
 improvement is qualitative.
+The newly added local + global checkpoints listed below have **not yet been
+validated**; these earlier observations should not be read as evaluation
+results for either new checkpoint file.
 
 ---
 
@@ -106,7 +109,7 @@ FOXES
 │   ├── inference_config.yaml  # Config for inference.py
 │   ├── evaluation.py          # Compute metrics and generate evaluation plots
 │   ├── evaluation_config.yaml # Config for evaluation.py
-│   └── trained_weights_and_normalization/  # Original released checkpoints and SXR normalization
+│   └── trained_weights_and_normalization/  # Tracked original weights; local newer weights may also be staged here
 ├── training
 │   ├── train.py                # Train released deterministic or current local + global model
 │   ├── train_config.yaml       # Points to the maintained coupled Gaussian config
@@ -119,6 +122,49 @@ FOXES
 ---
 
 ## Setup
+
+### Use FOXES from a Python UI
+
+Install this checkout in the UI environment:
+
+```bash
+pip install -e .
+```
+
+Load a checkpoint once when the UI starts, then reuse it for each image:
+
+```python
+import foxes
+
+model = foxes.load_model("/path/to/model.ckpt", device="auto")
+processor = foxes.DataProcessor(email="you@example.com")
+image = processor.fetch_date("2023-08-01T00:00:00Z")  # (7, 512, 512)
+result = foxes.predict(image, model=model)
+
+print(result.flux)       # full-disk SXR flux, W/m²
+print(result.flux_map)   # patch contributions, W/m²
+ax = foxes.plot_flux_map(result)  # optional: vmin=1e-10, vmax=1e-6
+ax.figure.savefig("flux_map.png")
+```
+To install:
+```bash
+python -m pip install -e .
+```
+`fetch_date` writes the seven raw AIA FITS frames to a temporary directory,
+processes them with ITI, and returns the stack in memory. The raw files are
+removed when the call finishes, including when a download is incomplete.
+The requested timestamp is interpreted as UTC. An ISO string with an offset
+is converted to UTC; a timestamp without an offset is assumed to be UTC.
+If you provide `aia_norm_path` to `DataProcessor`, do not also pass that
+artifact to `load_model`, since that would normalize the stack twice.
+
+The input uses channel order `[94, 131, 171, 193, 211, 304, 335]` and must
+already have the same preprocessing as the checkpoint's training data. If that
+training used an AIA normalization artifact, pass `aia_norm_path` to
+`foxes.load_model`. `result.intervals` and `result.patch_uncertainty_map` are
+available for the coupled Gaussian model. Checkpoints are passed by path and
+are not bundled into the Python package. Pass a path to a **full checkpoint
+file** available on the UI machine.
 
 ### 1) Clone
 ```bash
@@ -135,12 +181,6 @@ conda activate foxes
 pip install -r requirements.txt
 ```
 
-**Option B — conda (full environment):**
-```bash
-conda env create -f foxes.yml
-conda activate foxes
-```
-
 ---
 
 ## Running the Model
@@ -154,10 +194,8 @@ The checked-in configs use paths relative to the repository root:
 `./foxes_data/` for downloaded or processed data and `./foxes_outputs/` for
 predictions and plots. Run the commands below from the repository root, or
 replace those paths with locations on your machine. For inference, set
-`data.checkpoint_path` to the checkpoint you want to use. The maintained
-coupled Gaussian checkpoint is not included in the repository; the original
-deterministic checkpoints are under
-`forecasting/trained_weights_and_normalization/`.
+`data.checkpoint_path` to a full checkpoint file available on your machine.
+
 
 ### 0) Get data
 
@@ -245,13 +283,30 @@ mask, so switch between those original models with `checkpoint_path`:
 | `localized-attention-mask.ckpt` | `local` | True local attention — the opposite of the original model: each patch attends only to its own neighborhood. |
 | `no-attention-mask.ckpt` | `none` | Global ViT — standard full/global attention, no masking at all. |
 
+This working copy also has two newer local + global Gaussian checkpoint files
+under `updated_architecture_checkpoints/`. Their
+architecture and normalization details below come from the local checkpoint
+metadata; **neither has yet been validated for prediction quality, spatial
+maps, or uncertainty calibration**.
+
+| Local checkpoint | Architecture recorded in checkpoint | Status |
+| --- | --- | --- |
+| `updated_architecture_checkpoints/ComplexModel.ckpt` | 12 layers, 8 attention heads, local mask, global patch adjustment | Local file; unvalidated; remote availability unconfirmed |
+| `updated_architecture_checkpoints/SlightlyLighterModel.ckpt` | 4 layers, 4 attention heads, local mask, global patch adjustment | Local file; unvalidated; remote availability unconfirmed |
+
+
+Both newer checkpoints contain SXR normalization values matching the locally
+staged `updated_architecture_checkpoints/normalized_sxr_updated_FOXES.npy`.
+The original three checkpoints contain values matching the locally staged
+`normalized_sxr_FOXES_paper.npy` instead.
+
 Edit `forecasting/inference_config.yaml`:
 
 ```yaml
 data:
   aia_dir:         "/path/to/your/aia_data"
   sxr_dir:         "/path/to/your/sxr_data"   # omit/ignore if prediction_only
-  sxr_norm_path:   "forecasting/trained_weights_and_normalization/normalized_sxr.npy"
+  sxr_norm_path:   null  # optional: set to the matching local normalization file
   checkpoint_path: "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt"
 
 output_path: "/path/to/predictions.csv"
@@ -275,24 +330,6 @@ This writes `output_path` (a CSV of timestamp/prediction/groundtruth). Per-patch
 automatically alongside it whenever `flux_path` / `weight_path` are set in the
 config — set `model_params.no_flux: true` or `model_params.no_weights: true` to
 skip either.
-
-For the current local + global model, set `data.checkpoint_path` to its trained
-checkpoint and use `model_type: coupled_uncertainty` (or `auto` to detect the
-maintained model type from the checkpoint). The implementation is
-`CoupledGaussianViTLocal` in `forecasting/model.py`; the checkpoint supplies
-its layer count, attention heads, and local window size. The prediction CSV
-additionally contains normalized mean/variance,
-normalized sigma, sigma in dex, and asymmetric 68%/95% intervals in physical
-W/m². Set `patch_uncertainty_path` to save a raw-flux spatial uncertainty map
-for each image, or set `model_params.no_patch_uncertainty: true` to skip the
-maps while retaining the global uncertainty columns. These maps contain the
-square root of each patch's contribution to global raw-flux variance in W/m².
-The shared uncertainty head sees only each detached mean-head patch logit, so
-uncertainty gradients cannot alter the mean prediction. It predicts a
-dimensionless relative standard deviation for that patch,
-which scales the patch's physical flux before independent variance
-contributions are summed. Because training has only a global SXR target, the
-maps are variance attributions, not independently calibrated local error bars.
 
 ### 3) Evaluate
 

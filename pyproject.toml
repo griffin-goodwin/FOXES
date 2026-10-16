@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foxes-framework-for-operational-xray-emission-synthesis"
+version = "0.1.0"
+description = "FOXES - Generate SXR Maps From EUV Images"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = [
+  "numpy",
+  "torch",
+  "pytorch-lightning",
+  "pandas",
+  "tqdm",
+  "PyYAML",
+  "matplotlib",
+  "drms",
+  "astropy>=7.2,<8",
+  "sunpy>=6,<8",
+  "itipy",
+  "aiapy>=0.6.4,<0.11",
+]
+
+[project.optional-dependencies]
+evaluation = ["scikit-learn", "seaborn", "plotly"]
+training = ["wandb", "torchvision"]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["foxes", "forecasting", "training", "data", "download"]
