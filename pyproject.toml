@@ -20,6 +20,8 @@ dependencies = [
   "drms",
   "astropy>=7.2,<8",
   "sunpy>=6,<8",
+  "h5netcdf",
+  "h5py",
   "itipy",
   "aiapy>=0.6.4,<0.11",
 ]

@@ -137,25 +137,210 @@ Load a checkpoint once when the UI starts, then reuse it for each image:
 import foxes
 
 model = foxes.load_model("/path/to/model.ckpt", device="auto")
-processor = foxes.DataProcessor(email="you@example.com")
-image = processor.fetch_date("2023-08-01T00:00:00Z")  # (7, 512, 512)
-result = foxes.predict(image, model=model)
+processor = foxes.ObservationProcessor(email="you@example.com")
+observation = processor.fetch_observation("2023-08-01T00:00:00Z")
+print(observation.data.shape)  # (7, 512, 512)
+result = foxes.predict(observation, model=model)
 
 print(result.flux)       # full-disk SXR flux, W/m²
 print(result.flux_map)   # patch contributions, W/m²
+print(result.harp_regions)  # HARP numbers, locations, and flux sums, W/m²
+print(result.sxr)        # measured GOES XRS-A/XRS-B fluxes and sample time
 ax = foxes.plot_flux_map(result)  # optional: vmin=1e-10, vmax=1e-6
 ax.figure.savefig("flux_map.png")
 ```
+When plotting a prediction, the title automatically shows the predicted FOXES
+flux and the observed SXR-B mean when available, in W/m². For Gaussian models,
+it also shows the model's full-disk uncertainty beside the predicted flux as
+`± value`, computed as the square root of the summed patch variances. This is
+a model estimate, not a calibrated error bar.
+
+`ObservationProcessor` calls `AIAProcessor`, `HARPProcessor`, and `SXRProcessor`
+for the same requested timestamp. All three sources are fetched by default.
+AIA and HARPs share the crop geometry and JSOC email; GOES SXR needs no email.
+Prediction adds a `flux_sum` in W/m² and a canonical lowercase `harpnum` to
+each region in `result.harp_regions`. Each result includes `top_pct`,
+`left_pct`, `width_pct`, and `height_pct` for its location in the image.
+Original JSOC fields, including `LON_MIN`, `LON_MAX`, `LAT_MIN`, and `LAT_MAX`,
+are preserved. The observation's queried rows are not modified.
+
+```python
+for harp in result.harp_regions or []:
+    print(harp["harpnum"], harp["flux_sum"], "W/m²")
+```
+
+Plotting reuses these regions and the same flux summation rule:
+
+```python
+ax = foxes.plot_flux_map(result, show_harp_boxes=True)
+```
+
+For Gaussian models, each HARP result also contains `flux_sum_uncertainty`
+in W/m²: square the patch uncertainties, sum within the same box as the flux,
+then take the square root. Empty boxes have zero uncertainty; deterministic
+models return `None`. These values follow the model's additive variance
+attribution; they have not been calibrated as regional error bars.
+
+Uncertainty appears on a third label line as `± value` when available.
+Hide it with `show_harp_uncertainty=False`:
+
+```python
+ax = foxes.plot_flux_map(result, show_harp_boxes=True, show_harp_uncertainty=False)
+for harp in result.harp_regions or []:
+    print(harp["harpnum"], harp["flux_sum"], harp["flux_sum_uncertainty"])
+```
+
+Each HARP box is labeled with its number and flux sum in W/m². Labels use a
+fixed font size; set `harp_label_fontsize` to change it. A standard
+Matplotlib annotation places each label diagonally outside a box corner with
+a three-point gap in both x and y. The entire label extends outward from
+the corner. The side
+toward the image center is preferred. A simple overlap pass tries the other
+corners before four-point nudges, keeping automatic positions outside their
+HARP box and inside the map. Shifted
+labels get connector lines. `harp_label_max_shift=80` limits movement to 80
+points from a corner; lower it to keep labels closer, or set it
+to zero for labels fixed at their preferred corner. If no free position is found within the limit, the
+label stays at its starting position. Crowded cases may need manual offsets
+or a higher `min_harp_flux`. Labels are not automatically hidden. This runs
+once when plotting; replot after substantial size changes.
+
+For crowded maps, set individual labels' starting positions. Offsets are in points
+from the chosen corner: positive x moves right, positive y moves up. Manually
+offset labels get matching connector lines:
+
+```python
+ax = foxes.plot_flux_map(
+    result, show_harp_boxes=True,
+    harp_label_offsets={1234: (15, 30), 5678: (-20, -30)},
+)
+```
+
+Box outlines and labels share a fixed
+color by flux rank (strongest: sky blue, second: orange, third: green).
+
+Expand HARP boxes when fetching observations so prediction sums and plot
+outlines use the same expanded region:
+
+```python
+processor = foxes.ObservationProcessor(email=email, harp_bbox_expansion=0.1)
+observation = processor.fetch_observation(timestamp)
+result = foxes.predict(observation, model=model)
+```
+
+`harp_bbox_expansion` defaults to zero. `0.1` adds 10% of each box's width and
+height on each side (20% more total width and height), clipped to the image.
+Original JSOC heliographic bounds are preserved. For direct HARP queries, use
+`foxes.HARPProcessor(email=email, bbox_expansion=0.1)`. The expansion is carried
+in observation metadata for HARP queries deferred until plotting.
+
+Set `min_harp_flux` to hide regions below an absolute flux sum in W/m²:
+
+```python
+ax = foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=1e-8)
+```
+
+The default threshold is `1e-7` W/m²; use `min_harp_flux=0` to show all regions.
+Filtering only affects the plot;
+`result.harp_regions` retains all predicted regional sums.
+
+Set `include_aia=False`, `include_harps=False`, or `include_sxr=False` on
+`ObservationProcessor` to disable a source. Override any setting for one
+observation with `processor.fetch_observation(timestamp, include_sxr=False)`
+(and similarly for AIA/HARPs). With AIA disabled, `observation.data` is `None`,
+and prediction requires fetching AIA first. Each component processor handles
+only its own source.
+If the observation did not fetch HARPs, plotting with `show_harp_boxes=True`
+queries them using the prediction metadata and its `jsoc_email` argument.
+Pass `harp_regions=regions` to the plot to use an explicit set of regions.
+
+`harp_regions=None` means no query was requested; `[]` means no usable HARP
+regions were returned, including query failures. Plotting reuses an empty
+result without repeating the query. HARP data is supplementary, so an empty
+HARP result does not discard the AIA observation.
+
+`observation.metadata` is preserved as `result.metadata`. It records the
+requested UTC timestamp, channel order, original processed image shape, and
+crop padding. The timestamp is the requested time, not the individual AIA
+exposure times. The JSOC email stays on the processor or plotting call.
+
+For array-based workflows, `foxes.AIAProcessor(email=email).fetch_date(timestamp)`
+returns a NumPy stack. Supply its time once to `foxes.predict(image, model=model,
+timestamp=timestamp)` to enable automatic HARP queries from the result. This
+assumes the standard AIA channel order and crop padding of 0.1. For a different
+crop, wrap the array in `foxes.Observation` with explicit
+`foxes.ObservationMetadata`. Plotting a plain flux-map array also continues to
+accept an explicit `timestamp`.
+
+Each sum includes positive patch contributions whose centers fall inside the
+HARP box. Boxes can overlap, so their sums need not add to the full-disk flux.
+
+### Measured GOES SXR
+
+The observation's `sxr` dict is also carried into `result.sxr`; it is a measured
+comparison value and is not used as model input. XRS-B is the 1–8 Å band to
+compare with the predicted `result.flux`; XRS-A is 0.5–4 Å. Fluxes are in W/m².
+
+```python
+processor = foxes.ObservationProcessor(
+    email="you@example.com", include_sxr=True, sxr_tolerance=120,
+    sxr_satellite=None,  # optionally restrict to e.g. 18
+)
+observation = processor.fetch_observation("2023-08-01T00:00:00Z")
+result = foxes.predict(observation, model=model)
+if result.sxr is not None:
+    print("Predicted:", result.flux, "Observed:", result.sxr["xrsb_flux"])
+    print(result.sxr["satellites"], result.sxr["timestamp"])
+    print(result.sxr["measurements"])  # individual contributing satellite values
+    print(result.sxr["time_offset_seconds"])  # sample minus requested UTC time
+
+# Fetch just SXR, using the same datetime/ISO string format:
+sxr = foxes.SXRProcessor(tolerance=120, satellite=18).fetch_date(timestamp)
+# Or through the observation fetcher:
+sxr_only = processor.fetch_observation(timestamp, include_aia=False, include_harps=False)
+```
+
+`SXRProcessor` downloads the GOES science `avg1m` product and finds the nearest
+usable timestamp within `tolerance` seconds (120 by default; time ties favor
+the earlier sample). At that timestamp, `xrsb_flux` is the arithmetic mean of
+available satellites' finite positive XRS-B values with zero XRS-B quality
+flags. This follows `data/align_aia_sxr.py`: average in physical W/m² before
+the training transform applies log normalization. `result.flux` also uses
+physical W/m², so no normalization is needed for comparison.
+
+`satellites` names the contributors and `measurements` retains their individual
+values. Each satellite counts once; measurements at different timestamps are
+never averaged together. Restricting `satellite` yields a single-satellite
+result. XRS-A is averaged over valid short-band measurements from the XRS-B
+contributors, or `None` if unavailable. Bad XRS-A values do not exclude good
+XRS-B measurements from the model comparison. The returned `timestamp` is the
+actual sample time, while `observation.metadata.timestamp` remains the requested
+time. Daily files are filtered to the requested window and deleted after use.
+No interpolation or additional legacy scaling is applied to the reprocessed
+science fluxes. `sxr=None` means fetching was disabled or no usable measurement
+was available, including network or processing failures; these failures log a
+warning and do not discard the AIA observation. The science archive may lag
+recent observations. Check the calibration used for older training datasets
+before interpreting measured-versus-predicted differences. Unlike the bulk
+dataset converter, this fetcher does not fill missing fluxes using log-space
+interpolation; only valid measured samples contribute.
+
+GOES netCDF reading requires `h5netcdf` and `h5py`, both declared package
+dependencies. If an existing environment reports either missing, run
+`python -m pip install h5netcdf h5py` using that environment's Python. In a
+notebook, run `%pip install h5netcdf h5py` and restart the kernel.
+
 To install:
 ```bash
 python -m pip install -e .
 ```
-`fetch_date` writes the seven raw AIA FITS frames to a temporary directory,
-processes them with ITI, and returns the stack in memory. The raw files are
+`AIAProcessor.fetch_date` writes the seven raw AIA FITS frames to a temporary
+directory, processes them with ITI, and returns the stack in memory.
+`ObservationProcessor.fetch_observation` uses this same processing path. The raw files are
 removed when the call finishes, including when a download is incomplete.
 The requested timestamp is interpreted as UTC. An ISO string with an offset
 is converted to UTC; a timestamp without an offset is assumed to be UTC.
-If you provide `aia_norm_path` to `DataProcessor`, do not also pass that
+If you provide `aia_norm_path` to `AIAProcessor`, do not also pass that
 artifact to `load_model`, since that would normalize the stack twice.
 
 The input uses channel order `[94, 131, 171, 193, 211, 304, 335]` and must

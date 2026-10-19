@@ -16,6 +16,7 @@ numpy
 scipy
 pandas
 xarray
+h5netcdf
 h5py
 
 # Machine learning
