@@ -12,7 +12,7 @@ import pytest
 from sunpy.net import Fido, attrs as a
 from sunpy.timeseries import TimeSeries
 
-import foxes
+import helio_foxes
 
 
 TARGET = datetime(2023, 8, 1, tzinfo=timezone.utc)
@@ -82,7 +82,7 @@ def test_sxr_real_netcdf_reader_quality_and_temporary_cleanup(monkeypatch):
         (18, dict(offsets=[-60, 0, 30, 60], b_quality=[0, 1, 1, 0],
                   xrsb=[2e-6, 9e-6, 8e-6, 3e-6])),
     ])
-    result = foxes.SXRProcessor().fetch_date("2023-07-31T20:00:00-04:00")
+    result = helio_foxes.SXRProcessor().fetch_date("2023-07-31T20:00:00-04:00")
     assert result["timestamp"] == datetime(2023, 7, 31, 23, 59, tzinfo=timezone.utc)
     assert result["time_offset_seconds"] == -60
     assert result["satellites"] == ["GOES-18"]
@@ -102,7 +102,7 @@ def test_sxr_averages_same_time_satellites_once_and_skips_bad_files(monkeypatch)
         (18, dict(offsets=[0], xrsb=[4e-6])), (17, None),
         (16, dict(offsets=[0])),
     ], errors=["another file unavailable"])
-    result = foxes.SXRProcessor().fetch_date(TARGET)
+    result = helio_foxes.SXRProcessor().fetch_date(TARGET)
     assert result["satellites"] == ["GOES-18", "GOES-16"]
     assert result["xrsb_flux"] == pytest.approx(2.5e-6)
     assert [row["xrsb_flux"] for row in result["measurements"]] == [4e-6, 1e-6]
@@ -118,7 +118,7 @@ def test_sxr_averages_same_time_satellites_once_and_skips_bad_files(monkeypatch)
 
 def test_sxr_explicit_satellite_and_no_extra_legacy_scaling(monkeypatch):
     _, searches = mock_download(monkeypatch, [(15, dict(offsets=[0])), (18, dict(offsets=[0]))])
-    result = foxes.SXRProcessor(satellite=15).fetch_date("2023-08-01")
+    result = helio_foxes.SXRProcessor(satellite=15).fetch_date("2023-08-01")
     assert result["satellites"] == ["GOES-15"]
     assert result["xrsa_flux"] == pytest.approx(1e-8)
     assert result["xrsb_flux"] == pytest.approx(1e-6)
@@ -132,7 +132,7 @@ def test_sxr_explicit_satellite_and_no_extra_legacy_scaling(monkeypatch):
 ])
 def test_sxr_returns_none_for_gaps_bad_quality_or_invalid_flux(monkeypatch, values):
     staged, _ = mock_download(monkeypatch, [(18, values)])
-    assert foxes.SXRProcessor().fetch_date(TARGET) is None
+    assert helio_foxes.SXRProcessor().fetch_date(TARGET) is None
     assert all(not path.exists() for path in staged)
 
 
@@ -144,7 +144,7 @@ def test_sxr_accepts_tolerance_boundary_and_converts_units():
         {"xrsa": u.erg / u.cm**2 / u.s, "xrsb": u.erg / u.cm**2 / u.s,
          "xrsa_quality": u.one, "xrsb_quality": u.one}, source="XRS",
     )
-    result, = foxes.SXRProcessor()._samples(series, TARGET)
+    result, = helio_foxes.SXRProcessor()._samples(series, TARGET)
     assert result["time_offset_seconds"] == 120
     assert result["xrsa_flux"] == pytest.approx(1e-8)
     assert result["xrsb_flux"] == pytest.approx(1e-6)
@@ -156,7 +156,7 @@ def test_sxr_bad_short_band_does_not_remove_valid_training_target(monkeypatch, s
         (16, dict(offsets=[0], xrsb=[1e-6], **short_values)),
         (18, dict(offsets=[0], xrsb=[4e-6], xrsa=[2e-8])),
     ])
-    result = foxes.SXRProcessor().fetch_date(TARGET)
+    result = helio_foxes.SXRProcessor().fetch_date(TARGET)
     assert result["xrsb_flux"] == pytest.approx(2.5e-6)
     assert result["xrsa_flux"] == pytest.approx(2e-8)
     assert result["measurements"][1]["xrsa_flux"] is None
@@ -164,7 +164,7 @@ def test_sxr_bad_short_band_does_not_remove_valid_training_target(monkeypatch, s
 
 def test_sxr_all_short_band_data_bad_still_returns_long_band(monkeypatch):
     mock_download(monkeypatch, [(18, dict(offsets=[0], a_quality=[1]))])
-    result = foxes.SXRProcessor().fetch_date(TARGET)
+    result = helio_foxes.SXRProcessor().fetch_date(TARGET)
     assert result["xrsa_flux"] is None
     assert result["xrsb_flux"] == pytest.approx(1e-6)
 
@@ -174,7 +174,7 @@ def test_sxr_never_averages_different_timestamps(monkeypatch):
         (16, dict(offsets=[0], xrsb=[1e-6])),
         (18, dict(offsets=[-30, 30], xrsb=[4e-6, 6e-6])),
     ])
-    result = foxes.SXRProcessor().fetch_date(TARGET)
+    result = helio_foxes.SXRProcessor().fetch_date(TARGET)
     assert result["satellites"] == ["GOES-16"]
     assert result["xrsb_flux"] == pytest.approx(1e-6)
     assert result["time_offset_seconds"] == 0
@@ -182,13 +182,13 @@ def test_sxr_never_averages_different_timestamps(monkeypatch):
 
 def test_sxr_no_search_results_does_not_download(monkeypatch):
     staged, _ = mock_download(monkeypatch, [])
-    assert foxes.SXRProcessor().fetch_date(TARGET) is None
+    assert helio_foxes.SXRProcessor().fetch_date(TARGET) is None
     assert staged == []
 
 
 def test_sxr_cleans_up_interrupted_download(monkeypatch):
     staged, _ = mock_download(monkeypatch, [(18, {})], fail_fetch=True)
-    assert foxes.SXRProcessor().fetch_date(TARGET) is None
+    assert helio_foxes.SXRProcessor().fetch_date(TARGET) is None
     assert len(staged) == 1 and not staged[0].exists()
 
 
@@ -214,7 +214,7 @@ def test_sxr_missing_dependency_explains_active_environment_and_cleans_up(monkey
     else:
         monkeypatch.setattr("sunpy.timeseries.TimeSeries", missing)
 
-    assert foxes.SXRProcessor().fetch_date(TARGET) is None
+    assert helio_foxes.SXRProcessor().fetch_date(TARGET) is None
     assert sys.executable in caplog.text
     assert "%pip install h5netcdf h5py" in caplog.text
     assert all(not directory.exists() for directory in staged)
@@ -226,9 +226,9 @@ def test_sxr_missing_dependency_explains_active_environment_and_cleans_up(monkey
 ])
 def test_sxr_rejects_invalid_settings(kwargs):
     with pytest.raises(ValueError):
-        foxes.SXRProcessor(**kwargs)
+        helio_foxes.SXRProcessor(**kwargs)
 
 
 def test_sxr_bad_timestamp_is_caller_error():
     with pytest.raises(ValueError):
-        foxes.SXRProcessor().fetch_date("invalid datetime")
+        helio_foxes.SXRProcessor().fetch_date("invalid datetime")

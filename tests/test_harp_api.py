@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from foxes.api import HARPProcessor, Prediction
+from helio_foxes.api import HARPProcessor, Prediction
 
 
 def test_query_sharp_uses_drms_and_requested_email(monkeypatch):
@@ -23,7 +23,7 @@ def test_query_sharp_uses_drms_and_requested_email(monkeypatch):
             seen["key"] = key
             return expected
 
-    monkeypatch.setattr("foxes.api.drms.Client", Client)
+    monkeypatch.setattr("helio_foxes.api.drms.Client", Client)
     processor = HARPProcessor(email="test@example.com")
     result = processor._query_sharp(datetime(2023, 8, 1, tzinfo=timezone.utc), processor.email)
 
@@ -40,7 +40,7 @@ def test_query_sharp_falls_back_on_drms_failure(monkeypatch):
 
     expected = pd.DataFrame({"T_REC": ["2023.08.01_00:00:00_TAI"]})
     processor = HARPProcessor()
-    monkeypatch.setattr("foxes.api.drms.Client", Client)
+    monkeypatch.setattr("helio_foxes.api.drms.Client", Client)
     monkeypatch.setattr(processor, "_query_sharp_via_sunpy", lambda timestamp, email: expected)
 
     assert processor._query_sharp(datetime(2023, 8, 1), "test@example.com") is expected
@@ -138,7 +138,7 @@ def test_bbox_expansion_clips_to_crop_and_changes_prediction_sums(monkeypatch, e
         Ty=SimpleNamespace(to_value=lambda unit: np.array([-500.0, 500.0])),
     )
     monkeypatch.setattr(
-        "foxes.api.frames.HeliographicStonyhurst",
+        "helio_foxes.api.frames.HeliographicStonyhurst",
         lambda *args, **kwargs: SimpleNamespace(transform_to=lambda target: projected),
     )
     row = pd.Series({

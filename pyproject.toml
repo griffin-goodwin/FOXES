@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "foxes-framework-for-operational-xray-emission-synthesis"
-version = "0.1.0"
-description = "FOXES - Generate SXR Maps From EUV Images"
+name = "helio-foxes"
+version = "1.0.1"
+description = "FOXES: Framework for Operational X-ray Emission Synthesis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
@@ -34,4 +34,4 @@ training = ["wandb", "torchvision"]
 include-package-data = false
 
 [tool.setuptools.packages.find]
-include = ["foxes", "forecasting", "training", "data", "download"]
+include = ["helio_foxes", "forecasting", "training", "data", "download"]

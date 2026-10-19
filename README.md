@@ -134,19 +134,19 @@ pip install -e .
 Load a checkpoint once when the UI starts, then reuse it for each image:
 
 ```python
-import foxes
+import helio_foxes
 
-model = foxes.load_model("/path/to/model.ckpt", device="auto")
-processor = foxes.ObservationProcessor(email="you@example.com")
+model = helio_foxes.load_model("/path/to/model.ckpt", device="auto")
+processor = helio_foxes.ObservationProcessor(email="you@example.com")
 observation = processor.fetch_observation("2023-08-01T00:00:00Z")
 print(observation.data.shape)  # (7, 512, 512)
-result = foxes.predict(observation, model=model)
+result = helio_foxes.predict(observation, model=model)
 
 print(result.flux)       # full-disk SXR flux, W/m²
 print(result.flux_map)   # patch contributions, W/m²
 print(result.harp_regions)  # HARP numbers, locations, and flux sums, W/m²
 print(result.sxr)        # measured GOES XRS-A/XRS-B fluxes and sample time
-ax = foxes.plot_flux_map(result)  # optional: vmin=1e-10, vmax=1e-6
+ax = helio_foxes.plot_flux_map(result)  # optional: vmin=1e-10, vmax=1e-6
 ax.figure.savefig("flux_map.png")
 ```
 When plotting a prediction, the title automatically shows the predicted FOXES
@@ -172,7 +172,7 @@ for harp in result.harp_regions or []:
 Plotting reuses these regions and the same flux summation rule:
 
 ```python
-ax = foxes.plot_flux_map(result, show_harp_boxes=True)
+ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True)
 ```
 
 For Gaussian models, each HARP result also contains `flux_sum_uncertainty`
@@ -185,7 +185,7 @@ Uncertainty appears on a third label line as `± value` when available.
 Hide it with `show_harp_uncertainty=False`:
 
 ```python
-ax = foxes.plot_flux_map(result, show_harp_boxes=True, show_harp_uncertainty=False)
+ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, show_harp_uncertainty=False)
 for harp in result.harp_regions or []:
     print(harp["harpnum"], harp["flux_sum"], harp["flux_sum_uncertainty"])
 ```
@@ -210,7 +210,7 @@ from the chosen corner: positive x moves right, positive y moves up. Manually
 offset labels get matching connector lines:
 
 ```python
-ax = foxes.plot_flux_map(
+ax = helio_foxes.plot_flux_map(
     result, show_harp_boxes=True,
     harp_label_offsets={1234: (15, 30), 5678: (-20, -30)},
 )
@@ -223,21 +223,21 @@ Expand HARP boxes when fetching observations so prediction sums and plot
 outlines use the same expanded region:
 
 ```python
-processor = foxes.ObservationProcessor(email=email, harp_bbox_expansion=0.1)
+processor = helio_foxes.ObservationProcessor(email=email, harp_bbox_expansion=0.1)
 observation = processor.fetch_observation(timestamp)
-result = foxes.predict(observation, model=model)
+result = helio_foxes.predict(observation, model=model)
 ```
 
 `harp_bbox_expansion` defaults to zero. `0.1` adds 10% of each box's width and
 height on each side (20% more total width and height), clipped to the image.
 Original JSOC heliographic bounds are preserved. For direct HARP queries, use
-`foxes.HARPProcessor(email=email, bbox_expansion=0.1)`. The expansion is carried
+`helio_foxes.HARPProcessor(email=email, bbox_expansion=0.1)`. The expansion is carried
 in observation metadata for HARP queries deferred until plotting.
 
 Set `min_harp_flux` to hide regions below an absolute flux sum in W/m²:
 
 ```python
-ax = foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=1e-8)
+ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=1e-8)
 ```
 
 The default threshold is `1e-7` W/m²; use `min_harp_flux=0` to show all regions.
@@ -264,12 +264,12 @@ requested UTC timestamp, channel order, original processed image shape, and
 crop padding. The timestamp is the requested time, not the individual AIA
 exposure times. The JSOC email stays on the processor or plotting call.
 
-For array-based workflows, `foxes.AIAProcessor(email=email).fetch_date(timestamp)`
-returns a NumPy stack. Supply its time once to `foxes.predict(image, model=model,
+For array-based workflows, `helio_foxes.AIAProcessor(email=email).fetch_date(timestamp)`
+returns a NumPy stack. Supply its time once to `helio_foxes.predict(image, model=model,
 timestamp=timestamp)` to enable automatic HARP queries from the result. This
 assumes the standard AIA channel order and crop padding of 0.1. For a different
-crop, wrap the array in `foxes.Observation` with explicit
-`foxes.ObservationMetadata`. Plotting a plain flux-map array also continues to
+crop, wrap the array in `helio_foxes.Observation` with explicit
+`helio_foxes.ObservationMetadata`. Plotting a plain flux-map array also continues to
 accept an explicit `timestamp`.
 
 Each sum includes positive patch contributions whose centers fall inside the
@@ -282,12 +282,12 @@ comparison value and is not used as model input. XRS-B is the 1–8 Å band to
 compare with the predicted `result.flux`; XRS-A is 0.5–4 Å. Fluxes are in W/m².
 
 ```python
-processor = foxes.ObservationProcessor(
+processor = helio_foxes.ObservationProcessor(
     email="you@example.com", include_sxr=True, sxr_tolerance=120,
     sxr_satellite=None,  # optionally restrict to e.g. 18
 )
 observation = processor.fetch_observation("2023-08-01T00:00:00Z")
-result = foxes.predict(observation, model=model)
+result = helio_foxes.predict(observation, model=model)
 if result.sxr is not None:
     print("Predicted:", result.flux, "Observed:", result.sxr["xrsb_flux"])
     print(result.sxr["satellites"], result.sxr["timestamp"])
@@ -295,7 +295,7 @@ if result.sxr is not None:
     print(result.sxr["time_offset_seconds"])  # sample minus requested UTC time
 
 # Fetch just SXR, using the same datetime/ISO string format:
-sxr = foxes.SXRProcessor(tolerance=120, satellite=18).fetch_date(timestamp)
+sxr = helio_foxes.SXRProcessor(tolerance=120, satellite=18).fetch_date(timestamp)
 # Or through the observation fetcher:
 sxr_only = processor.fetch_observation(timestamp, include_aia=False, include_harps=False)
 ```
@@ -346,7 +346,7 @@ artifact to `load_model`, since that would normalize the stack twice.
 The input uses channel order `[94, 131, 171, 193, 211, 304, 335]` and must
 already have the same preprocessing as the checkpoint's training data. If that
 training used an AIA normalization artifact, pass `aia_norm_path` to
-`foxes.load_model`. `result.intervals` and `result.patch_uncertainty_map` are
+`helio_foxes.load_model`. `result.intervals` and `result.patch_uncertainty_map` are
 available for the coupled Gaussian model. Checkpoints are passed by path and
 are not bundled into the Python package. Pass a path to a **full checkpoint
 file** available on the UI machine.
