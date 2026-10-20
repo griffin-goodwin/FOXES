@@ -357,16 +357,18 @@ class QuantileValidationMetrics(Callback):
 
     def on_validation_epoch_start(self, trainer, pl_module):
         self.levels = tuple(pl_module.quantiles)
+        # Quiet combines Below-B and B to match the four training-loss bins.
+        self.groups = (('quiet', -np.inf, 1e-6), *FLARE_CLASSES)
         self.pairs = [
             (i, len(self.levels) - i - 1)
             for i in range(len(self.levels) // 2)
             if self.levels[i] < 0.5 < self.levels[-i - 1]
         ]
-        # Rows: all validation examples, then the five flare classes.
+        # Rows: all examples, quiet, and the five detailed flare classes.
         # Columns: count, coverage and pinball for each q, interval counts,
         # samples with global crossings, and summed adjacent crossing sizes.
         self.totals = torch.zeros(
-            1 + len(FLARE_CLASSES), 3 + 2 * len(self.levels) + len(self.pairs),
+            1 + len(self.groups), 3 + 2 * len(self.levels) + len(self.pairs),
             device=pl_module.device, dtype=torch.float64,
         )
 
@@ -386,7 +388,7 @@ class QuantileValidationMetrics(Callback):
         crossed = (crossing_sizes > 0).any(dim=1)
         masks = [torch.ones_like(target_raw, dtype=torch.bool)] + [
             (target_raw >= lower) & (target_raw < upper)
-            for _, lower, upper in FLARE_CLASSES
+            for _, lower, upper in self.groups
         ]
         for row, mask in enumerate(masks):
             values = [mask.sum().reshape(1), below[mask].sum(dim=0),
@@ -407,12 +409,18 @@ class QuantileValidationMetrics(Callback):
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         metrics = {}
         count_q = len(self.levels)
-        for row, name in enumerate(('all', *(c[0] for c in FLARE_CLASSES))):
+        macro_losses = []
+        for row, name in enumerate(('all', *(c[0] for c in self.groups))):
             count = totals[row, 0].item()
             if count == 0:
                 continue
             prefix = 'val_quantile' if row == 0 else f'val_quantile_class/{name}'
             metrics[f'{prefix}/count'] = count
+            per_quantile_loss = totals[row, 1 + count_q:1 + 2 * count_q] / count
+            if row == 0:
+                metrics['val_quantile/pinball_sample_mean'] = per_quantile_loss.mean().item()
+            elif name in ('quiet', 'C', 'M', 'X'):
+                macro_losses.append(per_quantile_loss)
             metrics[f'{prefix}/crossing_rate'] = (totals[row, -2] / count).item()
             metrics[f'{prefix}/mean_adjacent_crossing_dex'] = (
                 totals[row, -1] / (count * (count_q - 1))
@@ -429,6 +437,13 @@ class QuantileValidationMetrics(Callback):
                 metrics[f'{key}/coverage'] = (
                     totals[row, 1 + 2 * count_q + i] / count
                 ).item()
+        if macro_losses:
+            summed_per_quantile = torch.stack(macro_losses).sum(dim=0)
+            metrics['val_quantile/pinball_class_sum'] = summed_per_quantile.mean().item()
+            macro_per_quantile = summed_per_quantile / len(macro_losses)
+            metrics['val_quantile/pinball_macro_loss'] = macro_per_quantile.mean().item()
+            for level, value in zip(self.levels, macro_per_quantile):
+                metrics[f'val_quantile_macro/q{level:g}/pinball_loss'] = value.item()
         pl_module.log_dict(metrics, on_step=False, on_epoch=True,
                            logger=True, sync_dist=False)
 

@@ -1497,7 +1497,7 @@ class CoupledQuantileVisionTransformerLocal(CoupledVisionTransformerLocal):
 
 
 class CoupledPinballViTLocal(pl.LightningModule):
-    """Train five coupled patch quantiles with pinball and optional bias loss.
+    """Train five coupled patch quantiles with class-binned pinball loss.
 
     Uses the Gaussian model's local attention backbone, global query, and
     per-patch global correction. Each of the five quantiles has its own local
@@ -1506,18 +1506,24 @@ class CoupledPinballViTLocal(pl.LightningModule):
     maps. Global quantile crossings are monitored by validation callbacks.
     ``uncertainty_kwargs['bias_penalty_weight']`` adds the same class-specific
     signed-error penalty to the median used by the Gaussian model.
+    ``class_reduction='sum'`` averages within quiet/C/M/X bins, then sums
+    those class losses (across ranks under DDP). ``'macro'`` averages the
+    represented class losses; ``'sample_mean'`` averages across examples.
     """
 
     DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
     predicts_uncertainty = True
     uncertainty_kind = 'quantile'
     predicts_patch_uncertainty = False
+    LOSS_CLASS_NAMES = ('quiet', 'c_class', 'm_class', 'x_class')
 
     def __init__(self, model_kwargs, sxr_norm,
                  quantiles=(0.05, 0.16, 0.5, 0.84, 0.95),
                  weight_decay=1e-5, scheduler_kwargs=None,
-                 uncertainty_kwargs=None):
+                 uncertainty_kwargs=None, class_reduction='sum'):
         super().__init__()
+        if class_reduction not in ('sum', 'macro', 'sample_mean'):
+            raise ValueError("class_reduction must be 'sum', 'macro', or 'sample_mean'")
         quantiles = tuple(quantiles)
         if (len(quantiles) != 5 or any(
             isinstance(q, bool) or not isinstance(q, (int, float))
@@ -1558,6 +1564,7 @@ class CoupledPinballViTLocal(pl.LightningModule):
             **self.DEFAULT_SCHEDULER_KWARGS, **(scheduler_kwargs or {})
         }
         self.quantiles = quantiles
+        self.class_reduction = class_reduction
         self.hparams['objective'] = 'pinball'
         self.register_buffer(
             'quantile_levels', torch.tensor(quantiles, dtype=torch.float32),
@@ -1582,18 +1589,81 @@ class CoupledPinballViTLocal(pl.LightningModule):
                 values[:, self.quantiles.index(lower)],
                 values[:, self.quantiles.index(upper)])
 
+    def on_validation_epoch_start(self):
+        # Plain epoch state avoids DDP's model-buffer broadcasts overwriting
+        # a rank's running statistics between validation batches.
+        self._validation_median_totals = torch.zeros(
+            2, device=self.device, dtype=torch.float64,
+        )
+
+    def on_validation_epoch_end(self):
+        totals = self._validation_median_totals.clone()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(totals)
+        if totals[1] == 0:
+            return
+        mse = totals[0] / totals[1]
+        rmse = torch.sqrt(mse)
+        self.log_dict({
+            'val/mse': mse,
+            'val/rmse': rmse,
+            'val/mse_dex2': mse * self.sxr_norm[1].square(),
+            'val/rmse_dex': rmse * self.sxr_norm[1],
+        }, on_step=False, on_epoch=True, logger=True, prog_bar=True, sync_dist=False)
+
+    def _pinball_loss_by_class(self, predictions, target_norm, target_raw):
+        """Return objective, class means/counts, and the ordinary sample mean."""
+        error = target_norm.reshape(-1, 1) - predictions
+        per_sample = torch.maximum(
+            self.quantile_levels * error,
+            (self.quantile_levels - 1) * error,
+        ).mean(dim=-1)
+        flux = target_raw.reshape(-1)
+        thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
+        indices = ((flux >= thresholds['c']).long()
+                   + (flux >= thresholds['m']).long()
+                   + (flux >= thresholds['x']).long())
+        sums = per_sample.new_zeros(4).scatter_add(0, indices, per_sample)
+        counts = per_sample.new_zeros(4).scatter_add(
+            0, indices, torch.ones_like(per_sample),
+        )
+        distributed = (torch.distributed.is_available()
+                       and torch.distributed.is_initialized())
+        if distributed:
+            # Count each class over the effective batch, including classes
+            # present on only one GPU. Detached statistics supply the common
+            # forward value; the local gradient is corrected for DDP averaging.
+            statistics = torch.stack((sums.detach(), counts))
+            torch.distributed.all_reduce(statistics)
+            global_sums, counts = statistics.unbind(0)
+        else:
+            global_sums = sums
+        present = counts > 0
+        class_means = global_sums / counts.clamp_min(1)
+        sample_mean = global_sums.sum() / counts.sum().clamp_min(1)
+        if self.class_reduction in ('sum', 'macro'):
+            divisor = present.sum() if self.class_reduction == 'macro' else 1
+            objective = class_means.sum() / divisor
+            local_objective = (sums / counts.clamp_min(1)).sum() / divisor
+        else:
+            objective = sample_mean
+            local_objective = sums.sum() / counts.sum().clamp_min(1)
+        if distributed:
+            objective = objective.detach() + torch.distributed.get_world_size() * (
+                local_objective - local_objective.detach()
+            )
+        return objective, class_means, counts, sample_mean
+
     def _calculate_loss(self, batch, mode):
         images, target_norm = batch
         raw_quantiles, predictions, _ = self.model(
             images, self.sxr_norm, return_attention=False,
         )
         target_norm = target_norm.reshape(-1)
-        error = target_norm.unsqueeze(-1) - predictions
-        pinball_loss = torch.maximum(
-            self.quantile_levels * error,
-            (self.quantile_levels - 1) * error,
-        ).mean()
         target_raw = unnormalize_sxr(target_norm, self.sxr_norm)
+        pinball_loss, class_losses, class_counts, sample_mean = self._pinball_loss_by_class(
+            predictions, target_norm, target_raw,
+        )
         median = predictions[:, self.quantiles.index(0.5)]
         signed_error = (median - target_norm).mean()
         bias_penalty = mean_class_signed_error_penalty(
@@ -1603,6 +1673,13 @@ class CoupledPinballViTLocal(pl.LightningModule):
         on_step = mode == 'train'
         self.log(f'{mode}/pinball_loss', pinball_loss, on_step=on_step,
                  on_epoch=True, logger=True, sync_dist=True)
+        self.log(f'{mode}/pinball_sample_mean', sample_mean, on_step=on_step,
+                 on_epoch=True, logger=True, sync_dist=True)
+        for i, name in enumerate(self.LOSS_CLASS_NAMES):
+            if class_counts[i] > 0:
+                self.log(f'{mode}/pinball_class/{name}', class_losses[i],
+                         on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
+                         batch_size=int(class_counts[i].item()))
         self.log(f'{mode}/bias_dex', signed_error * self.sxr_norm[1],
                  on_step=on_step, on_epoch=True, logger=True, sync_dist=True)
         self.log(f'{mode}/bias_penalty', bias_penalty, on_step=on_step,
@@ -1610,6 +1687,12 @@ class CoupledPinballViTLocal(pl.LightningModule):
         self.log(f'{mode}/total_loss', loss, on_step=on_step,
                  on_epoch=True, logger=True, sync_dist=True)
         if mode == 'val':
+            if not hasattr(self, '_validation_median_totals'):
+                self.on_validation_epoch_start()
+            residual = median.detach().double() - target_norm.detach().double()
+            self._validation_median_totals += torch.stack((
+                residual.square().sum(), residual.new_tensor(residual.numel()),
+            ))
             self.log('val_total_loss', loss, on_step=False, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
             return {

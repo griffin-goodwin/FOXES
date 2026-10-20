@@ -619,10 +619,54 @@ any reversed adjacent global quantile pair. `mean_adjacent_crossing_dex`
 averages the reversal magnitude over all examples and adjacent pairs, including
 zero for ordered pairs. These diagnostics do not change the loss or reorder
 predictions; returned interval endpoints can cross.
-`pinball.bias_penalty_weight` adds the existing class bias penalty to the
-median; tune it against validation pinball loss and coverage because it can
-shift the median away from its quantile objective. Pinball loss itself is
-unweighted across samples. Quantile checkpoints can be restored directly with
+`pinball.class_reduction: sum` (the default) first averages the five quantile
+losses per example, then averages examples within quiet/C/M/X, then sums
+the four class losses. Quiet is flux below `1e-6`, C is
+`[1e-6, 1e-5)`, M is `[1e-5, 1e-4)`, and X is `>=1e-4` W/m². Missing bins
+contribute zero; distributed training combines class counts across ranks before
+reducing the loss. Set `class_reduction: macro` to average the represented
+class losses, or `sample_mean` for an ordinary average across examples.
+`train/pinball_class/<class>` reports the individual bin losses and
+`train/pinball_sample_mean` preserves the ordinary sample average as a diagnostic.
+Validation also reports `val_quantile/pinball_class_sum` and
+`val_quantile/pinball_macro_loss`, computed from full-epoch class means, and
+`val_quantile/pinball_sample_mean`. Summing raises the pinball loss scale
+relative to the optional bias penalty compared with averaging class losses.
+
+`sampling.stratified_batches: true` is enabled in the pinball training config.
+It puts nearly equal numbers of quiet/C/M/X examples in every training batch
+on each rank. At the default batch size of 52, that is 13 examples per class.
+Examples within each class are shuffled, and an exhausted class pool is
+reshuffled and reused. Extra slots for batch sizes not divisible by four
+rotate between classes. Set this option to `false` to use ordinary shuffled
+training batches. All four training classes must exist and the per-rank batch
+size must be at least four; missing classes produce an explicit error.
+
+The sampler's default epoch contains
+`ceil(training_size / (batch_size * world_size))` full batches per rank.
+It keeps the number of training draws close to an ordinary epoch, so an epoch
+can use a subset of the majority class while reusing rare examples. Override
+`sampling.batches_per_epoch` to choose a different duration. `sampling.seed`
+is optional and defaults to the run's top-level `seed`; each epoch reshuffles
+reproducibly. Distributed ranks draw from a common class sequence and receive
+different slices; reuse between ranks is possible when a class pool runs out.
+Lightning advances the sampler's epoch automatically. Stratification applies
+only to training; validation and test loaders retain the natural class mix.
+
+`val/mse` and `val/rmse` use the q=0.5 median prediction in normalized log10
+flux. They are computed from the full validation set's summed squared errors
+and sample count, including all distributed ranks; RMSE is the square root
+of that overall MSE. `val/mse_dex2` and `val/rmse_dex` give the corresponding
+log10-flux units. These median metrics are sample averages, independent of
+the pinball class reduction, and are logged even when quantile callbacks are disabled.
+
+Class balancing changes the target weighting, so nominal quantile coverage on
+naturally distributed data must still be evaluated. Coverage grouped by the
+observed flare class is descriptive; it is not required to equal the quantile
+level within each outcome-defined bin. `pinball.bias_penalty_weight` adds the
+existing class bias penalty to the median; tune it against validation pinball
+loss and coverage because it can shift the median away from its quantile objective.
+Quantile checkpoints can be restored directly with
 `CoupledPinballViTLocal.load_from_checkpoint(...)`; the public inference API
 currently supports deterministic and Gaussian checkpoints.
 

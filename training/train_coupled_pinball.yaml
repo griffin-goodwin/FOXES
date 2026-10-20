@@ -3,10 +3,20 @@ base_config: train_coupled_gaussian.yaml
 model_type: coupled_pinball
 mean_loss:
   class_weighting: none
+sampling:
+  # Nearly equal quiet/C/M/X counts in every training batch; allow reuse.
+  stratified_batches: true
+  # Optional seed override; omitted uses the top-level run seed.
+  # seed: 42
+  # null keeps approximately the original epoch length; counts are per rank.
+  batches_per_epoch: null
 pinball:
   # Median, central 68% interval, and central 90% interval.
   # For a central 95% outer interval, use 0.025 and 0.975 instead.
   quantiles: [0.05, 0.16, 0.5, 0.84, 0.95]
+  # Average examples within quiet/C/M/X, then sum the four class losses.
+  # Use sample_mean for the ordinary unweighted baseline.
+  class_reduction: sum
   # Adds squared class-specific signed bias of the median to pinball loss.
   bias_penalty_weight: 0.0
 callbacks:
@@ -22,7 +32,7 @@ data:
 wandb:
   run_name: Local-Global-Five-Quantile-Pinball
   notes: Five directly learned quantiles using the local patch backbone and
-    single-query global correction. Pinball loss with optional median class
+    single-query global correction. Class-binned pinball loss with optional median class
     bias penalty. Gaussian uncertainty settings inherited from the base are
     unused by this model type.
   tags: [local-9, four-blocks, single-query-global, pinball, five-quantiles]

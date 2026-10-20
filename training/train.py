@@ -326,6 +326,7 @@ def main():
     sxr_norm = np.load(data_cfg['sxr_norm_path'])
     optimizer_cfg = config.get('optimizer', {})
     loss_cfg = config.get('loss', {})
+    sampling_cfg = config.get('sampling', {})
 
     data_module = AIAGOESDataModule(
         aia_train_dir=data_cfg['aia_dir'] + '/train',
@@ -339,6 +340,9 @@ def main():
         sxr_norm=sxr_norm,
         aia_norm_path=data_cfg.get('aia_norm_path'),
         wavelengths=config['wavelengths'],
+        stratified_batches=sampling_cfg.get('stratified_batches', False),
+        sampling_seed=sampling_cfg.get('seed', config.get('seed', 42)),
+        train_batches_per_epoch=sampling_cfg.get('batches_per_epoch'),
     )
     data_module.setup()
 
@@ -358,6 +362,7 @@ def main():
                 'quantiles', (0.05, 0.16, 0.5, 0.84, 0.95),
             ),
             uncertainty_kwargs=uncertainty_cfg,
+            class_reduction=config.get('pinball', {}).get('class_reduction', 'sum'),
         )
     elif model_type in COUPLED_MODEL_TYPES:
         model = CoupledGaussianViTLocal(

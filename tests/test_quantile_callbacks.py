@@ -77,6 +77,27 @@ def test_global_crossing_metrics_preserve_original_predictions(model):
     torch.testing.assert_close(predictions, original)
 
 
+def test_epoch_pinball_macro_uses_quiet_c_m_x_bins(model):
+    logged = {}
+    model.log_dict = lambda metrics, **kwargs: logged.update(metrics)
+    trainer = SimpleNamespace(sanity_checking=False)
+    metrics = callbacks.QuantileValidationMetrics()
+    metrics.on_validation_epoch_start(trainer, model)
+    for i, (target, raw) in enumerate((
+        (torch.ones(3), torch.full((3,), 1e-7)),
+        (torch.tensor([3.]), torch.tensor([1e-4])),
+    )):
+        metrics.on_validation_batch_end(trainer, model, {
+            'quantiles_norm': torch.zeros(len(target), 5),
+            'target_norm': target, 'target_raw': raw,
+        }, None, i)
+    metrics.on_validation_epoch_end(trainer, model)
+    assert logged['val_quantile/pinball_macro_loss'] == pytest.approx(1.0)
+    assert logged['val_quantile/pinball_class_sum'] == pytest.approx(2.0)
+    assert logged['val_quantile/pinball_sample_mean'] == pytest.approx(.75)
+    assert logged['val_quantile_class/quiet/count'] == 3
+
+
 def test_quantile_callback_logs_every_head_and_restores_training(model, tmp_path, monkeypatch):
     flux = torch.tensor([5e-8, 5e-7, 2e-6, 2e-5, 2e-4])
     dataset = TensorDataset(torch.rand(5, 2, 2, 1), normalize_sxr(flux, model.sxr_norm))
@@ -139,6 +160,7 @@ def test_gaussian_per_class_uncertainty_metrics_still_include_nll(model):
 
 def test_pinball_training_config_wires_quantile_callbacks():
     config = load_training_config('training/train_coupled_pinball.yaml')
+    assert config['pinball']['class_reduction'] == 'sum'
     data = SimpleNamespace(val_ds=[])
     _, loss_options = configure_class_weights(config, data, 'coupled_pinball')
     assert loss_options == {'bias_penalty_weight': 0.0}
@@ -162,3 +184,8 @@ def test_lightning_training_and_validation_with_quantile_metrics(model, tmp_path
     trainer.fit(model, train_dataloaders=loader, val_dataloaders=loader)
     assert 'val_quantile/q0.05/coverage' in trainer.callback_metrics
     assert torch.isfinite(trainer.callback_metrics['val_total_loss'])
+    assert 'val/mse' in trainer.callback_metrics
+    assert 'val/rmse' in trainer.callback_metrics
+    torch.testing.assert_close(
+        trainer.callback_metrics['val/rmse'].square(), trainer.callback_metrics['val/mse'],
+    )

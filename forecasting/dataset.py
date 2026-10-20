@@ -10,6 +10,8 @@ import os
 from time import perf_counter
 from tqdm import tqdm
 
+from forecasting.sampling import StratifiedFlareClassSampler, training_flare_class_indices
+
 SXR_LOG_OFFSET = 1e-8
 
 
@@ -334,12 +336,23 @@ class AIAGOESDataModule(LightningDataModule):
         NPZ or CSV containing per-wavelength AIA normalization parameters.
     batch_size, num_workers : int
     wavelengths : list of int
+    stratified_batches : bool
+        Balance quiet/C/M/X in training batches, reusing exhausted class pools.
+    sampling_seed : int
+        Seed shared across ranks; epoch changes reshuffle the sampler.
+    train_batches_per_epoch : int or None
+        Optional number of full stratified training batches per rank.
     """
 
     def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,
                  sxr_norm, aia_norm_path=None, batch_size=64, num_workers=4,
-                 wavelengths=AIA_WAVELENGTHS):
+                 wavelengths=AIA_WAVELENGTHS, stratified_batches=False,
+                 sampling_seed=0, train_batches_per_epoch=None):
         super().__init__()
+        if not isinstance(stratified_batches, bool):
+            raise ValueError('stratified_batches must be true or false')
+        if not stratified_batches and train_batches_per_epoch is not None:
+            raise ValueError('train_batches_per_epoch requires stratified_batches=true')
         self.aia_train_dir = aia_train_dir
         self.aia_val_dir = aia_val_dir
         self.aia_test_dir = aia_test_dir
@@ -351,6 +364,10 @@ class AIAGOESDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.wavelengths = wavelengths
+        self.stratified_batches = stratified_batches
+        self.sampling_seed = sampling_seed
+        self.train_batches_per_epoch = train_batches_per_epoch
+        self._class_indices_dataset = None
 
     def setup(self, stage=None):
         sxr_transform = SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1])
@@ -373,7 +390,20 @@ class AIAGOESDataModule(LightningDataModule):
         )
 
     def train_dataloader(self):
-        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
+        sampler = None
+        if self.stratified_batches:
+            if self._class_indices_dataset is not self.train_ds:
+                distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+                self._training_class_indices = training_flare_class_indices(
+                    self.train_ds, show_progress=not distributed or torch.distributed.get_rank() == 0,
+                )
+                self._class_indices_dataset = self.train_ds
+            sampler = StratifiedFlareClassSampler(
+                self.train_ds, self._training_class_indices, self.batch_size,
+                seed=self.sampling_seed, batches_per_epoch=self.train_batches_per_epoch,
+            )
+        return DataLoader(self.train_ds, batch_size=self.batch_size,
+                          sampler=sampler, shuffle=sampler is None,
                           num_workers=self.num_workers, prefetch_factor=4 if self.num_workers else None)
 
     def val_dataloader(self):
