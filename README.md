@@ -580,6 +580,52 @@ python training/train.py --config training/train_coupled_gaussian.yaml
 Training logs to Weights & Biases and saves checkpoints to
 `data.checkpoints_dir`.
 
+To train five quantiles with the same local backbone and global correction,
+edit the data and W&B settings inherited by `training/train_coupled_pinball.yaml`,
+then run:
+
+```bash
+python training/train.py --config training/train_coupled_pinball.yaml
+```
+
+Set `pinball.quantiles` before training. The default
+`[0.05, 0.16, 0.5, 0.84, 0.95]` gives a median and nominal central 68% and 90%
+intervals. Use `[0.025, 0.16, 0.5, 0.84, 0.975]` for 68% and 95% intervals.
+These are probability levels, not GOES class boundaries. Actual coverage must
+be checked on held-out data. This follows the quantile and interval definitions
+in [Forecasting: Principles and Practice](https://otexts.com/fpp3/toolbox.html#quantile-scores).
+All five levels must increase and include `0.5`.
+
+W&B receives one prediction-versus-truth panel per quantile, a table of the
+individual predictions, and local/corrected contribution maps on a shared color
+scale. These maps are learned contributions to global quantiles, supervised by
+whole-image SXR targets; they are not calibrated pixel-level uncertainty.
+Each head keeps its own spatial allocation without sorting patch values.
+A higher global quantile can assign less flux to one patch and more to another.
+The maps provide different model decompositions of the predicted total;
+they are not independent ensemble members or samples from a learned joint
+distribution of spatial flux.
+Configure the plots with `callbacks.sxr_plot_enabled`, `quantile_maps_enabled`,
+`quantile_maps_num_samples`, and `quantile_log_every_n_epochs`.
+
+`QuantileValidationMetrics` logs each quantile's empirical coverage, calibration
+error, and pinball loss, plus interval coverage, over the entire validation set
+and separately by flare class. The stratified examples shown in the figures are
+not used to estimate full-set coverage. For example,
+`val_quantile/q0.95/coverage` should approach `0.95` for a calibrated forecast
+with continuous targets. Inspect the class counts when assessing rare flares.
+`val_quantile/crossing_rate` measures the fraction of validation examples with
+any reversed adjacent global quantile pair. `mean_adjacent_crossing_dex`
+averages the reversal magnitude over all examples and adjacent pairs, including
+zero for ordered pairs. These diagnostics do not change the loss or reorder
+predictions; returned interval endpoints can cross.
+`pinball.bias_penalty_weight` adds the existing class bias penalty to the
+median; tune it against validation pinball loss and coverage because it can
+shift the median away from its quantile objective. Pinball loss itself is
+unweighted across samples. Quantile checkpoints can be restored directly with
+`CoupledPinballViTLocal.load_from_checkpoint(...)`; the public inference API
+currently supports deterministic and Gaussian checkpoints.
+
 ---
 
 ## Citation

@@ -1,0 +1,28 @@
+# Reuse the Gaussian model's local backbone and single-query global correction.
+base_config: train_coupled_gaussian.yaml
+model_type: coupled_pinball
+mean_loss:
+  class_weighting: none
+pinball:
+  # Median, central 68% interval, and central 90% interval.
+  # For a central 95% outer interval, use 0.025 and 0.975 instead.
+  quantiles: [0.05, 0.16, 0.5, 0.84, 0.95]
+  # Adds squared class-specific signed bias of the median to pinball loss.
+  bias_penalty_weight: 0.0
+callbacks:
+  sxr_plot_enabled: true
+  sxr_plot_num_samples: 100
+  quantile_metrics_enabled: true
+  quantile_maps_enabled: true
+  quantile_maps_num_samples: 5
+  quantile_log_every_n_epochs: 1
+  spatial_uncertainty_enabled: false
+data:
+  checkpoints_dir: ./foxes_data/checkpoints/coupled_pinball/
+wandb:
+  run_name: Local-Global-Five-Quantile-Pinball
+  notes: Five directly learned quantiles using the local patch backbone and
+    single-query global correction. Pinball loss with optional median class
+    bias penalty. Gaussian uncertainty settings inherited from the base are
+    unused by this model type.
+  tags: [local-9, four-blocks, single-query-global, pinball, five-quantiles]

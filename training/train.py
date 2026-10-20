@@ -1,4 +1,4 @@
-"""Train the released deterministic or coupled Gaussian FOXES model."""
+"""Train deterministic, coupled Gaussian, or coupled pinball FOXES models."""
 
 import argparse
 import os
@@ -18,16 +18,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.dataset import AIAGOESDataModule
 from forecasting.model import (
-    CoupledGaussianViTLocal, ViTLocal, SXRRegressionDynamicLoss,
+    CoupledGaussianViTLocal, CoupledPinballViTLocal, ViTLocal, SXRRegressionDynamicLoss,
 )
 from training.callbacks import (
     AttentionMapCallback, ImagePredictionLogger_SXR,
     PerClassValidationMetrics, SpatialUncertaintyMapCallback,
+    QuantilePredictionCallback, QuantileValidationMetrics,
 )
 from training.strategies import TrainingStreamDDPStrategy
 
 COUPLED_MODEL_TYPES = frozenset({
     'coupled_uncertainty', 'og_uncertainty', 'uncertainty_coupled_single_query',
+    'coupled_pinball',
 })
 FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
 
@@ -140,6 +142,12 @@ def get_four_class_macro_weights(data_module, exponent=1.0,
 
 def configure_class_weights(config, data_module, model_type):
     """Compute mean-loss class weights once for either maintained model."""
+    if model_type == 'coupled_pinball':
+        if config.get('mean_loss', {}).get('class_weighting', 'none') != 'none':
+            raise ValueError('coupled_pinball requires mean_loss.class_weighting: none')
+        return None, {'bias_penalty_weight': config.get('pinball', {}).get(
+            'bias_penalty_weight', config.get('mean_loss', {}).get('bias_penalty_weight', 0.0),
+        )}
     coupled = model_type in COUPLED_MODEL_TYPES
     mean_loss = config.get('mean_loss', {})
     uncertainty = dict(config.get('uncertainty', {}))
@@ -233,28 +241,36 @@ def build_checkpoint_callback(config_data, checkpoint_config):
 
 
 def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
-    """Build the callback set shared by both trainable model types.
-
-    Per-class metrics, prediction plots, and attention plots use adaptive
-    callback interfaces and are identical for the deterministic and
-    uncertainty models. Only the spatial uncertainty map is model-specific.
-    """
+    """Build mean, Gaussian, or quantile diagnostics for the selected model."""
     callbacks_cfg = config_data.get('callbacks', {})
     callbacks = []
     if callbacks_cfg.get('per_class_metrics_enabled', True):
         callbacks.append(PerClassValidationMetrics())
-    if callbacks_cfg.get('sxr_plot_enabled', True):
+    patch_size = config_data.get('vit_architecture', {}).get('patch_size', 8)
+    if model_type == 'coupled_pinball':
+        if callbacks_cfg.get('quantile_metrics_enabled', True):
+            callbacks.append(QuantileValidationMetrics())
+        predictions_enabled = callbacks_cfg.get('sxr_plot_enabled', True)
+        maps_enabled = callbacks_cfg.get('quantile_maps_enabled', True)
+        if predictions_enabled or maps_enabled:
+            callbacks.append(QuantilePredictionCallback(
+                data_module.val_ds,
+                num_samples=callbacks_cfg.get('sxr_plot_num_samples', 100),
+                map_num_samples=callbacks_cfg.get('quantile_maps_num_samples', 5),
+                patch_size=patch_size,
+                log_every_n_epochs=callbacks_cfg.get('quantile_log_every_n_epochs', 1),
+                predictions_enabled=predictions_enabled, maps_enabled=maps_enabled,
+            ))
+    elif callbacks_cfg.get('sxr_plot_enabled', True):
         callbacks.append(ImagePredictionLogger_SXR(
             data_module.val_ds,
             callbacks_cfg.get('sxr_plot_num_samples', 4),
             sxr_norm,
         ))
 
-    patch_size = config_data.get('vit_architecture', {}).get(
-        'patch_size', 8
-    )
     if (
         model_type in COUPLED_MODEL_TYPES
+        and model_type != 'coupled_pinball'
         and config_data.get('uncertainty', {}).get('enabled', True)
         and callbacks_cfg.get('spatial_uncertainty_enabled', False)
     ):
@@ -288,7 +304,7 @@ def main():
     if model_type not in COUPLED_MODEL_TYPES | {'deterministic'}:
         raise ValueError(
             f'Unsupported model_type {model_type!r}; use deterministic or '
-            'coupled_uncertainty. Older experiments use '
+            'coupled_uncertainty or coupled_pinball. Older experiments use '
             'python -m training.experimental.train.'
         )
     checkpoint_cfg = config.get('checkpoint', {})
@@ -332,18 +348,27 @@ def main():
     common_kwargs = dict(
         model_kwargs=config['vit_architecture'],
         sxr_norm=sxr_norm,
-        base_weights=base_weights,
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
     )
-    if model_type in COUPLED_MODEL_TYPES:
+    if model_type == 'coupled_pinball':
+        model = CoupledPinballViTLocal(
+            **common_kwargs,
+            quantiles=config.get('pinball', {}).get(
+                'quantiles', (0.05, 0.16, 0.5, 0.84, 0.95),
+            ),
+            uncertainty_kwargs=uncertainty_cfg,
+        )
+    elif model_type in COUPLED_MODEL_TYPES:
         model = CoupledGaussianViTLocal(
             **common_kwargs,
+            base_weights=base_weights,
             uncertainty_kwargs=uncertainty_cfg,
         )
     else:
         model = ViTLocal(
             **common_kwargs,
+            base_weights=base_weights,
             bias_penalty_weight=config.get('mean_loss', {}).get(
                 'bias_penalty_weight', 0.0,
             ),

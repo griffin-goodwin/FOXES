@@ -109,6 +109,7 @@ class PerClassValidationMetrics(Callback):
     def on_validation_epoch_start(self, trainer, pl_module):
         self.has_uncertainty = bool(
             getattr(pl_module, 'predicts_uncertainty', False)
+            and getattr(pl_module, 'uncertainty_kind', None) == 'gaussian'
         )
         self.totals = torch.zeros(
             len(FLARE_CLASSES), self.METRIC_COUNT,
@@ -351,6 +352,234 @@ class ImagePredictionLogger_SXR(Callback):
         return fig
 
 
+class QuantileValidationMetrics(Callback):
+    """Measure quantile calibration on the full validation set and each class."""
+
+    def on_validation_epoch_start(self, trainer, pl_module):
+        self.levels = tuple(pl_module.quantiles)
+        self.pairs = [
+            (i, len(self.levels) - i - 1)
+            for i in range(len(self.levels) // 2)
+            if self.levels[i] < 0.5 < self.levels[-i - 1]
+        ]
+        # Rows: all validation examples, then the five flare classes.
+        # Columns: count, coverage and pinball for each q, interval counts,
+        # samples with global crossings, and summed adjacent crossing sizes.
+        self.totals = torch.zeros(
+            1 + len(FLARE_CLASSES), 3 + 2 * len(self.levels) + len(self.pairs),
+            device=pl_module.device, dtype=torch.float64,
+        )
+
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0,
+    ):
+        if not isinstance(outputs, dict) or 'quantiles_norm' not in outputs:
+            return
+        predictions = outputs['quantiles_norm']
+        target = outputs['target_norm'].reshape(-1, 1)
+        target_raw = outputs['target_raw'].reshape(-1)
+        levels = predictions.new_tensor(self.levels)
+        errors = target - predictions
+        pinball = torch.maximum(levels * errors, (levels - 1) * errors)
+        below = target <= predictions
+        crossing_sizes = torch.relu(predictions[:, :-1] - predictions[:, 1:])
+        crossed = (crossing_sizes > 0).any(dim=1)
+        masks = [torch.ones_like(target_raw, dtype=torch.bool)] + [
+            (target_raw >= lower) & (target_raw < upper)
+            for _, lower, upper in FLARE_CLASSES
+        ]
+        for row, mask in enumerate(masks):
+            values = [mask.sum().reshape(1), below[mask].sum(dim=0),
+                      pinball[mask].sum(dim=0)]
+            for lower, upper in self.pairs:
+                covered = ((target[:, 0] >= predictions[:, lower])
+                           & (target[:, 0] <= predictions[:, upper]))
+                values.append(covered[mask].sum().reshape(1))
+            values.extend((crossed[mask].sum().reshape(1),
+                           crossing_sizes[mask].sum().reshape(1)))
+            self.totals[row] += torch.cat(values).to(torch.float64)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        totals = self.totals.clone()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        metrics = {}
+        count_q = len(self.levels)
+        for row, name in enumerate(('all', *(c[0] for c in FLARE_CLASSES))):
+            count = totals[row, 0].item()
+            if count == 0:
+                continue
+            prefix = 'val_quantile' if row == 0 else f'val_quantile_class/{name}'
+            metrics[f'{prefix}/count'] = count
+            metrics[f'{prefix}/crossing_rate'] = (totals[row, -2] / count).item()
+            metrics[f'{prefix}/mean_adjacent_crossing_dex'] = (
+                totals[row, -1] / (count * (count_q - 1))
+            ).item() * float(pl_module.sxr_norm[1].item())
+            for i, level in enumerate(self.levels):
+                observed = (totals[row, 1 + i] / count).item()
+                metrics[f'{prefix}/q{level:g}/coverage'] = observed
+                metrics[f'{prefix}/q{level:g}/calibration_error'] = observed - level
+                metrics[f'{prefix}/q{level:g}/pinball_loss'] = (
+                    totals[row, 1 + count_q + i] / count
+                ).item()
+            for i, (lower, upper) in enumerate(self.pairs):
+                key = f'{prefix}/interval_{self.levels[lower]:g}_{self.levels[upper]:g}'
+                metrics[f'{key}/coverage'] = (
+                    totals[row, 1 + 2 * count_q + i] / count
+                ).item()
+        pl_module.log_dict(metrics, on_step=False, on_epoch=True,
+                           logger=True, sync_dist=False)
+
+
+class QuantilePredictionCallback(Callback):
+    """Log individual global quantiles and local/corrected contribution maps.
+
+    Plots use a stratified subset for visibility; calibration metrics come
+    from QuantileValidationMetrics over the full validation set.
+    """
+
+    def __init__(self, val_ds, num_samples=100, map_num_samples=5,
+                 patch_size=8, log_every_n_epochs=1,
+                 predictions_enabled=True, maps_enabled=True):
+        super().__init__()
+        if min(num_samples, map_num_samples, patch_size, log_every_n_epochs) <= 0:
+            raise ValueError('quantile callback sample counts and frequency must be positive')
+        self.val_ds = val_ds
+        self.num_samples = num_samples
+        self.map_num_samples = map_num_samples
+        self.patch_size = patch_size
+        self.log_every_n_epochs = log_every_n_epochs
+        self.predictions_enabled = predictions_enabled
+        self.maps_enabled = maps_enabled
+
+    @staticmethod
+    def plot_predictions(target_raw, predictions_raw, quantiles):
+        """One parity panel per quantile, with identical axes in physical units."""
+        values = np.concatenate((target_raw.reshape(-1), predictions_raw.reshape(-1)))
+        positive = values[np.isfinite(values) & (values > 0)]
+        lower = min(1e-8, positive.min() / 1.2) if positive.size else 1e-8
+        upper = max(1e-3, positive.max() * 1.2) if positive.size else 1e-3
+        fig, axes = plt.subplots(
+            1, len(quantiles), figsize=(3.8 * len(quantiles), 4.2),
+            sharex=True, sharey=True, layout='constrained',
+        )
+        for i, (axis, level) in enumerate(zip(np.atleast_1d(axes), quantiles)):
+            axis.plot([lower, upper], [lower, upper], '--', color='0.5', linewidth=1)
+            axis.scatter(target_raw, predictions_raw[:, i], s=15, alpha=0.65,
+                         color='#0072B2')
+            axis.set(xscale='log', yscale='log', xlim=(lower, upper), ylim=(lower, upper),
+                     title=f'q = {level:g}', xlabel='True SXR flux [W/m²]')
+        np.atleast_1d(axes)[0].set_ylabel('Predicted SXR flux [W/m²]')
+        fig.suptitle('Individual quantile predictions — class-stratified validation sample')
+        return fig
+
+    @staticmethod
+    def plot_maps(image, local_patches, corrected_patches, quantiles, patch_size,
+                  target_raw, aia_transform=None):
+        """Use one color scale for every quantile and both correction stages."""
+        height, width = image.shape[:2]
+        shape = (height // patch_size, width // patch_size, len(quantiles))
+        local = local_patches.detach().cpu().float().numpy().reshape(shape)
+        corrected = corrected_patches.detach().cpu().float().numpy().reshape(shape)
+        positive = np.concatenate((local.reshape(-1), corrected.reshape(-1)))
+        positive = positive[np.isfinite(positive) & (positive > 0)]
+        norm = (LogNorm(vmin=positive.min(), vmax=positive.max())
+                if positive.size and positive.max() > positive.min() else None)
+        fig, axes = plt.subplots(
+            2, 1 + len(quantiles), figsize=(3.1 * (len(quantiles) + 1), 6.8),
+            layout='constrained',
+        )
+        axes[0, 0].imshow(AttentionMapCallback._display_image(image, aia_transform))
+        axes[0, 0].set_title('AIA input')
+        axes[1, 0].text(
+            0.05, 0.65, f'True SXR flux\n{target_raw:.2e} W/m²\n\n'
+            'Maps are additive\ncontributions to global\nquantile predictions.',
+            transform=axes[1, 0].transAxes, va='center', fontsize=11,
+        )
+        for row, (maps, label) in enumerate(((local, 'Local'), (corrected, 'Corrected'))):
+            for i, level in enumerate(quantiles):
+                plotted = axes[row, i + 1].imshow(
+                    maps[:, :, i], norm=norm, cmap='viridis', interpolation='nearest',
+                )
+                axes[row, i + 1].set_title(
+                    f'{label} q={level:g}\nsum={maps[:, :, i].sum():.2e} W/m²',
+                    fontsize=11,
+                )
+        for axis in axes.flat:
+            axis.axis('off')
+        fig.colorbar(plotted, ax=axes[:, 1:].ravel().tolist(),
+                     label='Patch contribution [W/m²]', shrink=0.85)
+        fig.suptitle('Local and globally corrected quantile contributions')
+        return fig
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if (trainer.sanity_checking or not trainer.is_global_zero
+                or trainer.current_epoch % self.log_every_n_epochs
+                or trainer.logger is None or len(self.val_ds) == 0):
+            return
+        count = max(self.num_samples if self.predictions_enabled else 0,
+                    self.map_num_samples if self.maps_enabled else 0)
+        if count == 0:
+            return
+        indices = stratified_validation_indices(self.val_ds, count)
+        map_indices = set(stratified_validation_indices(self.val_ds, self.map_num_samples)
+                          if self.maps_enabled else [])
+        # Include every map example while forwarding each selected image once.
+        indices = list(dict.fromkeys([*indices, *sorted(map_indices)]))
+        targets, predictions = [], []
+        was_training = pl_module.training
+        pl_module.eval()
+        try:
+            with torch.no_grad():
+                for index in indices:
+                    image, target = self.val_ds[index]
+                    raw, _, patches, local = pl_module.model(
+                        image.unsqueeze(0).to(pl_module.device), pl_module.sxr_norm,
+                        return_local=True,
+                    )
+                    target_raw = float(unnormalize_sxr(
+                        torch.as_tensor(target, device=pl_module.device),
+                        pl_module.sxr_norm,
+                    ).item())
+                    targets.append(target_raw)
+                    predictions.append(raw[0].detach().cpu().numpy())
+                    if index in map_indices:
+                        figure = self.plot_maps(
+                            image, local[0], patches[0], pl_module.quantiles,
+                            self.patch_size, target_raw,
+                            getattr(self.val_ds, 'aia_transform', None),
+                        )
+                        try:
+                            trainer.logger.experiment.log({
+                                'Quantile spatial maps': wandb.Image(figure),
+                                'epoch': trainer.current_epoch,
+                            })
+                        finally:
+                            plt.close(figure)
+            if self.predictions_enabled:
+                figure = self.plot_predictions(
+                    np.asarray(targets), np.asarray(predictions), pl_module.quantiles,
+                )
+                try:
+                    trainer.logger.experiment.log({
+                        'Quantile predictions': wandb.Image(figure),
+                        'Quantile prediction values': wandb.Table(
+                            columns=['validation_index', 'true_flux', *[
+                                f'q{q:g}_flux' for q in pl_module.quantiles
+                            ]],
+                            data=[[index, target, *map(float, predicted)]
+                                  for index, target, predicted in zip(indices, targets, predictions)],
+                        ),
+                        'epoch': trainer.current_epoch,
+                    })
+                finally:
+                    plt.close(figure)
+        finally:
+            pl_module.train(was_training)
+
+
 class AttentionMapCallback(Callback):
     """
     PyTorch Lightning callback for visualizing transformer attention maps
@@ -404,7 +633,13 @@ class AttentionMapCallback(Callback):
             for sample_idx, sample in enumerate(samples):
                 img = sample[0].unsqueeze(0).to(pl_module.device)
                 outputs = pl_module(img, return_attention=True)
-                if getattr(pl_module, 'predicts_uncertainty', False):
+                if getattr(pl_module, 'uncertainty_kind', None) == 'quantile':
+                    _, _, patch_quantiles, attention_weights = outputs
+                    median_index = pl_module.quantiles.index(0.5)
+                    patch_flux_raw = patch_quantiles[:, :, median_index]
+                    patch_uncertainty = None
+                    patch_uncertainty_title = None
+                elif getattr(pl_module, 'predicts_uncertainty', False):
                     (
                         _, _, attention_weights, patch_flux_raw,
                         patch_variance_raw,

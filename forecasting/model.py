@@ -1,4 +1,4 @@
-"""Core FOXES models: released deterministic and coupled single-query Gaussian."""
+"""Core FOXES models: deterministic and coupled Gaussian/pinball variants."""
 
 from collections import deque
 import math
@@ -1453,6 +1453,192 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             raise ValueError('No trainable parameters remain')
         optimizer = torch.optim.AdamW(
             trainable, lr=self.lr, weight_decay=self.weight_decay
+        )
+        scheduler = CosineAnnealingLR(optimizer, **self.scheduler_kwargs)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler, 'interval': 'epoch', 'frequency': 1,
+                'name': 'learning_rate',
+            },
+        }
+
+
+class CoupledQuantileVisionTransformerLocal(CoupledVisionTransformerLocal):
+    """Five patch quantile heads with the coupled local/global correction path."""
+
+    def __init__(self, *args, num_quantiles=5, **kwargs):
+        super().__init__(*args, uncertainty_enabled=False, **kwargs)
+        self.num_quantiles = num_quantiles
+        embed_dim = self.mlp_head[-1].in_features
+        correction_dim = self.global_patch_head[-1].in_features
+        self.mlp_head[-1] = nn.Linear(embed_dim, num_quantiles)
+        self.global_patch_head[-1] = nn.Linear(correction_dim, num_quantiles)
+        nn.init.zeros_(self.global_patch_head[-1].weight)
+        nn.init.zeros_(self.global_patch_head[-1].bias)
+
+    def forward(self, x, sxr_norm, return_attention=False, return_local=False):
+        embeddings, attention = self._encode_patch_embeddings(
+            x, return_attention,
+        )
+        _, patches, local_patches = self._patch_mean_from_embeddings(
+            embeddings, sxr_norm, images=x, return_local=True,
+        )
+        # Preserve each head's spatial allocation. Quantile ordering is a
+        # property of the global predictions, not of every patch contribution.
+        raw_quantiles = patches.sum(dim=1)
+        normalized_quantiles = normalize_sxr(raw_quantiles, sxr_norm)
+        outputs = (raw_quantiles, normalized_quantiles, patches)
+        if return_attention:
+            outputs += (attention,)
+        if return_local:
+            outputs += (local_patches,)
+        return outputs
+
+
+class CoupledPinballViTLocal(pl.LightningModule):
+    """Train five coupled patch quantiles with pinball and optional bias loss.
+
+    Uses the Gaussian model's local attention backbone, global query, and
+    per-patch global correction. Each of the five quantiles has its own local
+    flux and global correction output; there is no Gaussian scale head.
+    Head identities are preserved without sorting either local or corrected
+    maps. Global quantile crossings are monitored by validation callbacks.
+    ``uncertainty_kwargs['bias_penalty_weight']`` adds the same class-specific
+    signed-error penalty to the median used by the Gaussian model.
+    """
+
+    DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
+    predicts_uncertainty = True
+    uncertainty_kind = 'quantile'
+    predicts_patch_uncertainty = False
+
+    def __init__(self, model_kwargs, sxr_norm,
+                 quantiles=(0.05, 0.16, 0.5, 0.84, 0.95),
+                 weight_decay=1e-5, scheduler_kwargs=None,
+                 uncertainty_kwargs=None):
+        super().__init__()
+        quantiles = tuple(quantiles)
+        if (len(quantiles) != 5 or any(
+            isinstance(q, bool) or not isinstance(q, (int, float))
+            or not math.isfinite(q) or not 0 < q < 1 for q in quantiles
+        ) or tuple(sorted(set(quantiles))) != quantiles or 0.5 not in quantiles):
+            raise ValueError('quantiles must contain five unique, increasing '
+                             'values in (0, 1), including 0.5')
+        network_kwargs = dict(uncertainty_kwargs or {})
+        if network_kwargs.pop('enabled', True) is not True:
+            raise ValueError('pinball model requires quantile heads enabled')
+        unknown = set(network_kwargs) - (
+            {'patch_flux_scale_multiplier',
+             'max_abs_log10_patch_multiplier', 'bias_penalty_weight'}
+        )
+        if unknown:
+            raise ValueError(f'Unsupported pinball settings: {sorted(unknown)}')
+        self.save_hyperparameters()
+        self.lr = model_kwargs.get('learning_rate', model_kwargs.get('lr', 1e-4))
+        filtered_kwargs = dict(model_kwargs)
+        for key in ('learning_rate', 'lr', 'num_classes'):
+            filtered_kwargs.pop(key, None)
+        self.model = CoupledQuantileVisionTransformerLocal(
+            **filtered_kwargs,
+            **{key: network_kwargs[key] for key in (
+                'patch_flux_scale_multiplier',
+                'max_abs_log10_patch_multiplier',
+            ) if key in network_kwargs},
+            num_quantiles=len(quantiles),
+        )
+        self.register_buffer(
+            'sxr_norm', torch.as_tensor(sxr_norm, dtype=torch.float32),
+        )
+        self.bias_penalty_weight = validate_bias_penalty_weight(
+            network_kwargs.get('bias_penalty_weight', 0.0)
+        )
+        self.weight_decay = weight_decay
+        self.scheduler_kwargs = {
+            **self.DEFAULT_SCHEDULER_KWARGS, **(scheduler_kwargs or {})
+        }
+        self.quantiles = quantiles
+        self.hparams['objective'] = 'pinball'
+        self.register_buffer(
+            'quantile_levels', torch.tensor(quantiles, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def forward(self, x, return_attention=False):
+        return self.model(x, self.sxr_norm, return_attention=return_attention)
+
+    def predict_quantiles(self, x):
+        """Return ``(batch, quantile)`` predictions in physical W/m^2."""
+        return self.forward(x)[0]
+
+    def predict_interval(self, x, lower=None, upper=None):
+        """Return median and selected raw quantile heads; bounds may cross."""
+        lower = self.quantiles[0] if lower is None else lower
+        upper = self.quantiles[-1] if upper is None else upper
+        if lower not in self.quantiles or upper not in self.quantiles or lower >= upper:
+            raise ValueError('interval bounds must be increasing trained quantiles')
+        values = self.predict_quantiles(x)
+        return (values[:, self.quantiles.index(0.5)],
+                values[:, self.quantiles.index(lower)],
+                values[:, self.quantiles.index(upper)])
+
+    def _calculate_loss(self, batch, mode):
+        images, target_norm = batch
+        raw_quantiles, predictions, _ = self.model(
+            images, self.sxr_norm, return_attention=False,
+        )
+        target_norm = target_norm.reshape(-1)
+        error = target_norm.unsqueeze(-1) - predictions
+        pinball_loss = torch.maximum(
+            self.quantile_levels * error,
+            (self.quantile_levels - 1) * error,
+        ).mean()
+        target_raw = unnormalize_sxr(target_norm, self.sxr_norm)
+        median = predictions[:, self.quantiles.index(0.5)]
+        signed_error = (median - target_norm).mean()
+        bias_penalty = mean_class_signed_error_penalty(
+            median, target_norm, target_raw, self.bias_penalty_weight,
+        )
+        loss = pinball_loss + bias_penalty
+        on_step = mode == 'train'
+        self.log(f'{mode}/pinball_loss', pinball_loss, on_step=on_step,
+                 on_epoch=True, logger=True, sync_dist=True)
+        self.log(f'{mode}/bias_dex', signed_error * self.sxr_norm[1],
+                 on_step=on_step, on_epoch=True, logger=True, sync_dist=True)
+        self.log(f'{mode}/bias_penalty', bias_penalty, on_step=on_step,
+                 on_epoch=True, logger=True, sync_dist=True)
+        self.log(f'{mode}/total_loss', loss, on_step=on_step,
+                 on_epoch=True, logger=True, sync_dist=True)
+        if mode == 'val':
+            self.log('val_total_loss', loss, on_step=False, on_epoch=True,
+                     prog_bar=True, logger=True, sync_dist=True)
+            return {
+                'loss': loss.detach(),
+                'mean_norm': median.detach(),
+                'target_norm': target_norm.detach(),
+                'target_raw': target_raw.detach(),
+                'prediction_raw': raw_quantiles[:, self.quantiles.index(0.5)].detach(),
+                'quantiles_norm': predictions.detach(),
+                'quantiles_raw': raw_quantiles.detach(),
+            }
+        if mode == 'train':
+            learning_rate = self.trainer.optimizers[0].param_groups[0]['lr']
+            self.log('train/learning_rate', learning_rate, on_step=True,
+                     on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._calculate_loss(batch, 'train')
+
+    def validation_step(self, batch, batch_idx):
+        return self._calculate_loss(batch, 'val')
+
+    def test_step(self, batch, batch_idx):
+        self._calculate_loss(batch, 'test')
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=self.lr, weight_decay=self.weight_decay,
         )
         scheduler = CosineAnnealingLR(optimizer, **self.scheduler_kwargs)
         return {
