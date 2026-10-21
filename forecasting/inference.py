@@ -33,10 +33,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from forecasting.dataset import AIAGOESDataset, AIANormTransform
 from forecasting.model import (
     CoupledGaussianViTLocal,
+    CoupledPinballViTLocal,
     ViTLocal,
     normalize_sxr,
     unnormalize_sxr,
 )
+from forecasting.quantiles import quantile_columns, quantile_label
 
 
 def _as_bool(value):
@@ -108,13 +110,15 @@ def _unwrap_model(model):
 
 
 def _auto_checkpoint_model_class(checkpoint):
-    """Select the released deterministic or maintained coupled Gaussian model."""
+    """Select the maintained deterministic, Gaussian, or pinball model."""
     state_dict = checkpoint.get('state_dict', {})
     state_keys = state_dict.keys()
     has_uncertainty_head = any(
         'patch_uncertainty_head' in key for key in state_keys
     )
     hyperparameters = checkpoint.get('hyper_parameters', {})
+    if hyperparameters.get('objective') == 'pinball':
+        return CoupledPinballViTLocal
     if ('model.global_query' in state_dict
             and hyperparameters.get('mean_parameterization') == 'positive'
             and not hyperparameters.get('model_kwargs', {}).get('independent_local_global', False)
@@ -264,7 +268,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     tuple
         Deterministic models retain the existing five-item tuple
         ``(prediction, ground_truth, attention_map, flux_map, global_index)``.
-        The uncertainty model appends an uncertainty dictionary as item six.
+        Uncertainty models append a dictionary as item six. Quantile models
+        use q0.5 for prediction/flux_map and include every raw and normalized
+        head in that dictionary. Their per-head maps are saved under
+        quantile_flux_path/q<probability>/<timestamp>.npy when save_flux=True.
     """
     model.eval()
     data_device = next(model.parameters()).device
@@ -282,6 +289,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     predicts_uncertainty = bool(
         getattr(base_model, 'predicts_uncertainty', False)
     )
+    is_quantile = getattr(base_model, 'uncertainty_kind', None) == 'quantile'
     loader_kwargs = {
         'batch_size': batch_size,
         'num_workers': num_workers,
@@ -325,6 +333,16 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     if save_flux and config_data.get('flux_path'):
         flux_dir = Path(config_data['flux_path'])
         flux_dir.mkdir(parents=True, exist_ok=True)
+    quantile_dirs = []
+    if is_quantile and save_flux:
+        quantile_root = config_data.get('quantile_flux_path')
+        if quantile_root is None and flux_dir is not None:
+            quantile_root = flux_dir.parent / 'quantile_flux'
+        if quantile_root:
+            for level in base_model.quantiles:
+                directory = Path(quantile_root) / quantile_label(level)
+                directory.mkdir(parents=True, exist_ok=True)
+                quantile_dirs.append(directory)
     uncertainty_dir = None
     if save_patch_uncertainty and config_data.get('patch_uncertainty_path'):
         uncertainty_dir = Path(config_data['patch_uncertainty_path'])
@@ -370,12 +388,31 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                     aia_imgs, return_attention=save_weights
                 )
 
-            # Gaussian and deterministic models intentionally have different
+            # Gaussian, quantile and deterministic models have different
             # tuple layouts. Branch explicitly so variance is never mistaken
             # for an attention or flux map.
             variance_normalized = None
             patch_variance_raw = None
-            if predicts_uncertainty:
+            quantile_patches = None
+            if is_quantile:
+                raw_quantiles, norm_quantiles, all_flux_contributions = pred[:3]
+                weights = pred[3] if save_weights else None
+                median_index = base_model.quantiles.index(0.5)
+                predictions = raw_quantiles[:, median_index:median_index + 1]
+                flux_contributions = (
+                    all_flux_contributions[:, :, median_index] if save_flux else None
+                )
+                quantile_patches = all_flux_contributions if quantile_dirs else None
+                uncertainty_batch = {
+                    'prediction_normalized': norm_quantiles[:, median_index],
+                    'quantile_crossing': (torch.diff(raw_quantiles, dim=1) < 0).any(dim=1),
+                }
+                for column, level in enumerate(base_model.quantiles):
+                    raw_name, normalized_name = quantile_columns(level)
+                    uncertainty_batch[raw_name] = raw_quantiles[:, column]
+                    uncertainty_batch[normalized_name] = norm_quantiles[:, column]
+                raw_quantiles = norm_quantiles = None
+            elif predicts_uncertainty:
                 if save_weights:
                     (
                         predictions, variance_normalized, weights,
@@ -445,6 +482,11 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 ).float().cpu().numpy()
 
             patch_std_maps_cpu = None
+            quantile_maps_cpu = None
+            if quantile_patches is not None:
+                quantile_maps_cpu = quantile_patches.detach().reshape(
+                    current_batch_size, grid_h, grid_w, len(base_model.quantiles)
+                ).float().cpu().numpy()
             if save_patch_uncertainty and patch_variance_raw is not None:
                 # Save the square root of each additive variance contribution.
                 patch_std_maps_cpu = torch.sqrt(
@@ -462,6 +504,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             all_flux_contributions = None
             variance_normalized = None
             patch_variance_raw = None
+            quantile_patches = None
 
             print(
                 f"Model batch {batch_idx + 1}/{len(loader)} ready in "
@@ -504,6 +547,12 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                             f"Warning: could not save Gaussian patch "
                             f"uncertainty for sample {global_idx}: {exc}"
                         )
+                if quantile_maps_cpu is not None:
+                    if times is None:
+                        raise ValueError('timestamps are required to save quantile maps')
+                    for column, directory in enumerate(quantile_dirs):
+                        np.save(directory / f'{times[global_idx]}.npy',
+                                quantile_maps_cpu[i, :, :, column])
                 uncertainty_data = None
                 if uncertainty_values_cpu is not None:
                     uncertainty_data = {
@@ -556,6 +605,7 @@ def load_model_from_config(config_data):
             'og_uncertainty': CoupledGaussianViTLocal,
             'uncertainty_coupled_single_query': CoupledGaussianViTLocal,
             'coupled_uncertainty': CoupledGaussianViTLocal,
+            'coupled_pinball': CoupledPinballViTLocal,
         }
         if requested_type == 'auto':
             checkpoint = torch.load(
@@ -568,7 +618,7 @@ def load_model_from_config(config_data):
             model_class = model_types[requested_type]
         else:
             raise ValueError(
-                "model_type must be auto, deterministic, or coupled_uncertainty (legacy coupled aliases also work)"
+                "model_type must be auto, deterministic, coupled_uncertainty, or coupled_pinball (legacy coupled aliases also work)"
             )
         print(f"Loading {model_class.__name__} model...")
         model = model_class.load_from_checkpoint(
@@ -670,7 +720,11 @@ def main():
         and bool(config_data.get('patch_uncertainty_path'))
         and not no_patch_uncertainty
     )
-    if predicts_uncertainty:
+    if getattr(base_model, 'uncertainty_kind', None) == 'quantile':
+        print(f'Quantile model detected: {base_model.quantiles}; CSV point prediction is q0.5.')
+        if save_flux:
+            print('Will save median flux maps and individual quantile contribution maps.')
+    elif predicts_uncertainty:
         print("Uncertainty model detected; global intervals will be saved to CSV.")
         if save_patch_uncertainty:
             if getattr(

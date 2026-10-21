@@ -33,20 +33,28 @@ data:
   aia_norm_path:   null  # set to the matching AIA normalization artifact if used in training
   checkpoint_path: "./foxes_data/checkpoints/your_model.ckpt"  # select your trained checkpoint
 
-# Detect the model type from the selected checkpoint.
+# Detect deterministic, coupled Gaussian, or coupled pinball checkpoints.
+# Explicit alternatives: deterministic, coupled_uncertainty, coupled_pinball.
 model_type: auto
 
 output_path: "./foxes_outputs/inference/predictions.csv"
 
-# Per-sample attention weights (64x64 CSV per timestamp). Set model_params.no_weights: true to skip.
+# Per-sample attention weights (NPY per timestamp). Set model_params.no_weights: true to skip.
 weight_path: "./foxes_outputs/inference_patch/weights/"
 
-# Per-patch flux contribution maps (64x64 CSV per timestamp) — saved automatically
+# Per-patch flux contribution maps (NPY per timestamp) — saved automatically
 # during inference whenever flux_path is set and model_params.no_flux is false (default).
 flux_path:   "./foxes_outputs/inference_patch/flux/"
 
-# The uncertainty model saves one per-patch standard-deviation NPY. Global
+# Pinball checkpoints also save each original head's contribution map here,
+# under q0.05/, q0.16/, etc., using the trained probabilities. no_flux skips both.
+# If omitted, defaults to flux_path's sibling quantile_flux/ directory.
+quantile_flux_path: "./foxes_outputs/inference_patch/quantile_flux/"
+
+# The Gaussian model saves one per-patch standard-deviation NPY. Global
 # 68%/95% intervals always go in the predictions CSV.
+# Pinball CSVs instead contain all raw/normalized quantile heads, their median,
+# and a crossing flag. They have no Gaussian variance or patch uncertainty maps.
 patch_uncertainty_path: "./foxes_outputs/inference_patch/patch_uncertainty/"
 
 model_params:

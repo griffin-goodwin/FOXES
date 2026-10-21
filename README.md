@@ -516,6 +516,16 @@ automatically alongside it whenever `flux_path` / `weight_path` are set in the
 config — set `model_params.no_flux: true` or `model_params.no_weights: true` to
 skip either.
 
+Pinball checkpoints are detected by `model_type: auto` (or choose
+`coupled_pinball`). The CSV's `predictions` column and `flux/` maps use q0.5.
+Each trained head is also saved as `prediction_q0.05` and
+`prediction_q0.05_normalized`, for example; probabilities come from the
+checkpoint. `quantile_crossing` flags any reversed adjacent global heads.
+With flux saving enabled, `quantile_flux_path` contains
+`q0.05/<timestamp>.npy`, etc., preserving each head's spatial contributions.
+Its default is `quantile_flux/` beside `flux_path`. No heads or patches are
+sorted, and no Gaussian variance is inferred from the quantiles.
+
 ### 3) Evaluate
 
 Edit `forecasting/evaluation_config.yaml` to point at the predictions
@@ -532,9 +542,35 @@ coverage, sharpness, and standardized-residual diagnostics for the full dataset
 and each Quiet/C/M/X class. The corresponding reliability curve and residual
 histogram are saved as `plots/uncertainty_calibration.png`.
 
+For pinball CSVs, point metrics use the median. Evaluation additionally writes:
+
+- `metrics/quantile_summary.csv`: median MSE/RMSE in checkpoint-normalized
+  space and dex, pinball sample means, the quiet/C/M/X class sum and macro
+  mean, and crossing diagnostics.
+- `metrics/quantile_metrics.csv`: each head's normalized pinball loss and
+  empirical coverage, overall and grouped by observed flare class.
+- `metrics/quantile_interval_metrics.csv`: actual nominal coverage, observed
+  coverage, and width for pairs of available heads, paired from the outside
+  inward. q0.05/q0.95 gives 90%, and q0.16/q0.84 gives 68%. Crossed intervals
+  count as coverage misses; widths use only ordered intervals and include
+  their sample counts. Endpoint values are never reordered.
+- `plots/quantile_predictions.png` and `plots/quantile_calibration.png`:
+  individual head predictions and coverage curves.
+
+`performance_metrics.csv` retains its existing `log10(F)` metrics; the new
+quantile summary's dex metrics use training's `log10(F + 1e-8)` convention.
+These point metrics are sample averages. The class sum first averages over
+examples and quantiles within each quiet/C/M/X bin, then sums represented
+bins; empty bins are omitted and the number represented is reported.
+Evaluate on the natural test distribution even when training uses stratified
+batches. Coverage grouped by observed class is descriptive.
+
 Set `plotting.inference_patch_dir` to inference's patch output folder to save
 one figure per matching CSV timestamp under `plots/patch_maps/`. Each figure
-shows available flux and square-root variance contribution maps. Set
+shows available flux and square-root variance contribution maps.
+For pinball runs, it shows each available original quantile contribution map
+on the shared flux scale instead. These are allocations of global quantiles,
+not calibrated uncertainty intervals for individual patches. Set
 `plotting.aia_dir` and `plotting.aia_wavelength` to place the matching AIA
 channel beside them. All panels use the lower-left image origin;
 `plotting.max_patch_maps` can limit large runs. Flux and uncertainty panels
@@ -667,8 +703,12 @@ level within each outcome-defined bin. `pinball.bias_penalty_weight` adds the
 existing class bias penalty to the median; tune it against validation pinball
 loss and coverage because it can shift the median away from its quantile objective.
 Quantile checkpoints can be restored directly with
-`CoupledPinballViTLocal.load_from_checkpoint(...)`; the public inference API
-currently supports deterministic and Gaussian checkpoints.
+`CoupledPinballViTLocal.load_from_checkpoint(...)` or used with the inference
+and evaluation scripts above. The public `helio_foxes.load_model` and
+`helio_foxes.predict` API also accepts them: `Prediction.flux` and `flux_map`
+use q0.5, and `quantiles` and `quantile_flux_maps` contain all trained heads.
+`intervals` keys give nominal percentages between paired heads; endpoints
+can cross. `patch_uncertainty_map` is `None` for pinball predictions.
 
 ---
 

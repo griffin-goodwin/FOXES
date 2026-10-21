@@ -11,7 +11,8 @@ model_predictions:
 
 evaluation:
   output_dir:  "./foxes_outputs/evaluation"
-  # Auto-runs when Gaussian uncertainty columns are present.
+  # Auto-runs for Gaussian or quantile columns; point metrics use the median
+  # for pinball models. Quantile scores use the checkpoint's normalized space.
   evaluate_uncertainty: true
 
 plotting:

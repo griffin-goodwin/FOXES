@@ -618,7 +618,16 @@ class Prediction:
         checkpoint's patch grid, which is smaller than the input image.
     intervals : dict or None
         For Gaussian checkpoints, ``"68"`` and ``"95"`` map to lower and
-        upper flux bounds in W/m². ``None`` for deterministic checkpoints.
+        upper flux bounds in W/m². For pinball checkpoints, keys give the
+        nominal percentage between paired quantile heads (e.g. ``"90"`` for
+        q0.05/q0.95); endpoints are not sorted and may cross.
+        ``None`` for deterministic checkpoints.
+    quantiles : dict or None
+        Trained probability to full-disk prediction in W/m² for pinball models.
+        ``flux`` and ``flux_map`` use the median head.
+    quantile_flux_maps : dict or None
+        Trained probability to its original spatial contribution map in W/m².
+        These are allocations of global quantiles, not calibrated patch quantiles.
     patch_uncertainty_map : numpy.ndarray or None
         For Gaussian checkpoints, the square root of each patch's contribution
         to global flux variance, in W/m². These are variance attributions,
@@ -648,6 +657,8 @@ class Prediction:
     patch_uncertainty_map: np.ndarray | None = None
     harp_regions: list[dict] | None = None
     sxr: dict | None = None
+    quantiles: dict[float, float] | None = None
+    quantile_flux_maps: dict[float, np.ndarray] | None = None
 
     def __post_init__(self):
         object.__setattr__(
@@ -712,7 +723,7 @@ class Predictor:
         Returns
         -------
         Prediction
-            Full-disk flux, patch flux map, and optional Gaussian uncertainty.
+            Full-disk flux, patch flux map, and optional Gaussian or quantile outputs.
 
         Raises
         ------
@@ -746,9 +757,26 @@ class Predictor:
         if self.transform is not None:
             tensor = self.transform(tensor)
         tensor = tensor.permute(1, 2, 0).unsqueeze(0).to(self.device)
+        quantiles = quantile_flux_maps = None
         with torch.inference_mode():
             outputs = self.model(tensor, return_attention=False)
-            if getattr(self.base_model, "predicts_uncertainty", False):
+            if getattr(self.base_model, 'uncertainty_kind', None) == 'quantile':
+                from forecasting.quantiles import quantile_interval_pairs
+                raw, _, all_patches = outputs
+                levels = self.base_model.quantiles
+                median_index = levels.index(0.5)
+                flux = raw[:, median_index]
+                patches = all_patches[:, :, median_index]
+                raw_cpu = raw[0].detach().cpu().numpy()
+                maps_cpu = all_patches[0].reshape(grid, grid, len(levels)).detach().cpu().numpy()
+                quantiles = dict(zip(levels, map(float, raw_cpu)))
+                quantile_flux_maps = {q: maps_cpu[:, :, i] for i, q in enumerate(levels)}
+                intervals = {
+                    f'{100 * (upper - lower):g}': (quantiles[lower], quantiles[upper])
+                    for lower, upper in quantile_interval_pairs(levels)
+                }
+                patch_uncertainty = None
+            elif getattr(self.base_model, "predicts_uncertainty", False):
                 flux, variance, patches, patch_variance = outputs
                 intervals_raw = uncertainty_from_prediction(
                     flux, variance, self.base_model.sxr_norm,
@@ -771,6 +799,7 @@ class Predictor:
             metadata=metadata,
             flux=float(flux.item()), flux_map=flux_map,
             intervals=intervals, patch_uncertainty_map=patch_uncertainty,
+            quantiles=quantiles, quantile_flux_maps=quantile_flux_maps,
             harp_regions=image.harp_regions if isinstance(image, Observation) else None,
             sxr=image.sxr if isinstance(image, Observation) else None,
         )

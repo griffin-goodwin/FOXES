@@ -14,6 +14,17 @@ import matplotlib.font_manager as fm
 from matplotlib import rcParams
 from tqdm import tqdm
 
+try:  # Support both python -m forecasting.evaluation and direct script use.
+    from forecasting.quantiles import (
+        quantile_columns, quantile_label, quantile_levels_from_columns,
+        quantile_interval_pairs,
+    )
+except ModuleNotFoundError:
+    from quantiles import (
+        quantile_columns, quantile_label, quantile_levels_from_columns,
+        quantile_interval_pairs,
+    )
+
 
 def _as_bool(value):
     if isinstance(value, bool):
@@ -66,6 +77,7 @@ class FOXESEvaluator:
         - Performance metrics calculation (MSE, RMSE, MAE, R², Pearson correlation)
         - Flare class-specific analysis (Below-B, B, C, M, X classes)
         - Gaussian NLL and predictive interval calibration
+        - Quantile pinball loss, coverage, median errors, and crossings
         - Optional per-timestamp patch flux and uncertainty maps
     """
 
@@ -148,6 +160,7 @@ class FOXESEvaluator:
         self.y_true = None
         self.y_pred = None
         self.has_uncertainty = False
+        self.quantiles = ()
 
     def load_data(self):
         """
@@ -185,6 +198,7 @@ class FOXESEvaluator:
 
         self.y_true = self.df['groundtruth'].values
         self.y_pred = self.df['predictions'].values
+        self.quantiles = quantile_levels_from_columns(self.df.columns)
         gaussian_present = 'variance_normalized' in self.df.columns
         if gaussian_present and not self.GAUSSIAN_UNCERTAINTY_COLUMNS.issubset(
             self.df.columns
@@ -195,9 +209,19 @@ class FOXESEvaluator:
             )
         self.has_uncertainty = self.GAUSSIAN_UNCERTAINTY_COLUMNS.issubset(
             self.df.columns
-        )
+        ) or bool(self.quantiles)
+        if self.quantiles:
+            if gaussian_present:
+                raise ValueError('CSV cannot contain both Gaussian and quantile predictions')
+            raw_median, norm_median = quantile_columns(0.5)
+            if (not np.allclose(self.y_pred, self.df[raw_median], rtol=1e-5, atol=0)
+                    or not np.allclose(self.df.prediction_normalized,
+                                       self.df[norm_median], rtol=1e-5, atol=1e-7)):
+                raise ValueError('Point predictions must match the q0.5 median head')
         print(f"Loaded model data with {len(self.df)} records")
-        if self.has_uncertainty:
+        if self.quantiles:
+            print(f'Detected quantile heads: {self.quantiles}; point metrics use q0.5')
+        elif self.has_uncertainty:
             print("Detected Gaussian uncertainty columns")
 
     def calculate_metrics(self):
@@ -289,13 +313,154 @@ class FOXESEvaluator:
                 )
         return masks
 
+    def calculate_quantile_metrics(self):
+        """Score the original heads, including crossings; never reorder values.
+
+        Pinball is in checkpoint-normalized log space, as in training. Class
+        sums use quiet/C/M/X means. Other class rows describe the held-out data;
+        coverage conditional on observed class need not equal nominal coverage.
+        """
+        if not self.quantiles:
+            raise ValueError('Load a quantile prediction CSV before scoring quantiles')
+        raw = self.df[[quantile_columns(q)[0] for q in self.quantiles]].to_numpy(float)
+        normalized = self.df[[quantile_columns(q)[1] for q in self.quantiles]].to_numpy(float)
+        target = self.df.groundtruth_normalized.to_numpy(float)
+        valid = (np.isfinite(raw).all(axis=1) & (raw > 0).all(axis=1)
+                 & np.isfinite(normalized).all(axis=1) & np.isfinite(target))
+        if not valid.any():
+            raise ValueError('No finite positive quantile predictions to evaluate')
+        if not valid.all():
+            print(f'Excluding {(~valid).sum()} invalid rows from quantile metrics')
+        levels = np.asarray(self.quantiles)
+        residual = target[:, None] - normalized
+        pinball = np.maximum(levels * residual, (levels - 1) * residual)
+        median = self.quantiles.index(0.5)
+        crossing = (np.diff(raw, axis=1) < 0).any(axis=1)
+        # Match training's log10(F + 1e-8) dex convention.
+        median_dex_error = np.log10(raw[:, median] + 1e-8) - np.log10(self.y_true + 1e-8)
+        masks = self._class_masks()
+        masks['Quiet'] = self.y_true < 1e-6
+        summary, head_rows, interval_rows = [], [], []
+        for group, mask in masks.items():
+            selected = mask & valid
+            if not selected.any():
+                continue
+            norm_mse = np.mean(residual[selected, median] ** 2)
+            dex_mse = np.mean(median_dex_error[selected] ** 2)
+            summary.append({
+                'Group': group, 'Sample_Count': int(selected.sum()),
+                'Pinball_Normalized': pinball[selected].mean(),
+                'Median_MSE_Normalized': norm_mse,
+                'Median_RMSE_Normalized': np.sqrt(norm_mse),
+                'Median_MSE_Dex2': dex_mse, 'Median_RMSE_Dex': np.sqrt(dex_mse),
+                'Crossing_Rate': crossing[selected].mean(),
+                'Mean_Adjacent_Crossing_Dex': np.maximum(
+                    -np.diff(np.log10(raw[selected] + 1e-8), axis=1), 0).mean(),
+            })
+            for index, level in enumerate(self.quantiles):
+                coverage = np.mean(self.y_true[selected] <= raw[selected, index])
+                head_rows.append({
+                    'Group': group, 'Quantile': level,
+                    'Sample_Count': int(selected.sum()),
+                    'Pinball_Normalized': pinball[selected, index].mean(),
+                    'Coverage': coverage, 'Coverage_Error': coverage - level,
+                })
+            for lower, upper in quantile_interval_pairs(self.quantiles):
+                low = raw[selected, self.quantiles.index(lower)]
+                high = raw[selected, self.quantiles.index(upper)]
+                ordered = low <= high
+                truth = self.y_true[selected]
+                interval_rows.append({
+                    'Group': group, 'Lower_Quantile': lower, 'Upper_Quantile': upper,
+                    'Nominal_Coverage': upper - lower,
+                    'Sample_Count': int(selected.sum()),
+                    # Crossed intervals count as misses, rather than disappearing.
+                    'Coverage': np.mean((truth >= low) & (truth <= high)),
+                    'Interval_Crossing_Rate': np.mean(~ordered),
+                    'Ordered_Interval_Count': int(ordered.sum()),
+                    'Mean_Ordered_Width_Raw': np.mean(high[ordered] - low[ordered]) if ordered.any() else np.nan,
+                    'Mean_Ordered_Width_Dex': np.mean(
+                        np.log10(high[ordered] + 1e-8) - np.log10(low[ordered] + 1e-8)
+                    ) if ordered.any() else np.nan,
+                })
+        class_means = [row['Pinball_Normalized'] for row in summary
+                       if row['Group'] in ('Quiet', 'C', 'M', 'X')]
+        summary[0]['Pinball_Class_Sum_Normalized'] = sum(class_means)
+        summary[0]['Pinball_Class_Macro_Normalized'] = np.mean(class_means)
+        summary[0]['Represented_Loss_Classes'] = len(class_means)
+        summary[0]['Invalid_Quantile_Rows'] = int((~valid).sum())
+        summary_df = pd.DataFrame(summary)
+        head_df = pd.DataFrame(head_rows)
+        summary_df.to_csv(Path(self.metrics_dir) / 'quantile_summary.csv', index=False)
+        head_df.to_csv(Path(self.metrics_dir) / 'quantile_metrics.csv', index=False)
+        pd.DataFrame(interval_rows, columns=[
+            'Group', 'Lower_Quantile', 'Upper_Quantile', 'Nominal_Coverage',
+            'Sample_Count', 'Coverage', 'Interval_Crossing_Rate',
+            'Ordered_Interval_Count', 'Mean_Ordered_Width_Raw', 'Mean_Ordered_Width_Dex',
+        ]).to_csv(
+            Path(self.metrics_dir) / 'quantile_interval_metrics.csv', index=False)
+        self._plot_quantile_predictions(raw, valid, head_df)
+        return summary_df
+
+    def _plot_quantile_predictions(self, raw, valid, head_metrics):
+        """Show each labeled head on common axes and empirical calibration."""
+        light = self.plot_background in ('white', 'light')
+        background, foreground = ('white', '#111111') if light else ('black', 'white')
+        truth = self.y_true[valid]
+        predicted = raw[valid]
+        minimum = min(truth.min(), predicted.min())
+        maximum = max(truth.max(), predicted.max())
+        if minimum == maximum:
+            minimum, maximum = minimum / 2, maximum * 2
+        minimum, maximum = minimum / 1.15, maximum * 1.15
+        fig, axes = plt.subplots(1, len(self.quantiles), figsize=(18, 4.1),
+                                 sharex=True, sharey=True, constrained_layout=True,
+                                 facecolor=background)
+        for index, ax in enumerate(axes):
+            ax.set_facecolor(background)
+            ax.scatter(truth, predicted[:, index], s=9, alpha=0.65,
+                       color='#56B4E9' if not light else '#0072B2', rasterized=True)
+            ax.plot([minimum, maximum], [minimum, maximum], '--', color=foreground, lw=1)
+            ax.set(xscale='log', yscale='log', xlim=(minimum, maximum), ylim=(minimum, maximum),
+                   title=f'{quantile_label(self.quantiles[index])}', xlabel='Observed flux (W/m²)')
+            ax.set_aspect('equal', adjustable='box')
+        axes[0].set_ylabel('Predicted flux (W/m²)')
+        self._style_quantile_axes(axes, foreground)
+        fig.savefig(Path(self.plots_dir) / 'quantile_predictions.png', dpi=160, facecolor=background)
+        plt.close(fig)
+        fig, ax = plt.subplots(figsize=(6.5, 5.5), constrained_layout=True, facecolor=background)
+        ax.set_facecolor(background)
+        for group in ('Overall', 'Quiet', 'C', 'M', 'X'):
+            rows = head_metrics[head_metrics.Group == group]
+            if not rows.empty:
+                ax.plot(rows.Quantile, rows.Coverage, 'o-', label=f'{group} (n={rows.Sample_Count.iloc[0]})',
+                        alpha=1 if group == 'Overall' else 0.65)
+        ax.plot([0, 1], [0, 1], '--', color=foreground, lw=1)
+        ax.set(xlim=(0, 1), ylim=(0, 1), xlabel='Quantile probability', ylabel='Fraction observed ≤ prediction',
+               title='Quantile coverage by observed class')
+        ax.legend(facecolor=background, labelcolor=foreground, fontsize=9)
+        self._style_quantile_axes([ax], foreground)
+        fig.savefig(Path(self.plots_dir) / 'quantile_calibration.png', dpi=160, facecolor=background)
+        plt.close(fig)
+
+    @staticmethod
+    def _style_quantile_axes(axes, foreground):
+        for ax in axes:
+            ax.tick_params(colors=foreground)
+            for label in (ax.xaxis.label, ax.yaxis.label, ax.title):
+                label.set_color(foreground)
+            for spine in ax.spines.values():
+                spine.set_color(foreground)
+
     def calculate_uncertainty_metrics(self):
-        """Evaluate Gaussian uncertainty in normalized log space.
+        """Evaluate Gaussian or quantile uncertainty in normalized log space.
 
         This reports both calibration (coverage and standardized residuals)
         and sharpness (typical predicted sigma). A model can obtain high
         coverage merely by widening its intervals, so both are needed.
         """
+        if self.quantiles:
+            return self.calculate_quantile_metrics()
         if not self.has_uncertainty:
             raise ValueError(
                 "The prediction CSV does not contain complete Gaussian "
@@ -565,8 +730,29 @@ class FOXESEvaluator:
         plt.close(fig)
         print(f"Saved uncertainty calibration plot to {plot_path}")
 
+    def _patch_map_specs(self, stamp):
+        """Return labeled original head maps, or legacy scalar map paths."""
+        flux_spec = (
+            self.inference_patch_dir / 'flux' / f'{stamp}.npy',
+            'Median patch flux' if self.quantiles else 'Patch flux', 'inferno',
+            r'Flux contribution (W m$^{-2}$)',
+        )
+        if self.quantiles:
+            specs = [(
+                self.inference_patch_dir / 'quantile_flux' / quantile_label(q) / f'{stamp}.npy',
+                f'{quantile_label(q)} contribution', 'inferno',
+                r'Flux contribution (W m$^{-2}$)',
+            ) for q in self.quantiles]
+            return specs if any(path.is_file() for path, *_ in specs) else [flux_spec]
+        return [
+            flux_spec,
+            (self.inference_patch_dir / 'patch_uncertainty' / f'{stamp}.npy',
+             'Patch uncertainty', 'inferno',
+             r'Square-root variance contribution (W m$^{-2}$)'),
+        ]
+
     def plot_patch_maps(self):
-        """Plot timestamp-matched AIA, flux, and variance-contribution maps."""
+        """Plot timestamp-matched AIA and Gaussian or quantile contribution maps."""
         if self.inference_patch_dir is None:
             return 0
         if self.df is None:
@@ -581,12 +767,9 @@ class FOXESEvaluator:
         available = []
         for row in self.df.itertuples(index=False):
             stamp = str(row.timestamp)
-            flux_path = self.inference_patch_dir / 'flux' / f'{stamp}.npy'
-            uncertainty_path = (
-                self.inference_patch_dir / 'patch_uncertainty' / f'{stamp}.npy'
-            )
-            if flux_path.is_file() or uncertainty_path.is_file():
-                available.append((row, flux_path, uncertainty_path))
+            specs = self._patch_map_specs(stamp)
+            if any(path.is_file() for path, *_ in specs):
+                available.append((row, specs))
         if not available:
             print("No patch maps match timestamps in the prediction CSV")
             return 0
@@ -606,7 +789,7 @@ class FOXESEvaluator:
 
         pending = []
         skipped = 0
-        for row, flux_path, uncertainty_path in selected:
+        for row, specs in selected:
             stamp = str(row.timestamp)
             filename = re.sub(r'[^A-Za-z0-9._-]', '_', stamp) + '.png'
             destination = output_dir
@@ -625,7 +808,7 @@ class FOXESEvaluator:
             if figure_path.is_file():
                 skipped += 1
             else:
-                pending.append((row, flux_path, uncertainty_path, figure_path))
+                pending.append((row, specs, figure_path))
         if not pending:
             print(f"All {skipped} selected patch-map figures already exist in {output_dir}")
             return 0
@@ -634,10 +817,10 @@ class FOXESEvaluator:
         # timestamps whose figures already exist. Keep only one map in memory.
         minimum = np.inf
         maximum = 0.0
-        for _, flux_path, uncertainty_path in tqdm(
+        for _, specs in tqdm(
             available, desc='Scanning patch maps', unit='timestamp'
         ):
-            for path in (flux_path, uncertainty_path):
+            for path, *_ in specs:
                 if not path.is_file():
                     continue
                 patch_map = np.load(path, allow_pickle=False)
@@ -665,7 +848,7 @@ class FOXESEvaluator:
         text_color = '#111111' if figure_color == '#FFFFFF' else '#FFFFFF'
 
         saved = 0
-        for row, flux_path, uncertainty_path, figure_path in tqdm(
+        for row, specs, figure_path in tqdm(
             pending, desc='Plotting patch maps', unit='figure'
         ):
             stamp = str(row.timestamp)
@@ -692,12 +875,7 @@ class FOXESEvaluator:
                     ))
                 else:
                     print(f"Warning: no AIA image for {stamp}")
-            for path, title, cmap, label in (
-                (flux_path, 'Patch flux', 'inferno',
-                 r'Flux contribution (W m$^{-2}$)'),
-                (uncertainty_path, 'Patch uncertainty', 'inferno',
-                 r'Square-root variance contribution (W m$^{-2}$)'),
-            ):
+            for path, title, cmap, label in specs:
                 if not path.is_file():
                     continue
                 panels.append((np.load(path, allow_pickle=False), title, cmap,
@@ -1023,7 +1201,7 @@ class FOXESEvaluator:
             print(uncertainty_df.to_string(index=False))
         elif self.evaluate_uncertainty:
             print(
-                "\nNo Gaussian uncertainty columns found; skipping uncertainty "
+                "\nNo Gaussian or quantile uncertainty columns found; skipping uncertainty "
                 "evaluation."
             )
 
