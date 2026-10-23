@@ -1464,18 +1464,42 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         }
 
 
+class _IndependentQuantileMLPHeads(nn.Module):
+    """Apply a separate nonlinear MLP to the shared features for each quantile."""
+
+    def __init__(self, input_dim, hidden_dim, num_quantiles, zero_output=False):
+        super().__init__()
+        self.heads = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(input_dim),
+                nn.Linear(input_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, 1),
+            ) for _ in range(num_quantiles)
+        ])
+        if zero_output:
+            for head in self.heads:
+                nn.init.zeros_(head[-1].weight)
+                nn.init.zeros_(head[-1].bias)
+
+    def forward(self, features):
+        return torch.cat([head(features) for head in self.heads], dim=-1)
+
+
 class CoupledQuantileVisionTransformerLocal(CoupledVisionTransformerLocal):
-    """Five patch quantile heads with the coupled local/global correction path."""
+    """Separate local and global correction MLPs for each quantile."""
 
     def __init__(self, *args, num_quantiles=5, **kwargs):
         super().__init__(*args, uncertainty_enabled=False, **kwargs)
         self.num_quantiles = num_quantiles
         embed_dim = self.mlp_head[-1].in_features
-        correction_dim = self.global_patch_head[-1].in_features
-        self.mlp_head[-1] = nn.Linear(embed_dim, num_quantiles)
-        self.global_patch_head[-1] = nn.Linear(correction_dim, num_quantiles)
-        nn.init.zeros_(self.global_patch_head[-1].weight)
-        nn.init.zeros_(self.global_patch_head[-1].bias)
+        self.mlp_head = _IndependentQuantileMLPHeads(
+            embed_dim, self.global_head_hidden_dim, num_quantiles,
+        )
+        self.global_patch_head = _IndependentQuantileMLPHeads(
+            3 * embed_dim, self.global_head_hidden_dim, num_quantiles,
+            zero_output=True,
+        )
 
     def forward(self, x, sxr_norm, return_attention=False, return_local=False):
         embeddings, attention = self._encode_patch_embeddings(
@@ -1484,8 +1508,7 @@ class CoupledQuantileVisionTransformerLocal(CoupledVisionTransformerLocal):
         _, patches, local_patches = self._patch_mean_from_embeddings(
             embeddings, sxr_norm, images=x, return_local=True,
         )
-        # Preserve each head's spatial allocation. Quantile ordering is a
-        # property of the global predictions, not of every patch contribution.
+
         raw_quantiles = patches.sum(dim=1)
         normalized_quantiles = normalize_sxr(raw_quantiles, sxr_norm)
         outputs = (raw_quantiles, normalized_quantiles, patches)
@@ -1501,7 +1524,7 @@ class CoupledPinballViTLocal(pl.LightningModule):
 
     Uses the Gaussian model's local attention backbone, global query, and
     per-patch global correction. Each of the five quantiles has its own local
-    flux and global correction output; there is no Gaussian scale head.
+    flux MLP and global correction MLP, including separate hidden layers;
     Head identities are preserved without sorting either local or corrected
     maps. Global quantile crossings are monitored by validation callbacks.
     ``uncertainty_kwargs['bias_penalty_weight']`` adds the same class-specific
@@ -1566,10 +1589,19 @@ class CoupledPinballViTLocal(pl.LightningModule):
         self.quantiles = quantiles
         self.class_reduction = class_reduction
         self.hparams['objective'] = 'pinball'
+        self.hparams['quantile_head_architecture'] = 'independent_mlps'
         self.register_buffer(
             'quantile_levels', torch.tensor(quantiles, dtype=torch.float32),
             persistent=False,
         )
+
+    def on_load_checkpoint(self, checkpoint):
+        if 'model.mlp_head.1.weight' in checkpoint.get('state_dict', {}):
+            raise RuntimeError(
+                'This checkpoint uses the earlier shared quantile output head. '
+                'Separate per-quantile MLPs require a new training run; '
+                'load the earlier checkpoint with the model code that trained it.'
+            )
 
     def forward(self, x, return_attention=False):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
