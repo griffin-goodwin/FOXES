@@ -105,8 +105,38 @@ def select_inference_samples(dataset, sampling=None):
     return Subset(dataset, indices.tolist()), times
 
 
+def shard_inference_samples(dataset, times, shard_index, num_shards):
+    """Partition the selected timestamps without loading image data."""
+    positions = list(range(shard_index, len(times), num_shards))
+    if not positions:
+        raise ValueError('This shard has no samples; use fewer shards')
+    return Subset(dataset, positions), [times[position] for position in positions]
+
+
 def _unwrap_model(model):
     return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
+def _check_quantile_outputs(raw, normalized, patches, sxr_norm):
+    """Reject corrupted parallel outputs before writing scientific results."""
+    if (not torch.isfinite(raw).all() or not torch.isfinite(normalized).all()
+            or not torch.isfinite(patches).all() or (raw <= 0).any()
+            or (patches < 0).any()):
+        raise RuntimeError(
+            'Invalid pinball inference output: quantiles and patch contributions '
+            'must be finite and nonnegative. If using multiple GPUs, retry with '
+            'multi_gpu: false and compare the same timestamps.'
+        )
+    if (not torch.allclose(raw, patches.sum(dim=1), rtol=1e-3, atol=1e-12)
+            or not torch.allclose(
+                normalized, normalize_sxr(raw, sxr_norm),
+                rtol=1e-3, atol=1e-3,
+            )):
+        raise RuntimeError(
+            'Inconsistent pinball inference output: global quantiles do not '
+            'match their patch sums or normalized values. If using multiple '
+            'GPUs, retry with multi_gpu: false and compare the same timestamps.'
+        )
 
 
 def _auto_checkpoint_model_class(checkpoint):
@@ -396,6 +426,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             quantile_patches = None
             if is_quantile:
                 raw_quantiles, norm_quantiles, all_flux_contributions = pred[:3]
+                _check_quantile_outputs(
+                    raw_quantiles, norm_quantiles, all_flux_contributions,
+                    base_model.sxr_norm,
+                )
                 weights = pred[3] if save_weights else None
                 median_index = base_model.quantiles.index(0.5)
                 predictions = raw_quantiles[:, median_index:median_index + 1]
@@ -646,6 +680,13 @@ def load_model_from_config(config_data):
                      and load_device.type == 'cuda'
                      and torch.cuda.device_count() > 1)
     if use_multi_gpu:
+        if getattr(model, 'uncertainty_kind', None) == 'quantile':
+            raise RuntimeError(
+                'Multi-GPU DataParallel inference for pinball checkpoints is '
+                'disabled: it has produced corrupted quantiles and patch maps '
+                'on a four-GPU server. Set multi_gpu: false to run on one GPU '
+                'until the multi-GPU failure is resolved.'
+            )
         n_gpus = torch.cuda.device_count()
         if _as_bool(config_data.get('use_amp', False)):
             amp_dtype = _resolve_amp_dtype(config_data, load_device)
@@ -672,10 +713,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='inference_config.yaml', required=True,
                         help='Path to the inference configuration YAML file.')
+    parser.add_argument('--shard-index', type=int, default=0,
+                        help='Zero-based shard to process after sampling.')
+    parser.add_argument('--num-shards', type=int, default=1,
+                        help='Number of independent inference shards.')
+    parser.add_argument('--output-path', type=str,
+                        help='Override the CSV path for this inference shard.')
     args = parser.parse_args()
+
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        parser.error('Require num-shards >= 1 and 0 <= shard-index < num-shards')
+    if args.num_shards > 1 and not args.output_path:
+        parser.error('--output-path is required for sharded inference')
 
     with open(args.config, 'r') as stream:
         config_data = yaml.load(stream, Loader=yaml.SafeLoader)
+    if args.output_path:
+        config_data['output_path'] = args.output_path
 
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)
@@ -775,6 +829,12 @@ def main():
     dataset, times = select_inference_samples(
         dataset, config_data.get('sampling')
     )
+    if args.num_shards > 1:
+        dataset, times = shard_inference_samples(
+            dataset, times, args.shard_index, args.num_shards,
+        )
+        print(f'Processing shard {args.shard_index + 1}/{args.num_shards}: '
+              f'{len(times)} samples')
     
     # The uncertainty checkpoint carries the exact training normalization. The
     # optional file is checked against it to catch accidentally mixed artifacts.
