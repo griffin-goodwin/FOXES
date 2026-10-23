@@ -1784,6 +1784,12 @@ class CoupledPinballViTLocal(pl.LightningModule):
             learning_rate = self.trainer.optimizers[0].param_groups[0]['lr']
             self.log('train/learning_rate', learning_rate, on_step=True,
                      on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
+            return {
+                'loss': loss,
+                'quantiles_norm': predictions.detach(),
+                'target_norm': target_norm.detach(),
+                'target_raw': target_raw.detach(),
+            }
         return loss
 
     def training_step(self, batch, batch_idx):

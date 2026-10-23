@@ -23,7 +23,8 @@ from forecasting.model import (
 from training.callbacks import (
     AttentionMapCallback, ImagePredictionLogger_SXR,
     PerClassValidationMetrics, SpatialUncertaintyMapCallback,
-    QuantilePredictionCallback, QuantileValidationMetrics,
+    QuantilePredictionCallback, QuantileTrainingCoverage,
+    QuantileValidationMetrics,
 )
 from training.strategies import TrainingStreamDDPStrategy
 
@@ -268,7 +269,12 @@ def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
     patch_size = config_data.get('vit_architecture', {}).get('patch_size', 8)
     if model_type == 'coupled_pinball':
         if callbacks_cfg.get('quantile_metrics_enabled', True):
-            callbacks.append(QuantileValidationMetrics())
+            callbacks.append(QuantileValidationMetrics(
+                plot_enabled=callbacks_cfg.get('quantile_calibration_plot_enabled', True),
+                log_every_n_epochs=callbacks_cfg.get('quantile_log_every_n_epochs', 1),
+            ))
+        if callbacks_cfg.get('quantile_train_coverage_enabled', True):
+            callbacks.append(QuantileTrainingCoverage())
         predictions_enabled = callbacks_cfg.get('sxr_plot_enabled', True)
         maps_enabled = callbacks_cfg.get('quantile_maps_enabled', True)
         if predictions_enabled or maps_enabled:

@@ -352,8 +352,82 @@ class ImagePredictionLogger_SXR(Callback):
         return fig
 
 
+class QuantileTrainingCoverage(Callback):
+    """Coverage over the examples drawn by the stratified training sampler."""
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.levels = tuple(pl_module.quantiles)
+        self.groups = (('quiet', -np.inf, 1e-6), *FLARE_CLASSES)
+        self.pairs = [
+            (i, len(self.levels) - i - 1)
+            for i in range(len(self.levels) // 2)
+            if self.levels[i] < 0.5 < self.levels[-i - 1]
+        ]
+        self.totals = torch.zeros(
+            1 + len(self.groups), 1 + len(self.levels) + len(self.pairs),
+            device=pl_module.device, dtype=torch.float64,
+        )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not isinstance(outputs, dict) or 'quantiles_norm' not in outputs:
+            return
+        predictions = outputs['quantiles_norm'].detach()
+        target = outputs['target_norm'].detach().reshape(-1, 1)
+        target_raw = outputs['target_raw'].detach().reshape(-1)
+        below = target <= predictions
+        interval_hits = [
+            ((target[:, 0] >= predictions[:, lower])
+             & (target[:, 0] <= predictions[:, upper]))
+            for lower, upper in self.pairs
+        ]
+        covered = (torch.stack(interval_hits, dim=1) if interval_hits else
+                   below.new_empty((len(target), 0)))
+        masks = [torch.ones_like(target_raw, dtype=torch.bool)] + [
+            (target_raw >= lower) & (target_raw < upper)
+            for _, lower, upper in self.groups
+        ]
+        for row, mask in enumerate(masks):
+            values = torch.cat((
+                mask.sum().reshape(1), below[mask].sum(dim=0),
+                covered[mask].sum(dim=0),
+            ))
+            self.totals[row] += values.to(torch.float64)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        totals = self.totals.clone()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        metrics = {}
+        for row, name in enumerate(('all', *(group[0] for group in self.groups))):
+            count = totals[row, 0].item()
+            if count == 0:
+                continue
+            prefix = 'train_quantile' if row == 0 else f'train_quantile_class/{name}'
+            metrics[f'{prefix}/count'] = count
+            for index, level in enumerate(self.levels):
+                observed = (totals[row, 1 + index] / count).item()
+                metrics[f'{prefix}/q{level:g}/coverage'] = observed
+                metrics[f'{prefix}/q{level:g}/calibration_error'] = observed - level
+            for index, (lower, upper) in enumerate(self.pairs):
+                observed = (totals[row, 1 + len(self.levels) + index] / count).item()
+                key = f'{prefix}/interval_{self.levels[lower]:g}_{self.levels[upper]:g}'
+                metrics[f'{key}/coverage'] = observed
+                metrics[f'{key}/coverage_error'] = (
+                    observed - (self.levels[upper] - self.levels[lower])
+                )
+        pl_module.log_dict(metrics, on_step=False, on_epoch=True,
+                           logger=True, sync_dist=False)
+
+
 class QuantileValidationMetrics(Callback):
-    """Measure quantile calibration on the full validation set and each class."""
+    """Measure quantile calibration and interval sharpness on validation."""
+
+    def __init__(self, plot_enabled=True, log_every_n_epochs=1):
+        super().__init__()
+        if isinstance(log_every_n_epochs, bool) or log_every_n_epochs < 1:
+            raise ValueError('log_every_n_epochs must be positive')
+        self.plot_enabled = plot_enabled
+        self.log_every_n_epochs = log_every_n_epochs
 
     def on_validation_epoch_start(self, trainer, pl_module):
         self.levels = tuple(pl_module.quantiles)
@@ -365,10 +439,10 @@ class QuantileValidationMetrics(Callback):
             if self.levels[i] < 0.5 < self.levels[-i - 1]
         ]
         # Rows: all examples, quiet, and the five detailed flare classes.
-        # Columns: count, coverage and pinball for each q, interval counts,
-        # samples with global crossings, and summed adjacent crossing sizes.
+        # Columns: count, coverage and pinball for each q, interval coverage,
+        # ordered counts and widths, global crossings and crossing sizes.
         self.totals = torch.zeros(
-            1 + len(self.groups), 3 + 2 * len(self.levels) + len(self.pairs),
+            1 + len(self.groups), 3 + 2 * len(self.levels) + 3 * len(self.pairs),
             device=pl_module.device, dtype=torch.float64,
         )
 
@@ -397,6 +471,12 @@ class QuantileValidationMetrics(Callback):
                 covered = ((target[:, 0] >= predictions[:, lower])
                            & (target[:, 0] <= predictions[:, upper]))
                 values.append(covered[mask].sum().reshape(1))
+            for lower, upper in self.pairs:
+                ordered = predictions[:, lower] <= predictions[:, upper]
+                values.append(ordered[mask].sum().reshape(1))
+            for lower, upper in self.pairs:
+                width = (predictions[:, upper] - predictions[:, lower]).clamp_min(0)
+                values.append(width[mask].sum().reshape(1))
             values.extend((crossed[mask].sum().reshape(1),
                            crossing_sizes[mask].sum().reshape(1)))
             self.totals[row] += torch.cat(values).to(torch.float64)
@@ -409,6 +489,8 @@ class QuantileValidationMetrics(Callback):
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         metrics = {}
         count_q = len(self.levels)
+        count_pairs = len(self.pairs)
+        interval_start = 1 + 2 * count_q
         macro_losses = []
         for row, name in enumerate(('all', *(c[0] for c in self.groups))):
             count = totals[row, 0].item()
@@ -434,9 +516,17 @@ class QuantileValidationMetrics(Callback):
                 ).item()
             for i, (lower, upper) in enumerate(self.pairs):
                 key = f'{prefix}/interval_{self.levels[lower]:g}_{self.levels[upper]:g}'
-                metrics[f'{key}/coverage'] = (
-                    totals[row, 1 + 2 * count_q + i] / count
-                ).item()
+                observed = (totals[row, interval_start + i] / count).item()
+                nominal = self.levels[upper] - self.levels[lower]
+                ordered_count = totals[row, interval_start + count_pairs + i]
+                metrics[f'{key}/coverage'] = observed
+                metrics[f'{key}/coverage_error'] = observed - nominal
+                metrics[f'{key}/crossing_rate'] = (1 - ordered_count / count).item()
+                if ordered_count > 0:
+                    metrics[f'{key}/mean_ordered_width_dex'] = (
+                        totals[row, interval_start + 2 * count_pairs + i]
+                        / ordered_count * pl_module.sxr_norm[1]
+                    ).item()
         if macro_losses:
             summed_per_quantile = torch.stack(macro_losses).sum(dim=0)
             metrics['val_quantile/pinball_class_sum'] = summed_per_quantile.mean().item()
@@ -446,6 +536,49 @@ class QuantileValidationMetrics(Callback):
                 metrics[f'val_quantile_macro/q{level:g}/pinball_loss'] = value.item()
         pl_module.log_dict(metrics, on_step=False, on_epoch=True,
                            logger=True, sync_dist=False)
+
+        if (self.plot_enabled and getattr(trainer, 'is_global_zero', False)
+                and getattr(trainer, 'current_epoch', 0) % self.log_every_n_epochs == 0
+                and getattr(trainer, 'logger', None) is not None
+                and callable(getattr(getattr(trainer.logger, 'experiment', None), 'log', None))):
+            figure = self.plot_calibration(metrics)
+            try:
+                trainer.logger.experiment.log({
+                    'Quantile calibration and interval coverage': wandb.Image(figure),
+                    'epoch': trainer.current_epoch,
+                })
+            finally:
+                plt.close(figure)
+
+    def plot_calibration(self, metrics):
+        """Plot full-validation empirical quantiles and interval coverage."""
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), layout='constrained')
+        axes[0].plot([0, 1], [0, 1], '--', color='0.5', label='Ideal')
+        for name in ('all', 'quiet', 'C', 'M', 'X'):
+            prefix = 'val_quantile' if name == 'all' else f'val_quantile_class/{name}'
+            if f'{prefix}/count' not in metrics:
+                continue
+            observed = [metrics[f'{prefix}/q{level:g}/coverage'] for level in self.levels]
+            axes[0].plot(self.levels, observed, marker='o',
+                         label=f'{name} (n={int(metrics[f"{prefix}/count"])})')
+        axes[0].set(xlabel='Nominal quantile', ylabel='Empirical fraction below',
+                    xlim=(0, 1), ylim=(0, 1), title='Quantile calibration')
+        axes[0].legend(fontsize=8)
+
+        nominal = [self.levels[upper] - self.levels[lower]
+                   for lower, upper in self.pairs]
+        observed = [metrics[f'val_quantile/interval_{self.levels[lower]:g}_{self.levels[upper]:g}/coverage']
+                    for lower, upper in self.pairs]
+        axes[1].plot([0, 1], [0, 1], '--', color='0.5')
+        axes[1].scatter(nominal, observed, s=60, color='#0072B2')
+        for lower, upper in self.pairs:
+            coverage = metrics[f'val_quantile/interval_{self.levels[lower]:g}_{self.levels[upper]:g}/coverage']
+            axes[1].annotate(f'{self.levels[lower]:g}–{self.levels[upper]:g}',
+                             (self.levels[upper] - self.levels[lower], coverage),
+                             xytext=(5, 5), textcoords='offset points')
+        axes[1].set(xlabel='Nominal interval coverage', ylabel='Empirical coverage',
+                    xlim=(0, 1), ylim=(0, 1), title='Interval coverage')
+        return fig
 
 
 class QuantilePredictionCallback(Callback):
