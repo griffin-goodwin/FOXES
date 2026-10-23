@@ -18,7 +18,7 @@ prediction_only: "false"
 # to run every sample. Set either count (e.g. 1000) or fraction (e.g. 0.1).
 # Selected results are written in timestamp order.
 sampling:
-  count: null
+  count: 500
   fraction: null
   seed: 42
 
@@ -26,12 +26,12 @@ data:
   # Point these directly at the folder of .npy files you want to run the model
   # on — no special subfolder naming (e.g. "test/") is required or assumed.
   # Example paths below match the local output of the download/build configs.
-  aia_dir:         "./foxes_data/AIA_processed/test"
-  sxr_dir:         "./foxes_data/SXR_processed/test"   # ignored if prediction_only: "true"
+  aia_dir:         "/Volumes/T9/FOXES_Data/AIA_processed/test"
+  sxr_dir:         "/Volumes/T9/FOXES_Data/SXR_processed/test"   # ignored if prediction_only: "true"
   sxr_norm_path:   null  # optional check against the normalization stored in the checkpoint
   # Enable only for a checkpoint trained with this exact AIA transform/artifact.
   aia_norm_path:   null  # set to the matching AIA normalization artifact if used in training
-  checkpoint_path: "./foxes_data/checkpoints/your_model.ckpt"  # select your trained checkpoint
+  checkpoint_path: "/Users/griffingoodwin/Downloads/pinball.ckpt"  # select your trained checkpoint
 
 # Detect deterministic, coupled Gaussian, or coupled pinball checkpoints.
 # Explicit alternatives: deterministic, coupled_uncertainty, coupled_pinball.
@@ -60,15 +60,15 @@ patch_uncertainty_path: "./foxes_outputs/inference_patch/patch_uncertainty/"
 model_params:
   input_size: 512
   patch_size: 8
-  batch_size: 512  # benchmarked at ~89 samples/s, ~26/24 GiB peak VRAM
+  batch_size: 1  # benchmarked at ~89 samples/s, ~26/24 GiB peak VRAM
   no_weights: true   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
-  no_flux:    false   # true = skip saving flux contribution maps
-  no_patch_uncertainty: false  # true = skip per-patch uncertainty map files
+  no_flux:    true   # true = skip saving flux contribution maps
+  no_patch_uncertainty: true  # true = skip per-patch uncertainty map files
 
 device: auto      # auto chooses CUDA, then Apple MPS, then CPU; or set cuda/mps/cpu
-num_workers: 16   # 48 CPU cores and 685 GB of test NPY files: keep I/O prefetched
+num_workers: 6   # 48 CPU cores and 685 GB of test NPY files: keep I/O prefetched
 pin_memory:  false
-prefetch_factor: 4
+prefetch_factor: 1
 persistent_workers: true
 multiprocessing_context: spawn
 use_amp:     false

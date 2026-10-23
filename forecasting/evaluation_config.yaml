@@ -7,7 +7,7 @@
 # =============================================================================
 
 model_predictions:
-  main_model_csv: "./foxes_outputs/inference/predictions.csv"
+  main_model_csv: "/Users/griffingoodwin/Documents/gitrepos/FOXES/forecasting/foxes_outputs/inference/predictions.csv"
 
 evaluation:
   output_dir:  "./foxes_outputs/evaluation"

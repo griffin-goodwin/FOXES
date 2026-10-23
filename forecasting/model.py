@@ -1467,13 +1467,16 @@ class CoupledGaussianViTLocal(pl.LightningModule):
 class _IndependentQuantileMLPHeads(nn.Module):
     """Apply a separate nonlinear MLP to the shared features for each quantile."""
 
-    def __init__(self, input_dim, hidden_dim, num_quantiles, zero_output=False):
+    def __init__(self, input_dim, hidden_dim, num_quantiles, zero_output=False,
+                 dropout=0.0):
         super().__init__()
+        if isinstance(dropout, bool) or not isinstance(dropout, (int, float)) or not 0 <= dropout < 1:
+            raise ValueError('quantile head dropout must be in [0, 1)')
         self.heads = nn.ModuleList([
             nn.Sequential(
                 nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, hidden_dim),
-                nn.GELU(),
+                nn.Sequential(nn.GELU(), nn.Dropout(dropout)),
                 nn.Linear(hidden_dim, 1),
             ) for _ in range(num_quantiles)
         ])
@@ -1489,16 +1492,17 @@ class _IndependentQuantileMLPHeads(nn.Module):
 class CoupledQuantileVisionTransformerLocal(CoupledVisionTransformerLocal):
     """Separate local and global correction MLPs for each quantile."""
 
-    def __init__(self, *args, num_quantiles=5, **kwargs):
+    def __init__(self, *args, num_quantiles=5, head_dropout=0.0, **kwargs):
         super().__init__(*args, uncertainty_enabled=False, **kwargs)
         self.num_quantiles = num_quantiles
         embed_dim = self.mlp_head[-1].in_features
         self.mlp_head = _IndependentQuantileMLPHeads(
             embed_dim, self.global_head_hidden_dim, num_quantiles,
+            dropout=head_dropout,
         )
         self.global_patch_head = _IndependentQuantileMLPHeads(
             3 * embed_dim, self.global_head_hidden_dim, num_quantiles,
-            zero_output=True,
+            zero_output=True, dropout=head_dropout,
         )
 
     def forward(self, x, sxr_norm, return_attention=False, return_local=False):
@@ -1543,8 +1547,11 @@ class CoupledPinballViTLocal(pl.LightningModule):
     def __init__(self, model_kwargs, sxr_norm,
                  quantiles=(0.05, 0.16, 0.5, 0.84, 0.95),
                  weight_decay=1e-5, scheduler_kwargs=None,
-                 uncertainty_kwargs=None, class_reduction='sum'):
+                 uncertainty_kwargs=None, class_reduction='sum',
+                 freeze_backbone=False, head_dropout=0.0):
         super().__init__()
+        if not isinstance(freeze_backbone, bool):
+            raise ValueError('freeze_backbone must be a boolean')
         if class_reduction not in ('sum', 'macro', 'sample_mean'):
             raise ValueError("class_reduction must be 'sum', 'macro', or 'sample_mean'")
         quantiles = tuple(quantiles)
@@ -1575,6 +1582,7 @@ class CoupledPinballViTLocal(pl.LightningModule):
                 'max_abs_log10_patch_multiplier',
             ) if key in network_kwargs},
             num_quantiles=len(quantiles),
+            head_dropout=head_dropout,
         )
         self.register_buffer(
             'sxr_norm', torch.as_tensor(sxr_norm, dtype=torch.float32),
@@ -1588,12 +1596,28 @@ class CoupledPinballViTLocal(pl.LightningModule):
         }
         self.quantiles = quantiles
         self.class_reduction = class_reduction
+        self.freeze_backbone = freeze_backbone
+        if freeze_backbone:
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
+            for head_group in (self.model.mlp_head, self.model.global_patch_head):
+                for parameter in head_group.parameters():
+                    parameter.requires_grad_(True)
         self.hparams['objective'] = 'pinball'
         self.hparams['quantile_head_architecture'] = 'independent_mlps'
         self.register_buffer(
             'quantile_levels', torch.tensor(quantiles, dtype=torch.float32),
             persistent=False,
         )
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_backbone:
+            # Keep shared dropout disabled while the quantile heads train.
+            self.model.eval()
+            self.model.mlp_head.train(mode)
+            self.model.global_patch_head.train(mode)
+        return self
 
     def on_load_checkpoint(self, checkpoint):
         if 'model.mlp_head.1.weight' in checkpoint.get('state_dict', {}):
@@ -1609,6 +1633,26 @@ class CoupledPinballViTLocal(pl.LightningModule):
     def predict_quantiles(self, x):
         """Return ``(batch, quantile)`` predictions in physical W/m^2."""
         return self.forward(x)[0]
+
+    def reinitialize_quantile_heads(self, selection):
+        """Freshly initialize selected local and global quantile MLPs."""
+        if selection not in ('none', 'non_median', 'all'):
+            raise ValueError('head reinitialization must be none, non_median, or all')
+        median_index = self.quantiles.index(0.5)
+        selected = [index for index in range(len(self.quantiles))
+                    if selection == 'all' or
+                    (selection == 'non_median' and index != median_index)]
+        with torch.no_grad():
+            for index in selected:
+                for group in (self.model.mlp_head, self.model.global_patch_head):
+                    head = group.heads[index]
+                    for layer in head.modules():
+                        if layer is not head and hasattr(layer, 'reset_parameters'):
+                            layer.reset_parameters()
+                # Match the model's fresh global-correction initialization.
+                final_global = self.model.global_patch_head.heads[index][-1]
+                final_global.weight.zero_()
+                final_global.bias.zero_()
 
     def predict_interval(self, x, lower=None, upper=None):
         """Return median and selected raw quantile heads; bounds may cross."""
@@ -1753,7 +1797,8 @@ class CoupledPinballViTLocal(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay,
+            (parameter for parameter in self.parameters() if parameter.requires_grad),
+            lr=self.lr, weight_decay=self.weight_decay,
         )
         scheduler = CosineAnnealingLR(optimizer, **self.scheduler_kwargs)
         return {

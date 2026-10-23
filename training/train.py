@@ -69,6 +69,25 @@ def load_training_config(config_path):
     return load_one(config_path, ())
 
 
+def load_pinball_initial_weights(model, checkpoint_path):
+    """Initialize a new fine-tuning run from model weights, not optimizer state."""
+    path = Path(checkpoint_path).expanduser()
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+    hyperparameters = checkpoint.get('hyper_parameters', {})
+    if hyperparameters.get('objective') != 'pinball':
+        raise ValueError(f'Initialization checkpoint is not pinball: {path}')
+    if tuple(hyperparameters.get('quantiles', ())) != model.quantiles:
+        raise ValueError('Checkpoint quantile levels differ from training config')
+    state_dict = checkpoint.get('state_dict', {})
+    if 'sxr_norm' not in state_dict or not torch.allclose(
+        state_dict['sxr_norm'].cpu(), model.sxr_norm.cpu(), rtol=1e-5, atol=1e-7,
+    ):
+        raise ValueError('Checkpoint SXR normalization differs from training config')
+    model.on_load_checkpoint(checkpoint)
+    model.load_state_dict(state_dict, strict=True)
+    print(f'Initialized pinball weights from {path} (fresh optimizer and scheduler)')
+
+
 def get_four_class_macro_weights(data_module, exponent=1.0,
                                  require_all_classes=True):
     """Return quiet/C/M/X weights computed from scalar training targets.
@@ -307,6 +326,17 @@ def main():
             'coupled_uncertainty or coupled_pinball. Older experiments use '
             'python -m training.experimental.train.'
         )
+    pinball_cfg = config.get('pinball', {})
+    if model_type == 'coupled_pinball':
+        if not isinstance(pinball_cfg.get('freeze_backbone', False), bool):
+            raise ValueError('pinball.freeze_backbone must be true or false')
+        if pinball_cfg.get('freeze_backbone', False) and not pinball_cfg.get('init_checkpoint_path'):
+            raise ValueError('pinball.freeze_backbone requires pinball.init_checkpoint_path')
+        head_reset = pinball_cfg.get('reinitialize_heads', 'none')
+        if head_reset not in ('none', 'non_median', 'all'):
+            raise ValueError('pinball.reinitialize_heads must be none, non_median, or all')
+        if head_reset != 'none' and not pinball_cfg.get('init_checkpoint_path'):
+            raise ValueError('pinball.reinitialize_heads requires pinball.init_checkpoint_path')
     checkpoint_cfg = config.get('checkpoint', {})
     supported_checkpoint_keys = {
         'monitor', 'mode', 'save_top_k', 'save_last',
@@ -358,12 +388,26 @@ def main():
     if model_type == 'coupled_pinball':
         model = CoupledPinballViTLocal(
             **common_kwargs,
-            quantiles=config.get('pinball', {}).get(
+            quantiles=pinball_cfg.get(
                 'quantiles', (0.05, 0.16, 0.5, 0.84, 0.95),
             ),
             uncertainty_kwargs=uncertainty_cfg,
-            class_reduction=config.get('pinball', {}).get('class_reduction', 'sum'),
+            class_reduction=pinball_cfg.get('class_reduction', 'sum'),
+            freeze_backbone=pinball_cfg.get('freeze_backbone', False),
+            head_dropout=pinball_cfg.get('head_dropout', 0.0),
         )
+        if pinball_cfg.get('init_checkpoint_path'):
+            load_pinball_initial_weights(model, pinball_cfg['init_checkpoint_path'])
+            if head_reset != 'none':
+                model.reinitialize_quantile_heads(head_reset)
+                print(f'Reinitialized {head_reset} local and global quantile heads')
+        if model.freeze_backbone:
+            trainable = sum(parameter.numel() for parameter in model.parameters()
+                            if parameter.requires_grad)
+            frozen = sum(parameter.numel() for parameter in model.parameters()
+                         if not parameter.requires_grad)
+            print(f'Frozen shared backbone: {frozen:,} parameters; '
+                  f'trainable quantile heads: {trainable:,} parameters')
     elif model_type in COUPLED_MODEL_TYPES:
         model = CoupledGaussianViTLocal(
             **common_kwargs,

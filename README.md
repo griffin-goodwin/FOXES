@@ -526,6 +526,21 @@ With flux saving enabled, `quantile_flux_path` contains
 Its default is `quantile_flux/` beside `flux_path`. No heads or patches are
 sorted, and no Gaussian variance is inferred from the quantiles.
 
+For a pinball checkpoint on a multi-GPU server, use independent inference
+processes instead of `multi_gpu: true`. The `DataParallel` path has produced
+corrupted quantiles and patch maps on a four-GPU server and now fails fast for
+pinball checkpoints. Run:
+
+```bash
+python forecasting/run_parallel_inference.py \
+  --config forecasting/inference_config.yaml --gpus 0,1,2,3
+```
+
+Each process sees one GPU and handles every fourth timestamp after the config's
+sampling step. The runner writes per-shard CSVs and logs beside `output_path`,
+then merges all rows in timestamp order into the configured CSV. Optional
+attention and flux maps keep their timestamp-based filenames.
+
 ### 3) Evaluate
 
 Edit `forecasting/evaluation_config.yaml` to point at the predictions
@@ -585,6 +600,17 @@ rerun, so an interrupted plot run resumes with the remaining figures.
 
 ### 4) Train your own model (optional)
 
+For a small CNN experiment, open
+[`notebooks/pixel_flux_cnn.ipynb`](notebooks/pixel_flux_cnn.ipynb). It predicts a
+positive contribution at every image pixel, sums the map, and supervises only
+that total against observed SXR flux. Edit the train/validation paths and run
+with the `foxes` Python kernel. PyTorch Lightning handles training, validation,
+CSV logging, and best/last checkpoints. The notebook includes training curves, median
+scale initialization, validation predictions, a pixel-map preview, and a
+save/reload example. It defaults to log-space MSE on the total; raw-space MSE
+is also available. The learned spatial allocation is not uniquely constrained
+by supervision of its sum. Outputs go under `notebooks/outputs/`.
+
 Unlike inference, training expects `aia_dir`/`sxr_dir` each to have `train/`,
 `val/`, and `test/` subfolders of paired `.npy` files — exactly what
 `data/build_dataset.py` and the Hugging Face download path produce.
@@ -624,6 +650,32 @@ then run:
 python training/train.py --config training/train_coupled_pinball.yaml
 ```
 
+To fine-tune a pinball checkpoint with the shared backbone frozen, set these
+fields in `training/train_coupled_pinball.yaml` and choose a new
+`data.checkpoints_dir` for the resulting run:
+
+```yaml
+pinball:
+  init_checkpoint_path: /path/to/independent-head-pinball.ckpt
+  freeze_backbone: true
+  head_dropout: 0.1
+  reinitialize_heads: non_median
+```
+
+This copies model weights into a new training run with a fresh optimizer and
+scheduler. The image encoder, local attention, and shared global attention
+remain frozen with their dropout disabled. `head_dropout` acts after GELU in
+both local and global quantile MLPs; the checkpoint's learned linear weights
+load without remapping. `reinitialize_heads: non_median` freshly initializes
+the four nonmedian local and global MLPs, retaining the q0.5 checkpoint weights
+at initialization. Use `all`
+to reinitialize all five, or `none` to retain every trained head. The global
+correction output layers retain their normal zero initialization after a reset.
+All heads remain trainable unless separately frozen. The checkpoint's quantile
+levels and SXR normalization must match the training config. Setting
+`freeze_backbone: false` and leaving `init_checkpoint_path: null` retains the
+usual from-scratch behavior.
+
 Set `pinball.quantiles` before training. The default
 `[0.05, 0.16, 0.5, 0.84, 0.95]` gives a median and nominal central 68% and 90%
 intervals. Use `[0.025, 0.16, 0.5, 0.84, 0.975]` for 68% and 95% intervals.
@@ -631,6 +683,16 @@ These are probability levels, not GOES class boundaries. Actual coverage must
 be checked on held-out data. This follows the quantile and interval definitions
 in [Forecasting: Principles and Practice](https://otexts.com/fpp3/toolbox.html#quantile-scores).
 All five levels must increase and include `0.5`.
+
+The transformer backbone and global context query are shared. Each quantile
+has its own local MLP and global correction MLP, with separate LayerNorm,
+hidden Linear/GELU, and scalar output layers. Their hidden width follows
+`vit_architecture.global_head_hidden_dim` (default: half `embed_dim`). Every
+global correction MLP starts with a zero output, so the initial prediction
+uses its local contributions. The class-binned pinball loss and optional
+median bias penalty are unchanged. This head architecture requires a fresh
+training run; earlier shared-output quantile checkpoints must be loaded with
+the model code that trained them.
 
 W&B receives one prediction-versus-truth panel per quantile, a table of the
 individual predictions, and local/corrected contribution maps on a shared color
@@ -655,13 +717,13 @@ any reversed adjacent global quantile pair. `mean_adjacent_crossing_dex`
 averages the reversal magnitude over all examples and adjacent pairs, including
 zero for ordered pairs. These diagnostics do not change the loss or reorder
 predictions; returned interval endpoints can cross.
-`pinball.class_reduction: sum` (the default) first averages the five quantile
-losses per example, then averages examples within quiet/C/M/X, then sums
-the four class losses. Quiet is flux below `1e-6`, C is
+`pinball.class_reduction: macro` in the training config first averages the five
+quantile losses per example, then averages examples within quiet/C/M/X, then
+averages the represented class losses. Quiet is flux below `1e-6`, C is
 `[1e-6, 1e-5)`, M is `[1e-5, 1e-4)`, and X is `>=1e-4` W/m². Missing bins
 contribute zero; distributed training combines class counts across ranks before
-reducing the loss. Set `class_reduction: macro` to average the represented
-class losses, or `sample_mean` for an ordinary average across examples.
+reducing the loss. Set `class_reduction: sum` to sum the represented class
+losses, or `sample_mean` for an ordinary average across examples.
 `train/pinball_class/<class>` reports the individual bin losses and
 `train/pinball_sample_mean` preserves the ordinary sample average as a diagnostic.
 Validation also reports `val_quantile/pinball_class_sum` and

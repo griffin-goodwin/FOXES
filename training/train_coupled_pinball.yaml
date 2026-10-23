@@ -11,12 +11,24 @@ sampling:
   # null keeps approximately the original epoch length; counts are per rank.
   batches_per_epoch: null
 pinball:
+  # For a new run initialized from trained weights, set this to a pinball .ckpt.
+  # The optimizer/scheduler start fresh; this is not a Lightning resume.
+  init_checkpoint_path: null
+  # Freeze the image encoder, local attention blocks, and shared global context.
+  # Both local and global quantile MLPs remain trainable. Requires a checkpoint.
+  freeze_backbone: false
+  # Dropout after GELU inside each local and global quantile MLP.
+  head_dropout: 0.0
+  # Reinitialize selected heads after loading checkpoint weights:
+  # none, non_median (preserve q0.5), or all. Requires a checkpoint.
+  reinitialize_heads: none
   # Median, central 68% interval, and central 90% interval.
   # For a central 95% outer interval, use 0.025 and 0.975 instead.
   quantiles: [0.05, 0.16, 0.5, 0.84, 0.95]
-  # Average examples within quiet/C/M/X, then sum the four class losses.
-  # Use sample_mean for the ordinary unweighted baseline.
-  class_reduction: sum
+  # Average within quiet/C/M/X, then average the represented class losses.
+  # Matches the epoch-27 independent-head checkpoint used for fine-tuning.
+  # Use sample_mean for the ordinary per-example objective.
+  class_reduction: macro
   # Adds squared class-specific signed bias of the median to pinball loss.
   bias_penalty_weight: 0.0
 callbacks:
