@@ -1548,12 +1548,17 @@ class CoupledPinballViTLocal(pl.LightningModule):
                  quantiles=(0.05, 0.16, 0.5, 0.84, 0.95),
                  weight_decay=1e-5, scheduler_kwargs=None,
                  uncertainty_kwargs=None, class_reduction='sum',
-                 freeze_backbone=False, head_dropout=0.0):
+                 freeze_backbone=False, head_dropout=0.0, huber_delta=None):
         super().__init__()
         if not isinstance(freeze_backbone, bool):
             raise ValueError('freeze_backbone must be a boolean')
         if class_reduction not in ('sum', 'macro', 'sample_mean'):
             raise ValueError("class_reduction must be 'sum', 'macro', or 'sample_mean'")
+        if huber_delta is not None and (
+            isinstance(huber_delta, bool) or not isinstance(huber_delta, (int, float))
+            or not math.isfinite(huber_delta) or huber_delta <= 0
+        ):
+            raise ValueError('pinball.huber_delta must be a positive finite number or null')
         quantiles = tuple(quantiles)
         if (len(quantiles) != 5 or any(
             isinstance(q, bool) or not isinstance(q, (int, float))
@@ -1596,6 +1601,7 @@ class CoupledPinballViTLocal(pl.LightningModule):
         }
         self.quantiles = quantiles
         self.class_reduction = class_reduction
+        self.huber_delta = huber_delta
         self.freeze_backbone = freeze_backbone
         if freeze_backbone:
             for parameter in self.model.parameters():
@@ -1688,12 +1694,27 @@ class CoupledPinballViTLocal(pl.LightningModule):
         }, on_step=False, on_epoch=True, logger=True, prog_bar=True, sync_dist=False)
 
     def _pinball_loss_by_class(self, predictions, target_norm, target_raw):
-        """Return objective, class means/counts, and the ordinary sample mean."""
+        """Return the selected quantile objective and its class/sample means."""
         error = target_norm.reshape(-1, 1) - predictions
-        per_sample = torch.maximum(
-            self.quantile_levels * error,
-            (self.quantile_levels - 1) * error,
-        ).mean(dim=-1)
+        if self.huber_delta is None:
+            pointwise = torch.maximum(
+                self.quantile_levels * error,
+                (self.quantile_levels - 1) * error,
+            )
+        else:
+            # Divide by delta so the linear tails approach pinball loss as
+            # delta tends to zero. Keep the asymmetric quantile weights.
+            magnitude = error.abs()
+            smooth = torch.where(
+                magnitude <= self.huber_delta,
+                0.5 * error.square() / self.huber_delta,
+                magnitude - 0.5 * self.huber_delta,
+            )
+            weight = torch.where(
+                error >= 0, self.quantile_levels, 1 - self.quantile_levels,
+            )
+            pointwise = weight * smooth
+        per_sample = pointwise.mean(dim=-1)
         flux = target_raw.reshape(-1)
         thresholds = SXRRegressionDynamicLoss.CLASS_THRESHOLDS
         indices = ((flux >= thresholds['c']).long()
@@ -1737,7 +1758,7 @@ class CoupledPinballViTLocal(pl.LightningModule):
         )
         target_norm = target_norm.reshape(-1)
         target_raw = unnormalize_sxr(target_norm, self.sxr_norm)
-        pinball_loss, class_losses, class_counts, sample_mean = self._pinball_loss_by_class(
+        quantile_loss, class_losses, class_counts, sample_mean = self._pinball_loss_by_class(
             predictions, target_norm, target_raw,
         )
         median = predictions[:, self.quantiles.index(0.5)]
@@ -1745,15 +1766,24 @@ class CoupledPinballViTLocal(pl.LightningModule):
         bias_penalty = mean_class_signed_error_penalty(
             median, target_norm, target_raw, self.bias_penalty_weight,
         )
-        loss = pinball_loss + bias_penalty
+        loss = quantile_loss + bias_penalty
         on_step = mode == 'train'
-        self.log(f'{mode}/pinball_loss', pinball_loss, on_step=on_step,
+        loss_name = 'pinball' if self.huber_delta is None else 'quantile_huber'
+        self.log(f'{mode}/{loss_name}_loss', quantile_loss, on_step=on_step,
                  on_epoch=True, logger=True, sync_dist=True)
-        self.log(f'{mode}/pinball_sample_mean', sample_mean, on_step=on_step,
+        self.log(f'{mode}/{loss_name}_sample_mean', sample_mean, on_step=on_step,
                  on_epoch=True, logger=True, sync_dist=True)
+        if self.huber_delta is not None:
+            error = target_norm[:, None] - predictions
+            ordinary_pinball = torch.maximum(
+                self.quantile_levels * error,
+                (self.quantile_levels - 1) * error,
+            ).mean()
+            self.log(f'{mode}/pinball_sample_mean', ordinary_pinball,
+                     on_step=on_step, on_epoch=True, logger=True, sync_dist=True)
         for i, name in enumerate(self.LOSS_CLASS_NAMES):
             if class_counts[i] > 0:
-                self.log(f'{mode}/pinball_class/{name}', class_losses[i],
+                self.log(f'{mode}/{loss_name}_class/{name}', class_losses[i],
                          on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
                          batch_size=int(class_counts[i].item()))
         self.log(f'{mode}/bias_dex', signed_error * self.sxr_norm[1],

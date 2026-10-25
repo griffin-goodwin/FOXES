@@ -401,6 +401,7 @@ def main():
             class_reduction=pinball_cfg.get('class_reduction', 'sum'),
             freeze_backbone=pinball_cfg.get('freeze_backbone', False),
             head_dropout=pinball_cfg.get('head_dropout', 0.0),
+            huber_delta=pinball_cfg.get('huber_delta'),
         )
         if pinball_cfg.get('init_checkpoint_path'):
             load_pinball_initial_weights(model, pinball_cfg['init_checkpoint_path'])
