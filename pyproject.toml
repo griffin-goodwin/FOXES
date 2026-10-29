@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helio-foxes"
-version = "1.0.3"
+version = "1.0.4"
 description = "FOXES: Framework for Operational X-ray Emission Synthesis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,13 @@ dependencies = [
   "itipy",
   "aiapy>=0.6.4,<0.11",
 ]
+
+[project.urls]
+Source = "https://github.com/griffin-goodwin/FOXES"
+Issues = "https://github.com/griffin-goodwin/FOXES/issues"
+Releases = "https://github.com/griffin-goodwin/FOXES/releases"
+Demo = "https://huggingface.co/spaces/griffingoodwin04/FOXES-model"
+Dataset = "https://huggingface.co/datasets/griffingoodwin04/FOXES-Data"
 
 [project.optional-dependencies]
 evaluation = ["scikit-learn", "seaborn", "plotly"]

@@ -26,7 +26,7 @@ datasets:
 # FOXES: A Framework for Operational X-ray Emission Synthesis
 
 <p align="center">
-  <img src="foxes_logo.png" alt="FOXES Logo" width="300"/>
+  <img src="https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/foxes_logo.png" alt="FOXES Logo" width="300"/>
 </p>
 
 FOXES predicts full-disk solar soft X-ray (SXR) flux and spatial patch contributions
