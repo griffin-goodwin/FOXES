@@ -14,12 +14,13 @@ dependencies = [
   "torch",
   "pytorch-lightning",
   "pandas",
+  "python-dateutil",
   "tqdm",
   "PyYAML",
   "matplotlib",
   "drms",
   "astropy>=7.2,<8",
-  "sunpy>=6,<8",
+  "sunpy[map,net,timeseries]>=6",
   "h5netcdf",
   "h5py",
   "itipy",
@@ -29,6 +30,12 @@ dependencies = [
 [project.optional-dependencies]
 evaluation = ["scikit-learn", "seaborn", "plotly"]
 training = ["wandb", "torchvision"]
+dev = [
+  "pytest",
+  "ipykernel",
+  "nbformat",
+  "matplotlib==3.10.7",  # Reference renderer for the HARP label-placement tests.
+]
 
 [tool.setuptools]
 include-package-data = false

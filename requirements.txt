@@ -1,5 +1,5 @@
 # Solar physics and astronomy
-sunpy[all]>=6,<8
+sunpy[all]>=6
 sunpy-soar
 astropy>=7.2,<8  # pinned: unpinned installs silently picked up 7.0's CompImageHDU rewrite behavior change, corrupting compressed AIA downloads
 aiapy>=0.6.4,<0.11  # itipy 0.1.1 imports aiapy.calibrate.util; verified with 0.10.2

@@ -3,11 +3,11 @@
 from .api import (
     Observation, ObservationMetadata, ObservationProcessor, AIAProcessor,
     HARPProcessor, SXRProcessor, Prediction, Predictor, load_model, predict,
-    plot_flux_map, plot_uncertainty_map,
+    plot_flux_map, plot_uncertainty_map, parse_timestamp, PredictionSeries, load_observations,
 )
 
 __all__ = [
     "Observation", "ObservationMetadata", "ObservationProcessor", "AIAProcessor",
     "HARPProcessor", "SXRProcessor", "Prediction", "Predictor", "load_model", "predict",
-    "plot_flux_map", "plot_uncertainty_map",
+    "plot_flux_map", "plot_uncertainty_map", "parse_timestamp", "PredictionSeries", "load_observations",
 ]

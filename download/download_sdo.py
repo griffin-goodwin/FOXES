@@ -18,6 +18,7 @@ from astropy.io import fits
 from sunpy.io._fits import header_to_fits
 from sunpy.util import MetaDict
 from astropy import units as u
+from tqdm.auto import tqdm
 _JSOC_CONNECTION_LIMIT = threading.Semaphore(6)
 
 
@@ -231,6 +232,58 @@ class SDODownloader:
 
         time.sleep(.1)  # be gentle with the server
         logging.info('Finished: %s' % id)
+
+    def iter_download_range(self, dates, *, on_error="raise", progress=False):
+        """Resolve a requested UTC grid with one JSOC record/segment query.
+
+        ``dates`` contains increasing naive UTC datetimes. Query native 12s
+        records over the padded span so nearest-frame selection retains the
+        single-date tolerance even when the requested cadence is unaligned.
+        Only selected files are downloaded, one timestamp at a time. The
+        separate series-key discovery is cached. Caller owns file cleanup.
+        ``progress=True`` shows a tqdm bar for requested timestamps, counting
+        skipped attempts as well. The bar waits at zero during the bulk query.
+        """
+        dates = list(dates)
+        if on_error not in {"raise", "skip"}:
+            raise ValueError("on_error must be 'raise' or 'skip'")
+        if not dates:
+            return
+        if any(right <= left for left, right in zip(dates, dates[1:])):
+            raise ValueError("dates must be strictly increasing")
+        start = dates[0] - timedelta(seconds=self.tolerance)
+        # Include the final tolerance boundary despite JSOC duration endpoints.
+        duration = int(np.ceil((dates[-1] - start).total_seconds() + self.tolerance)) + 12
+        selector = 'aia.lev1_euv_12s[%sZ/%ds@12s][%s]{image}' % (
+            start.isoformat('_', timespec='microseconds'), duration, ','.join(self.wavelengths))
+        with tqdm(total=len(dates), desc="Querying JSOC", unit="observation", disable=not progress) as bar:
+            header, segment = self.drms_client.query(selector, key=self._keys_str(), seg='image')
+            times = pd.to_datetime(header['DATE__OBS'], errors='coerce', utc=True).dt.tz_localize(None)
+            bar.set_description("AIA observations")
+            with ThreadPool(self.n_workers) as pool:
+                for date in dates:
+                    try:
+                        mask = (times - date).abs() <= timedelta(seconds=self.tolerance)
+                        rows = self._select_nearest(header.loc[mask], segment.loc[mask], date)
+                        have = {int(row['WAVELNTH']) for row in rows}
+                        missing = [wl for wl in self.wavelengths if int(wl) not in have]
+                        if missing:
+                            raise FileNotFoundError(
+                                f"AIA frames missing within {self.tolerance}s of {date} UTC for wavelengths {missing}")
+                        queue = [(row.drop(['_seg', '_diff']).to_dict(), row['_seg'], date) for row in rows]
+                        paths = pool.map(self.download, queue)
+                    except Exception as exc:
+                        if on_error == "raise":
+                            raise
+                        logging.warning("Skipping AIA download at %s: %s", date, exc)
+                        bar.update(1)
+                    else:
+                        # Caller preprocessing/prediction time is included in the
+                        # ETA because the iterator resumes after consuming a sample.
+                        try:
+                            yield date, paths
+                        finally:
+                            bar.update(1)
 
 
 if __name__ == '__main__':
