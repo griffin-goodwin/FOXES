@@ -38,6 +38,90 @@ through Frontier Development Lab's Heliolab 2025.
 [Dataset](https://huggingface.co/datasets/griffingoodwin04/FOXES-Data) ·
 [Notebook Walkthrough](https://github.com/griffin-goodwin/FOXES/blob/main/tutorials/heliofoxes_demo/heliofoxes.ipynb)
 
+## API overview
+
+Import the public API with `import helio_foxes`. The examples below use
+`processor` for an `ObservationProcessor`, `model` for a `Predictor`,
+`result` for a `Prediction`, and `series` for a `PredictionSeries`.
+See the [Python API guide](https://github.com/griffin-goodwin/FOXES/blob/main/docs/python_api.md)
+for usage examples, or the **[complete API reference](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md)**
+for parameter descriptions, return values, and every keyword default, rendered
+from the source docstrings. `*` marks keyword-only arguments. The source links below open each definition
+in [helio_foxes/api.py](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py).
+
+| Function or method | What it does | Source |
+| --- | --- | --- |
+| `load_model(checkpoint_path, *, device='auto', aia_norm_path=None)` | Load a checkpoint and return a reusable `Predictor`. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#load_model) | [load_model](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1821-L1840) |
+| `predict(image, *, model, timestamp=None)` / `Predictor.predict(image, *, timestamp=None)` | Predict from an `Observation` or a processed AIA array. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predict) · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predictorpredict) | [predict](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1843-L1864), [Predictor.predict](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1737-L1818) |
+| `ObservationProcessor.fetch_observation(date, *, include_aia=None, include_harps=None, include_sxr=None) -> Observation` | Fetch and preprocess AIA with optional HARP regions and measured GOES flux. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationprocessorfetch_observation) | [ObservationProcessor.fetch_observation](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1047-L1093) |
+| `ObservationProcessor.iter_observations(start, end, *, cadence='1h', on_error='raise', save_dir=None, overwrite=False, progress=False, **kwargs)` | Yield observations over a time range; use `save_dir` to save and reuse processed observations. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationprocessoriter_observations) | [ObservationProcessor.iter_observations](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1095-L1254) |
+| `Predictor.predict_series(observations, *, snapshot_time=None, snapshot_wavelength=193)` | Predict a sequence and return a `PredictionSeries`; optionally retain an AIA snapshot. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predictorpredict_series) | [Predictor.predict_series](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1678-L1735) |
+| `plot_flux_map(prediction, *, ax=None, cmap='inferno', vmin=None, vmax=None, show_harp_boxes=False, harp_regions=None, timestamp=None, jsoc_email=None, min_harp_flux=1e-07, harp_label_fontsize=6, show_harp_uncertainty=True, harp_label_offsets=None, harp_label_max_shift=80, aia_image=None, harp_colors=None)` | Plot patch flux contributions, with optional HARP boxes. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#plot_flux_map) | [plot_flux_map](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1940-L2203) |
+| `plot_uncertainty_map(prediction, *, ax=None, cmap='magma', vmin=None, vmax=None)` | Plot Gaussian patch variance attribution when available. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#plot_uncertainty_map) | [plot_uncertainty_map](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L2205-L2252) |
+| `PredictionSeries.plot(*, harpnums=None, ax=None, include_full_disk=False, include_sxr=False, show_snapshot=False, snapshot_ax=None, aia_ax=None, show_uncertainty=True, min_peak_flux=0.0, legend='auto')` | Plot HARP light curves, with optional full-disk prediction, GOES comparison, and snapshot panels. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predictionseriesplot) | [PredictionSeries.plot](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1458-L1546) |
+| `PredictionSeries.to_dataframe()` | Return full-disk predictions and measured XRS-B flux indexed by UTC time. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predictionseriesto_dataframe) | [PredictionSeries.to_dataframe](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1379-L1387) |
+| `PredictionSeries.harp_light_curves()` | Return a dictionary of HARP numbers and regional light-curve DataFrames. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#predictionseriesharp_light_curves) | [PredictionSeries.harp_light_curves](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1389-L1411) |
+| `Observation.from_array(data, *, timestamp, wavelengths=(94, 131, 171, 193, 211, 304, 335), padding_factor=0.1, harp_regions=None, sxr=None)` | Wrap your processed AIA array and its metadata as an observation. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationfrom_array) | [Observation.from_array](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L224-L269) |
+| `Observation.from_npy(path, *, timestamp, **kwargs)` | Create an observation from a processed `.npy` stack. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationfrom_npy) | [Observation.from_npy](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L272-L292) |
+| `Observation.save(path, *, overwrite=False)` / `Observation.load(path)` | Save or restore one complete observation as a `.npz` archive. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationsave) · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#observationload) | [Observation.save](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L294-L353), [Observation.load](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L356-L382) |
+| `load_observations(directory, *, progress=False)` | Lazily load saved `.npz` observations for reuse. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#load_observations) | [load_observations](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L385-L416) |
+| `parse_timestamp(value)` | Convert supported timestamp formats to a UTC datetime. · [Docs](https://github.com/griffin-goodwin/FOXES/blob/main/docs/api_reference.md#parse_timestamp) | [parse_timestamp](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L28-L99) |
+
+For individual data sources, use [AIAProcessor.fetch_date(date)](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L697-L754),
+[HARPProcessor.fetch_date(date)](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L456-L506), or [SXRProcessor.fetch_date(date)](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L857-L951) on an
+instance of the corresponding `helio_foxes` class.
+[AIAProcessor.process_files(paths)](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L756-L796) processes local AIA FITS files.
+
+The public data classes are [ObservationMetadata](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L133-L179), [Observation](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L183-L382), [Prediction](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1258-L1309),
+and [PredictionSeries](https://github.com/griffin-goodwin/FOXES/blob/main/helio_foxes/api.py#L1335-L1626). A prediction exposes `flux`, `flux_map`, `harp_regions`,
+`sxr`, `intervals`, and `patch_uncertainty_map`. Gaussian uncertainty fields are
+`None` for deterministic checkpoints.
+
+### Processor and predictor constructors
+
+```python
+ObservationProcessor(*, email=None, resolution=512, tolerance=120, n_workers=4, aia_norm_path=None, include_aia=True, include_harps=True, harp_bbox_expansion=0.0, include_sxr=True, sxr_tolerance=120, sxr_satellite=None)
+```
+
+```python
+AIAProcessor(*, email=None, resolution=512, tolerance=120, n_workers=4, aia_norm_path=None)
+```
+
+```python
+HARPProcessor(*, email=None, resolution=512, padding_factor=0.1, bbox_expansion=0.0)
+```
+
+```python
+SXRProcessor(*, tolerance=120, satellite=None)
+```
+
+```python
+Predictor(checkpoint_path, *, device='auto', aia_norm_path=None)
+```
+
+`iter_observations(..., **kwargs)` forwards `include_aia`, `include_harps`,
+and `include_sxr` to `fetch_observation`. `Observation.from_npy(..., **kwargs)`
+accepts the `wavelengths`, `padding_factor`, `harp_regions`, and `sxr` options
+from `Observation.from_array`. See the complete reference for their meanings.
+
+### Discover functions and arguments interactively
+
+```python
+import inspect
+import helio_foxes
+
+print(helio_foxes.__all__)  # Names exported by the public API.
+print(inspect.signature(helio_foxes.load_model))  # Arguments and defaults.
+help(helio_foxes.ObservationProcessor.fetch_observation)  # Detailed documentation.
+help(helio_foxes.Prediction)  # Returned fields and their meanings.
+```
+
+In Jupyter, type `helio_foxes.` and press **Tab** to browse names, or run
+`helio_foxes.load_model?` to see its documentation. Use
+`help(helio_foxes.PredictionSeries.plot)` to inspect all light-curve plot options.
+
+
+
 ## Install
 
 From a local checkout:

@@ -6,6 +6,7 @@ Use this guide for observation inputs, time ranges, saved data, plotting, and
 measured GOES comparisons. Code examples assume an installed checkout and a
 compatible checkpoint on your machine.
 
+- [Complete signatures and docstring reference](api_reference.md)
 - [One observation and flux maps](#use-foxes-from-a-python-ui)
 - [Timestamp formats](#flexible-timestamps)
 - [Time ranges and HARP light curves](#time-ranges-and-harp-light-curves)
