@@ -52,24 +52,95 @@ For a fresh environment, editable tests, or notebook kernel setup, follow the
 
 ## Predict one observation
 
-Use a registered JSOC email and a compatible local checkpoint. Load the model
-once and reuse it for each observation.
+The examples below use the same timestamps, checkpoints, and plotting settings
+as the saved outputs in the
+[heliofoxes notebook](https://github.com/griffin-goodwin/FOXES/blob/main/tutorials/heliofoxes_demo/heliofoxes.ipynb).
+Use a registered JSOC email and download the checkpoints into the paths shown.
+Load the model once and reuse it for each observation.
 
 ```python
+from pathlib import Path
+import matplotlib.pyplot as plt
+import numpy as np
 import helio_foxes
 
+weights = Path("forecasting/trained_weights_and_normalization")
 model = helio_foxes.load_model(
-    "forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt",
+    weights / "updated_architecture_checkpoints" / "ComplexModel.ckpt",
     device="auto",
 )
-processor = helio_foxes.ObservationProcessor(email="you@example.com")
-observation = processor.fetch_observation("2023-08-01T00:00:00Z")
+processor = helio_foxes.ObservationProcessor(
+    email="you@example.com", harp_bbox_expansion=0.2,
+)
+observation = processor.fetch_observation("2023-07-11T01:30:00Z")
 result = model.predict(observation)
 
-print(result.flux)      # Full-disk SXR flux, W/m².
-print(result.flux_map)  # Spatial patch contributions, W/m².
-ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True)
+print(f"Predicted XRS-B: {result.flux:.3e} W/m²")
+if observation.sxr is not None:
+    print(f"Measured XRS-B: {observation.sxr['xrsb_flux']:.3e} W/m²")
+
+fig, ax = plt.subplots(figsize=(10, 7))
+helio_foxes.plot_flux_map(
+    result, ax=ax, show_harp_boxes=True, min_harp_flux=1e-7,
+)
+plt.show()
 ```
+
+Saved notebook output for **2023-07-11 at 01:30 UTC**:
+
+```text
+Predicted XRS-B: 2.695e-06 W/m²
+Measured XRS-B: 2.941e-06 W/m²
+```
+
+![Complex Gaussian patch flux map with HARP active-region boxes for 2023-07-11 at 01:30 UTC](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/docs/images/notebook-flux-map.png)
+
+
+### Inspect the AIA inputs
+
+Plot the seven processed channels from the same `observation`:
+
+```python
+fig, axes = plt.subplots(2, 4, figsize=(14, 7), constrained_layout=True)
+for ax, wavelength, image in zip(
+    axes.flat, observation.metadata.wavelengths, observation.data,
+):
+    low, high = np.percentile(image, [1, 99])
+    ax.imshow(image, origin="lower", cmap="gray", vmin=low, vmax=high)
+    ax.set_title(f"AIA {wavelength} Å")
+    ax.axis("off")
+for ax in axes.flat[len(observation.metadata.wavelengths):]:
+    ax.axis("off")
+plt.show()
+```
+
+![Seven processed AIA input channels for 2023-07-11 at 01:30 UTC](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/docs/images/notebook-aia-inputs.png)
+
+### Compare checkpoints
+
+Reuse the same observation to compare the three notebook checkpoints:
+
+```python
+checkpoints = {
+    "Complex Gaussian": weights / "updated_architecture_checkpoints" / "ComplexModel.ckpt",
+    "Lighter Gaussian": weights / "updated_architecture_checkpoints" / "SlightlyLighterModel.ckpt",
+    "Deterministic": weights / "inverted-attention-mask.ckpt",
+}
+for name, checkpoint in checkpoints.items():
+    predictor = helio_foxes.load_model(checkpoint, device="auto")
+    prediction = predictor.predict(observation)
+    print(f"{name}: {prediction.flux:.3e} W/m²")
+    del predictor
+```
+
+| Checkpoint | Saved prediction (W/m²) |
+| --- | ---: |
+| Complex Gaussian | 2.695 × 10⁻⁶ |
+| Lighter Gaussian | 2.947 × 10⁻⁶ |
+| Deterministic | 2.899 × 10⁻⁶ |
+
+The measured GOES XRS-B flux at the same time is **2.941 × 10⁻⁶ W/m²**,
+using GOES-16 and GOES-18. These are individual notebook examples.
 
 Fetching downloads and preprocesses AIA data and obtains supplementary HARP
 regions and GOES measurements. Raw downloads are temporary. Missing HARP or
@@ -83,15 +154,30 @@ Inputs must match the checkpoint's training preprocessing and wavelength order:
 
 ```python
 observations = processor.iter_observations(
-    "2024-03-23 01:00", "2024-03-23 02:30",
-    cadence="2min", progress=True, save_dir="saved_observations",
+    "2024-03-23 00:45", "2024-03-23 02:45",
+    cadence="1min", progress=True, save_dir="saved_observations",
+    on_error="skip",
 )
-series = model.predict_series(observations, snapshot_time="2024-03-23 01:45")
-ax = series.plot(show_snapshot=True, min_peak_flux=1e-7)
+series = model.predict_series(
+    observations, snapshot_time="2024-03-23 01:45", snapshot_wavelength=193,
+)
+ax = series.plot(
+    show_snapshot=True, show_uncertainty=True, min_peak_flux=1e-7, legend="auto",
+)
+plt.show()
 
 totals = series.to_dataframe()
 harp_curves = series.harp_light_curves()  # {HARP number: DataFrame}
 ```
+
+Using the Complex Gaussian `model` loaded above, the saved notebook run produced
+**121 predictions**. The flux-map and AIA panels show the retained snapshot at
+**2024-03-23 01:45 UTC**.
+
+![HARP light curves from 2024-03-23 00:45 to 02:45 UTC alongside the flux map and AIA 193 angstrom snapshot at 01:45 UTC](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/docs/images/notebook-light-curves.png)
+
+*Shading and regional ± values show the model's variance attribution;
+they are not calibrated yet.
 
 The iterator downloads and preprocesses observations one at a time. Existing
 saved files are reused, so rerunning a range skips completed downloads and
