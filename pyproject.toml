@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helio-foxes"
-version = "1.0.5"
+version = "1.0.6"
 description = "FOXES: Framework for Operational X-ray Emission Synthesis"
 readme = "README.md"
 requires-python = ">=3.10"

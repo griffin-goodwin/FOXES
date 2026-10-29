@@ -23,7 +23,7 @@ datasets:
   - griffingoodwin04/FOXES-Data
 ---
 
-# FOXES: A Framework for Operational X-ray Emission Synthesis
+# FOXES: Framework for Operational X-ray Emission Synthesis
 
 <p align="center">
   <img src="https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/foxes_logo.png" alt="FOXES Logo" width="300"/>
@@ -34,9 +34,9 @@ from seven-channel SDO/AIA extreme-ultraviolet images. This repository contains
 the Python API, data tools, training code, and evaluation workflows developed
 through Frontier Development Lab's Heliolab 2025.
 
-[Model demo](https://huggingface.co/spaces/griffingoodwin04/FOXES-model) ·
+[Model Demo](https://huggingface.co/spaces/griffingoodwin04/FOXES-model) ·
 [Dataset](https://huggingface.co/datasets/griffingoodwin04/FOXES-Data) ·
-[Notebook walkthrough](tutorials/heliofoxes_demo/heliofoxes.ipynb)
+[Notebook Walkthrough](https://github.com/griffin-goodwin/FOXES/blob/main/tutorials/heliofoxes_demo/heliofoxes.ipynb)
 
 ## Install
 
@@ -55,8 +55,23 @@ For a fresh environment, editable tests, or notebook kernel setup, follow the
 The examples below use the same timestamps, checkpoints, and plotting settings
 as the saved outputs in the
 [heliofoxes notebook](https://github.com/griffin-goodwin/FOXES/blob/main/tutorials/heliofoxes_demo/heliofoxes.ipynb).
-Use a registered JSOC email and download the checkpoints into the paths shown.
+Use a registered JSOC email and download the checkpoints below.
 Load the model once and reuse it for each observation.
+
+### Download checkpoints
+
+The single-observation and time-range examples use **Complex Gaussian**.
+Download the other two checkpoints to run the comparison example.
+Save each file at the path shown, relative to the directory where you run the code.
+These downloads are separate from the PyPI package.
+
+| Model | Download | Save as |
+| --- | --- | --- |
+| Complex Gaussian | [ComplexModel.ckpt](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/forecasting/trained_weights_and_normalization/updated_architecture_checkpoints/ComplexModel.ckpt) | `forecasting/trained_weights_and_normalization/updated_architecture_checkpoints/ComplexModel.ckpt` |
+| Lighter Gaussian | [SlightlyLighterModel.ckpt](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/forecasting/trained_weights_and_normalization/updated_architecture_checkpoints/SlightlyLighterModel.ckpt) | `forecasting/trained_weights_and_normalization/updated_architecture_checkpoints/SlightlyLighterModel.ckpt` |
+| Deterministic | [inverted-attention-mask.ckpt](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt) | `forecasting/trained_weights_and_normalization/inverted-attention-mask.ckpt` |
+
+### Load the model and predict
 
 ```python
 from pathlib import Path
