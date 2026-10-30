@@ -10,7 +10,9 @@ import os
 from time import perf_counter
 from tqdm import tqdm
 
-from forecasting.sampling import StratifiedFlareClassSampler, training_flare_class_indices
+from forecasting.sampling import (
+    ProportionalFlareClassSampler, StratifiedFlareClassSampler, training_flare_class_indices,
+)
 
 SXR_LOG_OFFSET = 1e-8
 
@@ -337,7 +339,10 @@ class AIAGOESDataModule(LightningDataModule):
     batch_size, num_workers : int
     wavelengths : list of int
     stratified_batches : bool
-        Balance quiet/C/M/X in training batches, reusing exhausted class pools.
+        Legacy toggle for balanced quiet/C/M/X batches when no strategy is set.
+    sampling_strategy : str or None
+        'shuffle', 'balanced' (reuse rare classes), or 'proportional' (training
+        fractions per batch, without replacement except distributed padding).
     sampling_seed : int
         Seed shared across ranks; epoch changes reshuffle the sampler.
     train_batches_per_epoch : int or None
@@ -347,12 +352,17 @@ class AIAGOESDataModule(LightningDataModule):
     def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,
                  sxr_norm, aia_norm_path=None, batch_size=64, num_workers=4,
                  wavelengths=AIA_WAVELENGTHS, stratified_batches=False,
-                 sampling_seed=0, train_batches_per_epoch=None):
+                 sampling_seed=0, train_batches_per_epoch=None, sampling_strategy=None):
         super().__init__()
         if not isinstance(stratified_batches, bool):
             raise ValueError('stratified_batches must be true or false')
-        if not stratified_batches and train_batches_per_epoch is not None:
-            raise ValueError('train_batches_per_epoch requires stratified_batches=true')
+        if sampling_strategy not in (None, 'shuffle', 'balanced', 'proportional'):
+            raise ValueError('sampling_strategy must be shuffle, balanced, or proportional')
+        if stratified_batches and sampling_strategy not in (None, 'balanced'):
+            raise ValueError('stratified_batches=true conflicts with sampling_strategy')
+        strategy = sampling_strategy or ('balanced' if stratified_batches else 'shuffle')
+        if strategy != 'balanced' and train_batches_per_epoch is not None:
+            raise ValueError('train_batches_per_epoch requires balanced sampling (stratified_batches=true)')
         self.aia_train_dir = aia_train_dir
         self.aia_val_dir = aia_val_dir
         self.aia_test_dir = aia_test_dir
@@ -365,6 +375,7 @@ class AIAGOESDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.wavelengths = wavelengths
         self.stratified_batches = stratified_batches
+        self.sampling_strategy = sampling_strategy
         self.sampling_seed = sampling_seed
         self.train_batches_per_epoch = train_batches_per_epoch
         self._class_indices_dataset = None
@@ -391,16 +402,22 @@ class AIAGOESDataModule(LightningDataModule):
 
     def train_dataloader(self):
         sampler = None
-        if self.stratified_batches:
+        strategy = self.sampling_strategy or ('balanced' if self.stratified_batches else 'shuffle')
+        if strategy != 'shuffle':
             if self._class_indices_dataset is not self.train_ds:
                 distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
                 self._training_class_indices = training_flare_class_indices(
                     self.train_ds, show_progress=not distributed or torch.distributed.get_rank() == 0,
                 )
                 self._class_indices_dataset = self.train_ds
-            sampler = StratifiedFlareClassSampler(
+            sampler_class = (ProportionalFlareClassSampler if strategy == 'proportional'
+                             else StratifiedFlareClassSampler)
+            options = {} if strategy == 'proportional' else {
+                'batches_per_epoch': self.train_batches_per_epoch,
+            }
+            sampler = sampler_class(
                 self.train_ds, self._training_class_indices, self.batch_size,
-                seed=self.sampling_seed, batches_per_epoch=self.train_batches_per_epoch,
+                seed=self.sampling_seed, **options,
             )
         return DataLoader(self.train_ds, batch_size=self.batch_size,
                           sampler=sampler, shuffle=sampler is None,

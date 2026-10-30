@@ -15,7 +15,7 @@ def training_flare_class_indices(dataset, show_progress=True):
     """Group training indices using raw scalar SXR files, without loading AIA."""
     groups = {name: [] for name in FLARE_CLASS_NAMES}
     if show_progress:
-        print('Grouping training targets for stratified quiet/C/M/X batches...', flush=True)
+        print('Grouping training targets for quiet/C/M/X batches...', flush=True)
     for index, timestamp in enumerate(dataset.samples):
         path = dataset.sxr_dir / f'{timestamp}.npy'
         value = np.load(path, allow_pickle=False)
@@ -30,7 +30,7 @@ def training_flare_class_indices(dataset, show_progress=True):
             print(f'Grouped {index + 1:,}/{len(dataset):,} training targets...', flush=True)
     if show_progress:
         counts = {name: len(indices) for name, indices in groups.items()}
-        print(f'Stratified training class counts: {counts}', flush=True)
+        print(f'Training class counts: {counts}', flush=True)
     return groups
 
 
@@ -123,3 +123,75 @@ class StratifiedFlareClassSampler(DistributedSampler):
                 batch.extend(selected[start:start + count].tolist())
             local_rng.shuffle(batch)
             yield from batch
+
+
+class ProportionalFlareClassSampler(DistributedSampler):
+    """Approximate training class fractions per batch, visiting every example.
+
+    Fractional quota deficits carry across batches, so rare classes need not
+    occur in every batch. Each class pool is shuffled once per epoch and used
+    without replacement. As with DistributedSampler, distributed runs pad by
+    at most world_size - 1 examples to give every rank the same length; the
+    final local batch may be partial. Empty classes are allowed.
+    """
+
+    def __init__(self, dataset, class_indices, batch_size, seed=0,
+                 num_replicas=None, rank=None):
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError('Proportional batching requires batch_size >= 1')
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError('Proportional sampling seed must be a nonnegative integer')
+        if set(class_indices) != set(FLARE_CLASS_NAMES):
+            raise ValueError('Proportional batching requires quiet/C/M/X index groups')
+        self.class_indices = tuple(
+            np.asarray(class_indices[name], dtype=np.int64) for name in FLARE_CLASS_NAMES
+        )
+        combined = np.concatenate(self.class_indices)
+        if (len(dataset) == 0 or combined.ndim != 1
+                or not np.array_equal(np.sort(combined), np.arange(len(dataset)))):
+            raise ValueError('Class groups must partition the nonempty training dataset')
+        distributed = dist.is_available() and dist.is_initialized()
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if distributed else 1
+        if rank is None:
+            rank = dist.get_rank() if distributed else 0
+        super().__init__(dataset, num_replicas=num_replicas, rank=rank, seed=seed)
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch]))
+        orders = [rng.permutation(indices) for indices in self.class_indices]
+        padding = self.total_size - len(self.dataset)
+        if padding:
+            # Random padding has the same expected distribution as the dataset.
+            repeated = np.resize(rng.permutation(len(self.dataset)), padding)
+            labels = np.empty(len(self.dataset), dtype=np.int64)
+            for class_index, indices in enumerate(self.class_indices):
+                labels[indices] = class_index
+            for class_index in range(len(orders)):
+                orders[class_index] = np.concatenate(
+                    (orders[class_index], repeated[labels[repeated] == class_index])
+                )
+        counts = np.array([len(order) for order in orders])
+        proportions = counts / self.total_size
+        offsets = np.zeros(len(orders), dtype=np.int64)
+        emitted = 0
+        for start in range(0, self.num_samples, self.batch_size):
+            size = min(self.batch_size, self.num_samples - start)
+            for rank in range(self.num_replicas):
+                desired = (emitted + size) * proportions - offsets
+                remaining = counts - offsets
+                quotas = np.minimum(np.floor(size * proportions).astype(np.int64), remaining)
+                # Largest outstanding deficit receives each leftover slot.
+                while quotas.sum() < size:
+                    deficits = np.where(quotas < remaining, desired - quotas, -np.inf)
+                    quotas[np.argmax(deficits)] += 1
+                batch = []
+                for class_index, count in enumerate(quotas):
+                    offset = offsets[class_index]
+                    batch.extend(orders[class_index][offset:offset + count].tolist())
+                offsets += quotas
+                emitted += size
+                rng.shuffle(batch)
+                if rank == self.rank:
+                    yield from batch

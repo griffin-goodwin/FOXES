@@ -377,6 +377,7 @@ def main():
         aia_norm_path=data_cfg.get('aia_norm_path'),
         wavelengths=config['wavelengths'],
         stratified_batches=sampling_cfg.get('stratified_batches', False),
+        sampling_strategy=sampling_cfg.get('strategy'),
         sampling_seed=sampling_cfg.get('seed', config.get('seed', 42)),
         train_batches_per_epoch=sampling_cfg.get('batches_per_epoch'),
     )
