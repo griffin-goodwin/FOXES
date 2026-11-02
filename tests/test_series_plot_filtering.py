@@ -14,10 +14,10 @@ def make_series():
     for minute, values in enumerate(([0, 2e-7], [1e-6, 2e-7], [0, 2e-7])):
         metadata = foxes.api.ObservationMetadata(f"2023-08-01 00:0{minute}", (7, 2, 2))
         predictions.append(foxes.Prediction(
-            metadata=metadata, flux=[0, 1e-6, 0][minute], flux_map=np.array([values]),
-            patch_uncertainty_map=np.array([[2e-7, 3e-7]]),
-            sxr={"xrsb_flux": [0, -1e-6, 1e-6][minute]},
-            harp_regions=[
+            metadata=metadata, total_flux=[0, 1e-6, 0][minute], flux_map=np.array([values]),
+            flux_std_map=np.array([[2e-7, 3e-7]]),
+            ground_truth=[0, -1e-6, 1e-6][minute],
+            harp_contributions=[
                 {"HARPNUM": 100, "top_pct": 0, "left_pct": 0, "width_pct": 50, "height_pct": 100},
                 {"HARPNUM": 200, "top_pct": 0, "left_pct": 50, "width_pct": 50, "height_pct": 100},
             ],
@@ -35,7 +35,7 @@ def test_log_lines_mask_nonpositive_values_and_preserve_data():
     for name in ("HARP 100", "FOXES full disk"):
         np.testing.assert_allclose(lines[name].get_ydata(), [np.nan, 1e-6, np.nan], equal_nan=True)
     np.testing.assert_allclose(lines["Observed GOES XRS-B"].get_ydata(), [np.nan, np.nan, 1e-6], equal_nan=True)
-    assert series.harp_light_curves()[100].flux_sum.iloc[0] == 0
+    assert series.harp_light_curves()[100].total_flux.iloc[0] == 0
     for collection in ax.collections:
         for path in collection.get_paths():
             assert np.all(path.vertices[:, 1] > 0)

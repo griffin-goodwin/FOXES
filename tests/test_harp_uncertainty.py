@@ -16,38 +16,38 @@ def box(harpnum=1234, *, top=0, left=0, width=100, height=100):
 
 def prediction(regions, *, with_uncertainty=True, metadata=None):
     return helio_foxes.Prediction(
-        metadata=metadata, flux=1e-7,
+        metadata=metadata, total_flux=1e-7,
         flux_map=np.array([[1, 2], [3, 4]]) * 1e-8,
-        patch_uncertainty_map=(np.array([[3, 4], [0, 12]]) * 1e-9 if with_uncertainty else None),
-        harp_regions=regions,
+        flux_std_map=(np.array([[3, 4], [0, 12]]) * 1e-9 if with_uncertainty else None),
+        harp_contributions=regions,
     )
 
 
 def test_harp_quadrature_matches_flux_geometry_and_does_not_mutate_regions():
     regions = [box(), box(2, top=50, height=50), box(3, height=50), box(4, width=10, height=10)]
     result = prediction(regions)
-    assert [row["flux_sum"] for row in result.harp_regions] == pytest.approx([1e-7, 3e-8, 7e-8, 0])
+    assert [row["total_flux"] for row in result.harp_contributions] == pytest.approx([1e-7, 3e-8, 7e-8, 0])
     # sqrt(3**2 + 4**2 + 12**2) = 13, not the sum of sigmas (19).
-    assert [row["flux_sum_uncertainty"] for row in result.harp_regions] == pytest.approx(
+    assert [row["flux_std"] for row in result.harp_contributions] == pytest.approx(
         [13e-9, 5e-9, 12e-9, 0], abs=1e-20,
     )
-    assert all("flux_sum_uncertainty" not in row for row in regions)
+    assert all("flux_std" not in row for row in regions)
 
 
 def test_variances_are_squared_in_float64_to_preserve_small_values():
     result = helio_foxes.Prediction(
-        flux=1e-20, flux_map=np.ones((1, 2)) * 5e-21,
-        patch_uncertainty_map=np.array([[3, 4]], dtype=np.float32) * 1e-30,
-        harp_regions=[box()],
+        total_flux=1e-20, flux_map=np.ones((1, 2)) * 5e-21,
+        flux_std_map=np.array([[3, 4]], dtype=np.float32) * 1e-30,
+        harp_contributions=[box()],
     )
-    assert result.harp_regions[0]["flux_sum_uncertainty"] == pytest.approx(5e-30, rel=1e-6, abs=0)
+    assert result.harp_contributions[0]["flux_std"] == pytest.approx(5e-30, rel=1e-6, abs=0)
 
 
 def test_deterministic_prediction_has_no_uncertainty_instead_of_reusing_stale_value():
-    region = {**box(), "flux_sum_uncertainty": 9e-9}
+    region = {**box(), "flux_std": 9e-9}
     result = prediction([region], with_uncertainty=False)
-    assert result.harp_regions[0]["flux_sum_uncertainty"] is None
-    assert region["flux_sum_uncertainty"] == 9e-9
+    assert result.harp_contributions[0]["flux_std"] is None
+    assert region["flux_std"] == 9e-9
 
 
 @pytest.mark.parametrize("uncertainty,match", [
@@ -57,8 +57,8 @@ def test_deterministic_prediction_has_no_uncertainty_instead_of_reusing_stale_va
 ])
 def test_prediction_rejects_invalid_uncertainty_maps(uncertainty, match):
     with pytest.raises(ValueError, match=match):
-        helio_foxes.Prediction(flux=4e-9, flux_map=np.ones((2, 2)) * 1e-9,
-                         patch_uncertainty_map=uncertainty, harp_regions=[box()])
+        helio_foxes.Prediction(total_flux=4e-9, flux_map=np.ones((2, 2)) * 1e-9,
+                         flux_std_map=uncertainty, harp_contributions=[box()])
 
 
 @pytest.mark.parametrize("show_uncertainty", [False, True])
@@ -72,7 +72,7 @@ def test_uncertainty_label_toggle_does_not_change_results(show_uncertainty, with
     if show_uncertainty and with_uncertainty:
         text += "\n± 1.30e-08"
     assert ax.texts[0].get_text() == text
-    assert result.harp_regions[0]["flux_sum_uncertainty"] == (pytest.approx(13e-9) if with_uncertainty else None)
+    assert result.harp_contributions[0]["flux_std"] == (pytest.approx(13e-9) if with_uncertainty else None)
     plt.close(ax.figure)
 
 
@@ -82,15 +82,15 @@ def test_explicit_boxes_get_uncertainty_from_prediction_map(monkeypatch):
     monkeypatch.setattr(helio_foxes.HARPProcessor, "fetch", lambda *a, **kw: pytest.fail("Plot must not query"))
     ax = result.plot_flux_map(min_harp_flux=0, harp_regions=[box(top=50, height=50)])
     assert ax.texts[0].get_text() == "#1234\n3.00e-08\n± 5.00e-09"
-    assert result.harp_regions is None
+    assert result.harp_contributions is None
     plt.close(ax.figure)
 
 
 def test_manual_offsets_keep_uncertainty_labels_readable_after_resize():
     regions = [box(10000 + i, left=48 + i * 2, top=48, width=1, height=1)
                for i in range(3)]
-    result = helio_foxes.Prediction(flux=4.096e-6, flux_map=np.full((64, 64), 1e-9),
-                              patch_uncertainty_map=np.full((64, 64), 2e-10), harp_regions=regions)
+    result = helio_foxes.Prediction(total_flux=4.096e-6, flux_map=np.full((64, 64), 1e-9),
+                              flux_std_map=np.full((64, 64), 2e-10), harp_contributions=regions)
     offsets = {10000: (-100, 30), 10001: (0, -70), 10002: (100, 30)}
     ax = result.plot_flux_map(
         show_harp_boxes=True, min_harp_flux=0,
@@ -117,8 +117,8 @@ def test_manual_offsets_keep_uncertainty_labels_readable_after_resize():
 def test_colliding_labels_shift_without_overlap_or_font_shrinking(top, left, with_uncertainty):
     regions = [box(10000 + i, top=top, left=left, width=3, height=3) for i in range(4)]
     result = helio_foxes.Prediction(
-        flux=4.096e-6, flux_map=np.full((64, 64), 1e-9), harp_regions=regions,
-        patch_uncertainty_map=np.full((64, 64), 2e-10) if with_uncertainty else None,
+        total_flux=4.096e-6, flux_map=np.full((64, 64), 1e-9), harp_contributions=regions,
+        flux_std_map=np.full((64, 64), 2e-10) if with_uncertainty else None,
     )
     ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=0, harp_label_fontsize=10)
     ax.figure.canvas.draw()

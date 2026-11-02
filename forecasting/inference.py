@@ -113,8 +113,8 @@ def _legacy_calibration(config, model=None):
     )
     if calibration.enabled and getattr(model, 'predicts_uncertainty', False):
         raise ValueError(
-            'legacy_model=True is only supported for deterministic legacy '
-            'checkpoints; use legacy_model=False for uncertainty models'
+            'Legacy correction is only supported for deterministic legacy '
+            'checkpoints; disable legacy correction for uncertainty models'
         )
     return calibration
 

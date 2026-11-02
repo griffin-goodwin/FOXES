@@ -35,7 +35,7 @@ def predictors(model, monkeypatch, tmp_path, **options):
     checkpoint.touch()
     return (
         helio_foxes.FOXESModel(checkpoint, device="cpu"),
-        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_model=True, **options),
+        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_correction_enabled=True, **options),
     )
 
 
@@ -58,21 +58,23 @@ def test_public_prediction_scales_all_physical_outputs(model, monkeypatch, tmp_p
     original = native.predict(observation)
     corrected = legacy.predict(observation)
     repeated = legacy.predict(observation)
-    assert corrected.legacy_model is True
+    assert corrected.legacy_correction_enabled is True
     assert corrected.flux_scale_factor == scale
     assert corrected.metadata is observation.metadata
-    assert corrected.sxr is observation.sxr
-    assert corrected.flux == pytest.approx(original.flux * scale)
+    assert corrected.ground_truth == observation.sxr["xrsb_flux"] == 1e-6
+    assert corrected.total_flux == pytest.approx(original.total_flux * scale)
     np.testing.assert_allclose(corrected.flux_map, original.flux_map * scale)
-    assert corrected.flux_map.sum() == pytest.approx(corrected.flux)
-    assert corrected.harp_regions[0]["flux_sum"] == pytest.approx(original.flux * scale)
+    assert corrected.flux_map.sum() == pytest.approx(corrected.total_flux)
+    assert corrected.harp_contributions[0]["total_flux"] == pytest.approx(original.total_flux * scale)
     np.testing.assert_array_equal(repeated.flux_map, corrected.flux_map)
     np.testing.assert_array_equal(np.asarray(model.sxr_norm), norm)
-    assert corrected.intervals is None
-    assert corrected.patch_uncertainty_map is None
+    assert corrected.prediction_intervals is None
+    assert corrected.flux_std_map is None
     frame = helio_foxes.PredictionTimeSeries((corrected,)).full_disk_light_curve()
+    assert frame.iloc[0].legacy_correction_enabled
     assert frame.iloc[0].flux_scale_factor == scale
-    assert frame.iloc[0].observed_flux == 1e-6
+    assert frame.iloc[0].ground_truth == 1e-6
+    assert frame.iloc[0].total_flux == corrected.total_flux
 
 
 def test_custom_cutoff(model, monkeypatch, tmp_path):
@@ -89,8 +91,8 @@ def test_custom_cutoff(model, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("bad", ["true", "false", 1])
 def test_invalid_legacy_flag_rejected_before_loading(bad):
-    with pytest.raises(ValueError, match="legacy_model must be a boolean"):
-        helio_foxes.FOXESModel("missing.ckpt", legacy_model=bad)
+    with pytest.raises(ValueError, match="legacy_correction_enabled must be a boolean"):
+        helio_foxes.FOXESModel("missing.ckpt", legacy_correction_enabled=bad)
 
 
 def test_timestamp_stems_and_invalid_dates():
@@ -193,7 +195,7 @@ def test_gaussian_checkpoints_reject_legacy_correction(tmp_path, checkpoint_form
         checkpoint = tmp_path / 'gaussian.pt'
         torch.save({'model': gaussian}, checkpoint)
     with pytest.raises(ValueError, match="only supported for deterministic"):
-        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_model=True)
+        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_correction_enabled=True)
     dataset = TensorDataset(torch.ones(1, 2, 2, 7), torch.tensor([1e-6]))
     with pytest.raises(ValueError, match="only supported for deterministic"):
         next(evaluate_model_on_dataset(
@@ -213,10 +215,10 @@ def test_gaussian_checkpoints_reject_legacy_correction(tmp_path, checkpoint_form
 def test_legacy_correction_defaults_by_checkpoint_name(model, monkeypatch, checkpoint, legacy_model, expected):
     monkeypatch.setattr("forecasting.inference.load_model_from_config", lambda config: model)
     monkeypatch.setattr("helio_foxes.api._resolve_checkpoint", lambda checkpoint: "model.ckpt")
-    options = {} if legacy_model is None else {"legacy_model": legacy_model}
-    assert helio_foxes.FOXESModel(checkpoint, device="cpu", **options).legacy_model is expected
+    options = {} if legacy_model is None else {"legacy_correction_enabled": legacy_model}
+    assert helio_foxes.FOXESModel(checkpoint, device="cpu", **options).legacy_correction_enabled is expected
 
 
 def test_checkpoint_files_default_to_no_legacy_correction(model, monkeypatch, tmp_path):
     native, _ = predictors(model, monkeypatch, tmp_path)
-    assert native.legacy_model is False
+    assert native.legacy_correction_enabled is False

@@ -35,8 +35,8 @@ model = helio_foxes.FOXESModel("inverted-attention-mask")
 ```
 
 If you load a legacy checkpoint from a file path instead, pass
-`legacy_model=True` yourself, since FOXES can't tell from the path. Pass
-`legacy_model=False` to see the uncorrected output.
+`legacy_correction_enabled=True` yourself, since FOXES can't tell from the path.
+Pass `legacy_correction_enabled=False` to see the uncorrected output.
 
 With the correction on, any prediction before **2016-11-19 00:00 UTC** is
 multiplied by **0.7** (to remove a SWPC scaling bias), and anything after is left alone. The factor applies to

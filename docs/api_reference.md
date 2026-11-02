@@ -85,7 +85,6 @@ fetcher uses; most people won't need them directly.
 .. autoclass:: helio_foxes.Prediction
    :members:
    :member-order: bysource
-   :exclude-members: observed_flux
 ```
 
 ### PredictionTimeSeries

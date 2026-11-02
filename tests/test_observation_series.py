@@ -175,15 +175,15 @@ def test_harp_series_gaps_and_model_reuse():
         def predict(self, observation):
             calls.append(observation.metadata.timestamp)
             return foxes.Prediction(
-                metadata=observation.metadata, flux=4e-6, flux_map=np.ones((2, 2)) * 1e-6,
-                harp_regions=[region] if len(calls) != 2 else [],
+                metadata=observation.metadata, total_flux=4e-6, flux_map=np.ones((2, 2)) * 1e-6,
+                harp_contributions=[region] if len(calls) != 2 else [],
             )
 
     series = foxes.FOXESModel.predict_time_series(Model(), iter(observations))
     assert len(calls) == 3
     curve = series.harp_light_curves()[12]
-    np.testing.assert_allclose(curve.flux_sum, [4e-6, np.nan, 4e-6], equal_nan=True)
-    assert curve.flux_sum_uncertainty.isna().all()
+    np.testing.assert_allclose(curve.total_flux, [4e-6, np.nan, 4e-6], equal_nan=True)
+    assert curve.flux_std.isna().all()
     assert str(curve.index.tz) == "UTC"
     ax = series.plot_light_curves(show_full_disk=True)
     assert len(ax.lines) == 2

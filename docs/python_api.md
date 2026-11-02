@@ -13,7 +13,7 @@ ObservationFetcher().fetch(time)   ──►  Observation
 FOXESModel().predict(observation)  ◄─────────┘
                                              │
                                              ▼
-                                         Prediction  ──►  .flux, .observed_flux, .flux_map, .harp_regions
+                                         Prediction  ──►  .total_flux, .ground_truth, .flux_map, .harp_contributions
                                                           .plot_flux_map(), .plot_uncertainty_map()
 ```
 
@@ -70,22 +70,36 @@ fetcher = helio_foxes.ObservationFetcher()
 observation = fetcher.fetch("2023-08-01T00:00:00Z")
 result = model.predict(observation)
 
-print(f"Predicted SXR flux: {result.flux:.3e} W/m²")
-print(f"Observed GOES flux: {result.observed_flux:.3e} W/m²")
-print("68% interval:", result.intervals["68"])
+print(f"Predicted GOES XRS-B flux: {result.total_flux:.3e} W/m²")
+if result.ground_truth is not None:
+    print(f"Measured GOES XRS-B flux: {result.ground_truth:.3e} W/m²")
+print("68% interval:", result.prediction_intervals["68"])
 result.plot_flux_map()
 plt.show()
 ```
 
-`result.flux_map` holds the per-patch contribution to the soft x-ray flux... they add up to
-`result.flux`. The boxes drawn on the map are HARP active regions; the flux
-inside each HARP is saved in `result.harp_regions`. `result.observed_flux` is
-the measured GOES XRS-B flux at the same time, for comparison (`None` if GOES
-had no data).
+The prediction fields are `metadata`, `total_flux`, `flux_map`, `prediction_intervals`,
+`flux_std_map`, `harp_contributions`, `ground_truth`, `legacy_correction_enabled`, and
+`flux_scale_factor`.
 
-The current checkpoint also gives you Gaussian uncertainty estimates per prediction, along with a
-per-patch uncertainty map (`result.patch_uncertainty_map`), which you can
-plot with `result.plot_uncertainty_map()`.
+`result.flux_map` holds the per-patch contribution to the soft x-ray flux... they add up to
+`result.total_flux`. The boxes drawn on the map are HARP active regions; the flux
+inside each HARP is saved in `result.harp_contributions`. `result.ground_truth` is
+the matched measured GOES XRS-B flux in W/m², for comparison (`None` if no
+sample is available). GOES XRS-B covers the 1–8 Å band.
+
+Each HARP row contains `total_flux` and `flux_std` in W/m², alongside its
+region ID and bounding box. `flux_std` is the square root of the summed
+patch variance contributions inside the box. These are model-assigned
+uncertainty attributions; regional calibration hasn't been established.
+`flux_std` is `None` for deterministic checkpoints. HARP light-curve tables
+use these same column names.
+
+The current checkpoint also gives you nominal 68% and 95% full-disk
+`prediction_intervals`. They are asymmetric in W/m² because the Gaussian
+is defined in transformed log-flux space. `result.flux_std_map` contains the
+per-patch standard-deviation contributions: their squares add to the
+full-disk variance. Plot them with `result.plot_uncertainty_map()`.
 
 ## Predict a Time Range
 
@@ -103,6 +117,8 @@ plt.show()
 series.full_disk_light_curve().to_csv("predictions.csv")
 harp_curves = series.harp_light_curves()
 ```
+
+Full-disk light-curve tables use `total_flux` and `ground_truth` columns in W/m².
 
 Observations are downloaded and processed one at a time, so long ranges won't
 fill up your memory. Anything already in `save_dir` is reused instead of
@@ -151,5 +167,5 @@ has more plotting and data-loading examples.
 The older deterministic checkpoints need a correction for their outdated
 training targets. Loading one by name, e.g.
 `FOXESModel("inverted-attention-mask")`, turns it on for you; if you load one
-from a file path, pass `legacy_model=True`. [Legacy Models](models.md#legacy-models)
+from a file path, pass `legacy_correction_enabled=True`. [Legacy Models](models.md#legacy-models)
 explains what the correction does.

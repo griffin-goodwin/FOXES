@@ -127,12 +127,12 @@ def test_bbox_dense_edge_sampling_covers_near_limb_extremum():
     assert box["width_pct"] > 2.82
 
 
-@pytest.mark.parametrize("expansion,expected,flux_sum", [
+@pytest.mark.parametrize("expansion,expected,total_flux", [
     (0, {"top_pct": 25.0, "left_pct": 25.0, "width_pct": 50.0, "height_pct": 50.0}, 30e-9),
     (0.5, {"top_pct": 0.0, "left_pct": 0.0, "width_pct": 100.0, "height_pct": 100.0}, 120e-9),
     (100, {"top_pct": 0.0, "left_pct": 0.0, "width_pct": 100.0, "height_pct": 100.0}, 120e-9),
 ])
-def test_bbox_expansion_clips_to_crop_and_changes_prediction_sums(monkeypatch, expansion, expected, flux_sum):
+def test_bbox_expansion_clips_to_crop_and_changes_prediction_sums(monkeypatch, expansion, expected, total_flux):
     projected = SimpleNamespace(
         Tx=SimpleNamespace(to_value=lambda unit: np.array([-500.0, 500.0])),
         Ty=SimpleNamespace(to_value=lambda unit: np.array([-500.0, 500.0])),
@@ -148,11 +148,11 @@ def test_bbox_expansion_clips_to_crop_and_changes_prediction_sums(monkeypatch, e
     box = HARPProcessor(resolution=4, padding_factor=0, bbox_expansion=expansion)._bbox_to_pixel_fractions(row)
     assert box == expected
     result = Prediction(
-        flux=120e-9, flux_map=np.arange(16).reshape(4, 4) * 1e-9,
-        harp_regions=[{"HARPNUM": 1234, **box}],
+        total_flux=120e-9, flux_map=np.arange(16).reshape(4, 4) * 1e-9,
+        harp_contributions=[{"HARPNUM": 1234, **box}],
     )
-    assert result.harp_regions[0]["flux_sum"] == pytest.approx(flux_sum)
-    assert result.harp_regions[0]["width_pct"] == expected["width_pct"]
+    assert result.harp_contributions[0]["total_flux"] == pytest.approx(total_flux)
+    assert result.harp_contributions[0]["width_pct"] == expected["width_pct"]
 
 
 @pytest.mark.parametrize("expansion", [-0.1, np.nan, np.inf])

@@ -17,7 +17,7 @@ from forecasting.model import CoupledGaussianViTLocal, ViTLocal
 def _prediction(flux_map):
     """Wrap a bare flux map so it can be plotted."""
     flux_map = np.asarray(flux_map)
-    return helio_foxes.Prediction(flux=float(flux_map.sum()), flux_map=flux_map)
+    return helio_foxes.Prediction(total_flux=float(flux_map.sum()), flux_map=flux_map)
 
 
 def test_aia_processor_uses_temporary_files_and_returns_stack(monkeypatch):
@@ -112,26 +112,31 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     )
     observation = helio_foxes.Observation(data=image, metadata=metadata, harp_regions=regions, sxr=sxr)
     result = predictor.predict(observation)
+    assert set(vars(result)) == {
+        "metadata", "total_flux", "flux_map", "prediction_intervals", "flux_std_map",
+        "harp_contributions", "ground_truth", "legacy_correction_enabled", "flux_scale_factor",
+    }
     assert result.metadata is metadata
-    assert result.sxr is sxr
-    assert result.observed_flux == 1e-6
-    assert result.harp_regions is not regions
-    assert result.harp_regions[0]["harpnum"] == 1234
-    assert result.harp_regions[0]["flux_sum"] == pytest.approx(float(max(result.flux_map[1, 0], 0)))
-    assert result.harp_regions[0]["top_pct"] == regions[0]["top_pct"]
-    assert "flux_sum" not in regions[0]
+    assert result.ground_truth == 1e-6
+    assert isinstance(result.ground_truth, float)
+    assert not hasattr(result, "observed_flux")
+    assert result.harp_contributions is not regions
+    assert result.harp_contributions[0]["harpnum"] == 1234
+    assert result.harp_contributions[0]["total_flux"] == pytest.approx(float(max(result.flux_map[1, 0], 0)))
+    assert result.harp_contributions[0]["top_pct"] == regions[0]["top_pct"]
+    assert "total_flux" not in regions[0]
     assert result.flux_map.shape == (2, 2)
-    assert np.isclose(result.flux_map.sum(), result.flux, rtol=1e-5)
+    assert np.isclose(result.flux_map.sum(), result.total_flux, rtol=1e-5)
     if model_class is CoupledGaussianViTLocal:
-        assert set(result.intervals) == {"68", "95"}
-        assert result.patch_uncertainty_map.shape == (2, 2)
-        assert result.harp_regions[0]["flux_sum_uncertainty"] == pytest.approx(
-            float(result.patch_uncertainty_map[1, 0]),
+        assert set(result.prediction_intervals) == {"68", "95"}
+        assert result.flux_std_map.shape == (2, 2)
+        assert result.harp_contributions[0]["flux_std"] == pytest.approx(
+            float(result.flux_std_map[1, 0]),
         )
     else:
-        assert result.intervals is None
-        assert result.patch_uncertainty_map is None
-        assert result.harp_regions[0]["flux_sum_uncertainty"] is None
+        assert result.prediction_intervals is None
+        assert result.flux_std_map is None
+        assert result.harp_contributions[0]["flux_std"] is None
 
     monkeypatch.setattr(
         helio_foxes.HARPProcessor, "fetch",
@@ -139,22 +144,22 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     )
     ax = result.plot_flux_map(min_harp_flux=0)
     assert ax.images[0].origin == "lower"
-    predicted_title = f"Predicted FOXES: {result.flux:.2e}"
-    if result.patch_uncertainty_map is not None:
-        full_disk_uncertainty = np.sqrt(np.sum(np.square(result.patch_uncertainty_map)))
+    predicted_title = f"FOXES Prediction: {result.total_flux:.2e}"
+    if result.flux_std_map is not None:
+        full_disk_uncertainty = np.sqrt(np.sum(np.square(result.flux_std_map)))
         predicted_title += f" ± {full_disk_uncertainty:.2e}"
     assert f"{predicted_title} W/m²" in ax.get_title()
     assert "Observed SXR-B: 1.00e-06 W/m²" in ax.get_title()
     assert len(ax.patches) == 1
-    expected_label = f'#1234\n{result.harp_regions[0]["flux_sum"]:.2e}'
-    if result.patch_uncertainty_map is not None:
-        expected_label += f'\n± {result.harp_regions[0]["flux_sum_uncertainty"]:.2e}'
+    expected_label = f'#1234\n{result.harp_contributions[0]["total_flux"]:.2e}'
+    if result.flux_std_map is not None:
+        expected_label += f'\n± {result.harp_contributions[0]["flux_std"]:.2e}'
     assert ax.texts[0].get_text() == expected_label
     plt.close(ax.figure)
 
     wrapped = predictor.predict(helio_foxes.Observation.from_array(image, timestamp="2023-08-01"))
     assert wrapped.metadata.timestamp == datetime(2023, 8, 1, tzinfo=timezone.utc)
-    assert wrapped.harp_regions is None and wrapped.sxr is None and wrapped.observed_flux is None
+    assert wrapped.harp_contributions is None and wrapped.ground_truth is None
     with pytest.raises(TypeError, match="Observation.from_array"):
         predictor.predict(image)
     with pytest.raises(ValueError, match="Observation has no AIA data"):
@@ -166,7 +171,7 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
 @pytest.mark.parametrize("method", ["plot_flux_map", "plot_uncertainty_map"])
 def test_plot_map_color_limits(method):
     values = np.array([[1e-9, 1e-8], [0, 1e-7]])
-    result = helio_foxes.Prediction(flux=float(values.sum()), flux_map=values, patch_uncertainty_map=values)
+    result = helio_foxes.Prediction(total_flux=float(values.sum()), flux_map=values, flux_std_map=values)
     plotter = getattr(result, method)
     ax = plotter()
     assert ax.images[0].norm.vmin == 1e-9
@@ -211,7 +216,7 @@ def test_plot_flux_map_never_queries_jsoc(monkeypatch):
     monkeypatch.setattr(helio_foxes.HARPProcessor, "fetch", lambda *a, **kw: pytest.fail("Plot must not query"))
     metadata = helio_foxes.api.ObservationMetadata(timestamp="2023-08-01", image_shape=(7, 2, 2))
     result = helio_foxes.Prediction(
-        flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), metadata=metadata,
+        total_flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), metadata=metadata,
     )
     ax = result.plot_flux_map(show_harp_boxes=True)
     assert not ax.patches
@@ -322,7 +327,7 @@ def test_observation_records_harp_expansion(monkeypatch):
     observation = processor.fetch("2023-08-01", include_harps=False)
     assert calls == []
     assert observation.metadata.harp_bbox_expansion == 0.1
-    result = helio_foxes.Prediction(flux=4e-9, flux_map=np.full((2, 2), 1e-9), metadata=observation.metadata)
+    result = helio_foxes.Prediction(total_flux=4e-9, flux_map=np.full((2, 2), 1e-9), metadata=observation.metadata)
     ax = result.plot_flux_map()
     assert calls == []
     plt.close(ax.figure)
@@ -339,8 +344,8 @@ def test_plot_does_not_repeat_fetched_harp_queries(monkeypatch, regions):
         lambda *args, **kwargs: pytest.fail("Already-fetched HARPs must not be queried again"),
     )
     result = helio_foxes.Prediction(
-        flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]),
-        harp_regions=regions,
+        total_flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]),
+        harp_contributions=regions,
     )
     for _ in range(2):
         ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=0)
@@ -360,17 +365,17 @@ def test_prediction_reports_harp_ids_locations_and_flux_sums():
         {"HARPNUM": 3456, "top_pct": 0, "left_pct": 0, "width_pct": 10, "height_pct": 10},
     ]
     result = helio_foxes.Prediction(
-        flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), harp_regions=regions,
+        total_flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), harp_contributions=regions,
     )
-    assert [harp["harpnum"] for harp in result.harp_regions] == [1234, 5678, 9012, 3456]
-    assert [harp["flux_sum"] for harp in result.harp_regions] == pytest.approx([3e-9, 2e-9, 1e-8, 0])
-    assert result.harp_regions[0]["LON_MIN"] == -30.0
-    assert result.harp_regions[0]["LON_MAX"] == -10.0
-    assert result.harp_regions[0]["LAT_MIN"] == 10.0
-    assert result.harp_regions[0]["LAT_MAX"] == 30.0
-    assert result.harp_regions[0]["top_pct"] == 0
-    assert result.harp_regions[0]["width_pct"] == 50
-    assert all("flux_sum" not in region for region in regions)
+    assert [harp["harpnum"] for harp in result.harp_contributions] == [1234, 5678, 9012, 3456]
+    assert [harp["total_flux"] for harp in result.harp_contributions] == pytest.approx([3e-9, 2e-9, 1e-8, 0])
+    assert result.harp_contributions[0]["LON_MIN"] == -30.0
+    assert result.harp_contributions[0]["LON_MAX"] == -10.0
+    assert result.harp_contributions[0]["LAT_MIN"] == 10.0
+    assert result.harp_contributions[0]["LAT_MAX"] == 30.0
+    assert result.harp_contributions[0]["top_pct"] == 0
+    assert result.harp_contributions[0]["width_pct"] == 50
+    assert all("total_flux" not in region for region in regions)
 
 
 def test_harp_labels_include_sorted_fluxes_and_match_fixed_rank_colors():
@@ -471,12 +476,12 @@ def test_harp_flux_threshold_filters_only_plot(threshold, visible):
         {"HARPNUM": 3003, "top_pct": 0, "left_pct": 0, "width_pct": 50, "height_pct": 50},
     ]
     result = helio_foxes.Prediction(
-        flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), harp_regions=regions,
+        total_flux=1e-8, flux_map=np.array([[1e-9, 2e-9], [3e-9, 4e-9]]), harp_contributions=regions,
     )
     ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=threshold)
     assert len(ax.patches) == visible
     assert len(ax.texts) == visible
-    assert len(result.harp_regions) == 3
+    assert len(result.harp_contributions) == 3
     assert not any(panel.tables for panel in ax.figure.axes)
     plt.close(ax.figure)
 

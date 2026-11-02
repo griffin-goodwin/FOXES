@@ -606,7 +606,7 @@ class FOXESModel:
         paths.
     device : {"auto", "cpu", "cuda", "mps"}, default "auto"
         Where to run the model. ``"auto"`` uses a GPU if one is available.
-    legacy_model : bool or None, default None
+    legacy_correction_enabled : bool or None, default None
         Turn on the approximate correction for the old deterministic
         checkpoints: flux (full-disk and per patch) is multiplied by 0.7 for
         times before ``legacy_cutoff``. ``None`` turns it on for the legacy
@@ -621,20 +621,22 @@ class FOXESModel:
     """
 
     def __init__(self, checkpoint="uncertainty", *, device="auto",
-                 legacy_model=None, legacy_cutoff="2016-11-19"):
+                 legacy_correction_enabled=None, legacy_cutoff="2016-11-19"):
         """Load the checkpoint; see the class docstring."""
         from forecasting.inference import load_model_from_config
         from forecasting.calibration import LegacyCalibration
 
-        if legacy_model is None:
-            legacy_model = PRETRAINED_CHECKPOINTS.get(str(checkpoint), "").startswith("LegacyModels/")
-        self.legacy_calibration = LegacyCalibration(legacy_model, legacy_cutoff)
-        self.legacy_model = self.legacy_calibration.enabled
+        if legacy_correction_enabled is not None and not isinstance(legacy_correction_enabled, bool):
+            raise ValueError("legacy_correction_enabled must be a boolean")
+        if legacy_correction_enabled is None:
+            legacy_correction_enabled = PRETRAINED_CHECKPOINTS.get(str(checkpoint), "").startswith("LegacyModels/")
+        self.legacy_calibration = LegacyCalibration(legacy_correction_enabled, legacy_cutoff)
+        self.legacy_correction_enabled = self.legacy_calibration.enabled
         self.legacy_cutoff = self.legacy_calibration.cutoff
         path = _resolve_checkpoint(checkpoint)
         self.model = load_model_from_config({
             "data": {"checkpoint_path": str(path)}, "device": device,
-            "legacy_model": legacy_model, "legacy_cutoff": self.legacy_cutoff,
+            "legacy_model": legacy_correction_enabled, "legacy_cutoff": self.legacy_cutoff,
         })
         self.device = next(self.model.parameters()).device
         self.model_kwargs = dict(self.model.hparams["model_kwargs"])
@@ -696,7 +698,7 @@ class FOXESModel:
                 if observation.data is None:
                     raise ValueError("AIA data is required to retain a snapshot")
                 channel = observation.metadata.wavelengths.index(snapshot_wavelength)
-                snapshot = _make_aia_snapshot(observation.data[channel], prediction, snapshot_wavelength)
+                snapshot = _make_aia_snapshot(observation.data[channel], observation, snapshot_wavelength)
                 best_distance = distance
 
         if not predictions:
@@ -718,7 +720,8 @@ class FOXESModel:
             Its AIA stack has to be ``(7, H, W)`` with channels in the order
             94, 131, 171, 193, 211, 304, 335 Å, and ``H`` and ``W`` have to
             match the checkpoint (512 × 512 for the current one). Its
-            metadata, HARPs, and GOES data are carried over to the result.
+            metadata and HARPs are carried over to the result. Its measured
+            GOES XRS-B flux becomes the result's ``ground_truth``.
 
         Returns
         -------
@@ -765,7 +768,7 @@ class FOXESModel:
                 intervals_raw = uncertainty_from_prediction(
                     flux, variance, self.model.sxr_norm,
                 )
-                intervals = {
+                prediction_intervals = {
                     level: (
                         float(intervals_raw[f"lower_{level}"].item()),
                         float(intervals_raw[f"upper_{level}"].item()),
@@ -776,17 +779,19 @@ class FOXESModel:
                 ).reshape(grid, grid).detach().cpu().numpy()
             else:
                 flux, patches = outputs
-                intervals = None
+                prediction_intervals = None
                 patch_uncertainty = None
         flux_map = patches.reshape(grid, grid).detach().cpu().numpy()
         if scale != 1.0:
             flux_map = flux_map * scale
+        ground_truth = observation.sxr.get("xrsb_flux") if observation.sxr else None
         return Prediction(
             metadata=metadata,
-            flux=float(flux.item()) * scale, flux_map=flux_map,
-            intervals=intervals, patch_uncertainty_map=patch_uncertainty,
-            harp_regions=observation.harp_regions, sxr=observation.sxr,
-            legacy_model=self.legacy_model, flux_scale_factor=scale,
+            total_flux=float(flux.item()) * scale, flux_map=flux_map,
+            prediction_intervals=prediction_intervals, flux_std_map=patch_uncertainty,
+            harp_contributions=observation.harp_regions,
+            ground_truth=float(ground_truth) if ground_truth is not None else None,
+            legacy_correction_enabled=self.legacy_correction_enabled, flux_scale_factor=scale,
         )
 
 
@@ -796,81 +801,78 @@ class Prediction:
 
     Returned by :meth:`FOXESModel.predict`. Read the numbers from the
     attributes below, or draw them with :meth:`plot_flux_map` and
-    :meth:`plot_uncertainty_map`. ``flux`` is the prediction and
-    ``observed_flux`` is the measured GOES value at the same time. All fluxes
-    are in W/m².
+    :meth:`plot_uncertainty_map`. ``total_flux`` is the prediction and
+    ``ground_truth`` is the matched measured GOES XRS-B flux. All fluxes are
+    in W/m², for the 1–8 Å band.
 
-    A note on the uncertainties: the Gaussian checkpoint predicts a variance
-    for the full-disk flux and splits it across the patches.
-    ``patch_uncertainty_map`` and each HARP's ``flux_sum_uncertainty`` show
-    that split. There are no X-ray measurements of individual regions to
-    check them against, so read them as "where the model's uncertainty comes
-    from" rather than as tested error bars for each region.
+    The Gaussian checkpoint assigns a variance contribution to each patch.
+    ``flux_std_map`` contains their square roots; the squares add to the
+    full-disk variance. Each HARP's ``flux_std`` is the square root of the
+    summed variance contributions inside its box. These are model-assigned
+    uncertainty attributions; calibration against individual regional X-ray
+    measurements hasn't been established.
 
     Attributes
     ----------
     metadata : ObservationMetadata or None
         Metadata from the input observation, kept so HARP boxes can be drawn
         later. The input array itself isn't kept.
-    flux : float
+    total_flux : float
         Predicted full-disk soft X-ray flux.
     flux_map : numpy.ndarray
-        2D map of each patch's contribution to ``flux``. It's on the
+        2D map of each patch's contribution to ``total_flux``. It's on the
         model's patch grid (64 × 64 for the current checkpoint), not at
         image resolution.
-    intervals : dict or None
-        ``{"68": (low, high), "95": (low, high)}`` prediction intervals.
-        ``None`` for deterministic checkpoints.
-    patch_uncertainty_map : numpy.ndarray or None
-        Each patch's share of the full-disk uncertainty, as a standard
-        deviation (see the note above). ``None`` for deterministic
-        checkpoints.
-    harp_regions : list of dict or None
+    prediction_intervals : dict or None
+        ``{"68": (low, high), "95": (low, high)}`` nominal full-disk
+        prediction intervals in W/m². They are asymmetric because the
+        Gaussian is defined in normalized log-flux space. ``None`` for
+        deterministic checkpoints.
+    flux_std_map : numpy.ndarray or None
+        2D map of the standard-deviation contributions described above, on
+        the same patch grid as ``flux_map``. ``None`` for deterministic
+        checkpoints. Add variances (squared values), rather than these values.
+    harp_contributions : list of dict or None
         One dict per active region. Each has ``harpnum``, the box position
         (``top_pct``, ``left_pct``, ``width_pct``, ``height_pct``), and
-        ``flux_sum``, the total of the positive patch contributions whose
+        ``total_flux``, the total of the positive patch contributions whose
         centers fall inside the box. Boxes can overlap, so a patch can count
-        toward more than one region. ``flux_sum_uncertainty`` is
-        ``sqrt(sum(patch_uncertainty_map**2))`` over the same patches, or
+        toward more than one region. ``flux_std`` is
+        ``sqrt(sum(flux_std_map**2))`` over the same patches, or
         ``None`` for deterministic checkpoints. The original JSOC columns,
         including the heliographic longitude and latitude bounds, are kept
         too. ``None`` means HARPs weren't fetched; an empty list means none
         were usable.
-    observed_flux : float or None
-        Measured GOES XRS-B flux, for comparison with ``flux``. ``None`` if
-        there's no GOES data for this time.
-    sxr : dict or None
-        All the GOES data carried over from the observation, including
-        ``xrsa_flux`` and the satellite used.
-    legacy_model : bool
-        Whether the legacy correction was turned on (see :class:`FOXESModel`).
+    ground_truth : float or None
+        Matched measured GOES XRS-B flux, for comparison with ``total_flux``.
+        The sample may be offset from the requested time within the fetcher's
+        tolerance, and may average multiple satellites. Its provenance is in
+        the input observation's ``sxr`` data. ``None`` if no sample is available.
+    legacy_correction_enabled : bool
+        Whether legacy correction is enabled (see :class:`FOXESModel`).
+        This can be ``True`` with a scale factor of 1.0 after the cutoff.
     flux_scale_factor : float
-        Factor that was applied to ``flux`` and ``flux_map``: 0.7 for legacy
+        Factor that was applied to ``total_flux`` and ``flux_map``: 0.7 for legacy
         predictions before the cutoff date, otherwise 1.0. The measured
-        ``sxr`` values are never scaled.
+        ``ground_truth`` values are never scaled.
     """
 
     metadata: ObservationMetadata | None = field(default=None, kw_only=True)
-    flux: float
+    total_flux: float
     flux_map: np.ndarray
-    intervals: dict[str, tuple[float, float]] | None = None
-    patch_uncertainty_map: np.ndarray | None = None
-    harp_regions: list[dict] | None = None
-    sxr: dict | None = None
-    legacy_model: bool = field(default=False, kw_only=True)
+    prediction_intervals: dict[str, tuple[float, float]] | None = None
+    flux_std_map: np.ndarray | None = None
+    harp_contributions: list[dict] | None = None
+    ground_truth: float | None = None
+    legacy_correction_enabled: bool = field(default=False, kw_only=True)
     flux_scale_factor: float = field(default=1.0, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(
-            self, "harp_regions", _harp_region_fluxes(
-                self.flux_map, self.harp_regions, self.patch_uncertainty_map,
+            self, "harp_contributions", _harp_region_fluxes(
+                self.flux_map, self.harp_contributions, self.flux_std_map,
             ),
         )
-
-    @property
-    def observed_flux(self):
-        """Measured GOES XRS-B flux in W/m², or ``None`` without GOES data."""
-        return self.sxr.get("xrsb_flux") if self.sxr else None
 
     def plot_flux_map(self, *, ax=None, cmap="inferno", vmin=None, vmax=None,
                       show_harp_boxes=True, harp_regions=None,
@@ -983,14 +985,14 @@ class Prediction:
         if not np.isfinite(harp_label_max_shift) or harp_label_max_shift < 0:
             raise ValueError("harp_label_max_shift must be finite and nonnegative")
         if harp_regions is None:
-            harp_regions = self.harp_regions
+            harp_regions = self.harp_contributions
         regions = sorted(
             (region for region in _harp_region_fluxes(
                 flux_map, harp_regions,
-                self.patch_uncertainty_map,
+                self.flux_std_map,
             )
-             if region["flux_sum"] >= min_harp_flux),
-            key=lambda region: (-region["flux_sum"], region["harpnum"]),
+             if region["total_flux"] >= min_harp_flux),
+            key=lambda region: (-region["total_flux"], region["harpnum"]),
         ) if show_harp_boxes and harp_regions else []
         if ax is None:
             _, ax = plt.subplots()
@@ -1006,13 +1008,13 @@ class Prediction:
             ax.set(xlabel="X (AIA pixels)", ylabel="Y (AIA pixels)")
         if aia_image is None:
             title = []
-            observed = self.observed_flux
+            observed = self.ground_truth
             if observed is not None and np.isfinite(observed):
                 title.append(f"Observed SXR-B: {observed:.2e} W/m²")
-            if self.flux is not None and np.isfinite(self.flux):
-                predicted = f"Predicted FOXES: {self.flux:.2e}"
-                if self.patch_uncertainty_map is not None:
-                    uncertainty = np.sqrt(np.sum(np.square(self.patch_uncertainty_map)))
+            if self.total_flux is not None and np.isfinite(self.total_flux):
+                predicted = f"FOXES Prediction: {self.total_flux:.2e}"
+                if self.flux_std_map is not None:
+                    uncertainty = np.sqrt(np.sum(np.square(self.flux_std_map)))
                     if np.isfinite(uncertainty):
                         predicted += f" ± {uncertainty:.2e}"
                 title.append(f"{predicted} W/m²")
@@ -1048,9 +1050,9 @@ class Prediction:
                 ax.add_patch(outline)
                 region_bounds = outline.get_window_extent(renderer)
                 occupied_regions.append(region_bounds)
-                text = f'#{region["harpnum"]}\n{region["flux_sum"]:.2e}'
-                if show_harp_uncertainty and region["flux_sum_uncertainty"] is not None:
-                    text += f'\n± {region["flux_sum_uncertainty"]:.2e}'
+                text = f'#{region["harpnum"]}\n{region["total_flux"]:.2e}'
+                if show_harp_uncertainty and region["flux_std"] is not None:
+                    text += f'\n± {region["flux_std"]:.2e}'
                 # Text extends diagonally outward from each corner.
                 horizontal = [(x, "right", -3), (x + box_width, "left", 3)]
                 vertical = [(y, "top", -3), (y + box_height, "bottom", 3)]
@@ -1110,7 +1112,7 @@ class Prediction:
         return ax
 
     def plot_uncertainty_map(self, *, ax=None, cmap="magma", vmin=None, vmax=None):
-        """Plot patch uncertainty contributions with a logarithmic color scale.
+        """Plot ``flux_std_map`` contributions with a logarithmic color scale.
 
         Parameters
         ----------
@@ -1137,24 +1139,24 @@ class Prediction:
         from matplotlib import pyplot as plt
         from matplotlib.colors import LogNorm
 
-        if self.patch_uncertainty_map is None:
+        if self.flux_std_map is None:
             raise ValueError("This prediction has no patch uncertainty map (deterministic checkpoint)")
-        uncertainty_map = np.asarray(self.patch_uncertainty_map)
-        if uncertainty_map.ndim != 2 or not np.isfinite(uncertainty_map).all():
-            raise ValueError("uncertainty_map must be a finite 2D array")
-        positive = uncertainty_map[uncertainty_map > 0]
+        flux_std_map = np.asarray(self.flux_std_map)
+        if flux_std_map.ndim != 2 or not np.isfinite(flux_std_map).all():
+            raise ValueError("flux_std_map must be a finite 2D array")
+        positive = flux_std_map[flux_std_map > 0]
         if positive.size == 0:
-            raise ValueError("uncertainty_map must contain positive contributions")
+            raise ValueError("flux_std_map must contain positive contributions")
         low, high = _log_limits(positive, vmin, vmax)
         if ax is None:
             _, ax = plt.subplots()
         artist = ax.imshow(
-            np.ma.masked_less_equal(uncertainty_map, 0),
+            np.ma.masked_less_equal(flux_std_map, 0),
             origin="lower", cmap=cmap,
             norm=LogNorm(vmin=low, vmax=high)
         )
         ax.set(xlabel="X (Patches)", ylabel="Y (Patches)")
-        ax.figure.colorbar(artist, ax=ax, label="Patch uncertainty contribution (W m$^{-2}$)")
+        ax.figure.colorbar(artist, ax=ax, label="Patch flux standard-deviation contribution (W m$^{-2}$)")
         return ax
 
 
@@ -1205,17 +1207,17 @@ class PredictionTimeSeries:
     def full_disk_light_curve(self):
         """Return the full-disk light curve as a DataFrame indexed by UTC time.
 
-        Columns are ``flux`` (predicted) and ``observed_flux`` (measured
+        Columns are ``total_flux`` (predicted) and ``ground_truth`` (measured
         GOES XRS-B, if available), both in W/m². Legacy series also get
-        ``legacy_model`` and ``flux_scale_factor`` columns.
+        ``legacy_correction_enabled`` and ``flux_scale_factor`` columns.
         """
         rows = [{
-            "timestamp": self._timestamp(p), "flux": p.flux,
-            "observed_flux": p.observed_flux,
+            "timestamp": self._timestamp(p), "total_flux": p.total_flux,
+            "ground_truth": p.ground_truth,
         } for p in self.predictions]
-        frame = pd.DataFrame(rows, columns=["timestamp", "flux", "observed_flux"])
-        if any(p.legacy_model for p in self.predictions):
-            frame["legacy_model"] = [p.legacy_model for p in self.predictions]
+        frame = pd.DataFrame(rows, columns=["timestamp", "total_flux", "ground_truth"])
+        if any(p.legacy_correction_enabled for p in self.predictions):
+            frame["legacy_correction_enabled"] = [p.legacy_correction_enabled for p in self.predictions]
             frame["flux_scale_factor"] = [p.flux_scale_factor for p in self.predictions]
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         return frame.set_index("timestamp")
@@ -1224,24 +1226,24 @@ class PredictionTimeSeries:
         """Return one light curve per active region, as ``{harpnum: DataFrame}``.
 
         Each DataFrame is indexed by UTC time and covers every prediction in
-        the series, with ``flux_sum`` and ``flux_sum_uncertainty`` columns in
+        the series, with ``total_flux`` and ``flux_std`` columns in
         W/m². If a region isn't present at a time, or there's no uncertainty,
         that value is NaN. Nothing is interpolated or filled with zeros.
         """
         #Get the index of the predictions (based on their timestamps)
         index = self.full_disk_light_curve().index
-        #For each prediction, get the harpnum from its harp_regions (if any), and collect all unique harpnums across the series.
-        ids = sorted({r["harpnum"] for p in self.predictions for r in p.harp_regions or []})
+        # Collect all HARP numbers present across the series.
+        ids = sorted({r["harpnum"] for p in self.predictions for r in p.harp_contributions or []})
 
-        #For the available harps, loop through each num and collect the flux_sum and flux_sum_uncertainty for each prediction, creating a DataFrame for each harpnum.
+        # Collect flux and uncertainty at every prediction time for each HARP.
         curves = {}
         for harpnum in ids:
             rows = []
             for prediction in self.predictions:
-                region = next((r for r in prediction.harp_regions or [] if r["harpnum"] == harpnum), {})
-                rows.append([region.get("flux_sum", np.nan), region.get("flux_sum_uncertainty", np.nan)])
+                region = next((r for r in prediction.harp_contributions or [] if r["harpnum"] == harpnum), {})
+                rows.append([region.get("total_flux", np.nan), region.get("flux_std", np.nan)])
             curves[harpnum] = pd.DataFrame(
-                rows, index=index, columns=["flux_sum", "flux_sum_uncertainty"], dtype=float,
+                rows, index=index, columns=["total_flux", "flux_std"], dtype=float,
             )
         return curves
 
@@ -1262,7 +1264,7 @@ class PredictionTimeSeries:
             raise ValueError(f"No predictions for HARP numbers {sorted(unknown)}")
         selected = []
         for harpnum in requested:
-            flux = _positive_flux(curves[harpnum]["flux_sum"])
+            flux = _positive_flux(curves[harpnum]["total_flux"])
             if np.isfinite(flux).any() and np.nanmax(flux) >= threshold:
                 selected.append(harpnum)
         return selected
@@ -1301,7 +1303,7 @@ class PredictionTimeSeries:
         keeps the same color even when you filter regions out.
 
         **Uncertainty.** For Gaussian checkpoints, each region gets a shaded
-        band of ± one ``flux_sum_uncertainty``. A band whose lower edge would
+        band of ± one ``flux_std``. A band whose lower edge would
         fall at or below zero is left out. Deterministic checkpoints get no
         bands. As in :class:`Prediction`, these are the model's uncertainty
         split across regions, not tested regional error bars.
@@ -1386,10 +1388,10 @@ class PredictionTimeSeries:
         ax.set_yscale("log")
         for harpnum in selected:
             curve = curves[harpnum]
-            flux = _positive_flux(curve["flux_sum"])
+            flux = _positive_flux(curve["total_flux"])
             ax.plot(curve.index, flux, color=colors[harpnum], marker=".", markersize=2.5, label=f"HARP {harpnum}")
             if show_uncertainty:
-                sigma = curve["flux_sum_uncertainty"].to_numpy(dtype=float)
+                sigma = curve["flux_std"].to_numpy(dtype=float)
                 lower, upper = flux - sigma, flux + sigma
                 valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & (lower > 0) & np.isfinite(upper)
                 if valid.any():
@@ -1400,9 +1402,9 @@ class PredictionTimeSeries:
                     has_uncertainty = True
         totals = self.full_disk_light_curve()
         if show_full_disk:
-            ax.plot(totals.index, _positive_flux(totals["flux"]), color="black", marker=".", markersize=2.5, label="FOXES full disk")
+            ax.plot(totals.index, _positive_flux(totals["total_flux"]), color="black", marker=".", markersize=2.5, label="FOXES full disk")
         if show_observed:
-            ax.plot(totals.index, _positive_flux(totals["observed_flux"]), color="0.5", linestyle="--", marker=".", markersize=2.5, label="Observed GOES XRS-B")
+            ax.plot(totals.index, _positive_flux(totals["ground_truth"]), color="0.5", linestyle="--", marker=".", markersize=2.5, label="Observed GOES XRS-B")
         ax.set(xlabel="Requested time (UTC)", ylabel="SXR flux (W/m²)")
         from matplotlib.dates import AutoDateLocator, ConciseDateFormatter, date2num
         locator = AutoDateLocator()
@@ -1424,8 +1426,8 @@ class PredictionTimeSeries:
         assert snapshot is not None and snapshot.data is not None
         assert snapshot_ax is not None and aia_ax is not None
         prediction = next(p for p in self.predictions if self._timestamp(p) == snapshot.metadata.timestamp)
-        regions = [r for r in prediction.harp_regions or []
-                   if r["harpnum"] in selected and np.isfinite(r["flux_sum"]) and r["flux_sum"] > 0]
+        regions = [r for r in prediction.harp_contributions or []
+                   if r["harpnum"] in selected and np.isfinite(r["total_flux"]) and r["total_flux"] > 0]
         aia_ax.set_title(
             f"AIA {snapshot.metadata.wavelengths[0]} Å\n"
             f"{snapshot.metadata.timestamp:%Y-%m-%d %H:%M:%S} UTC"
@@ -2145,11 +2147,9 @@ def _decode_observation_metadata(value):
     return value
 
 
-def _make_aia_snapshot(image, prediction, wavelength):
+def _make_aia_snapshot(image, observation, wavelength):
     """Copy one channel into a visualization-only Observation with its provenance."""
-    metadata = prediction.metadata
-    if metadata is None:
-        raise ValueError("Every series prediction needs timestamp metadata")
+    metadata = observation.metadata
     return Observation(
         data=np.array(image, copy=True)[np.newaxis],
         metadata=ObservationMetadata(
@@ -2157,7 +2157,7 @@ def _make_aia_snapshot(image, prediction, wavelength):
             wavelengths=(wavelength,), padding_factor=metadata.padding_factor,
             harp_bbox_expansion=metadata.harp_bbox_expansion,
         ),
-        harp_regions=prediction.harp_regions, sxr=prediction.sxr,
+        harp_regions=observation.harp_regions, sxr=observation.sxr,
     )
 
 
@@ -2188,16 +2188,16 @@ def _harp_box_patch_sum(flux_map, *, top, left, width, height):
     return float(np.maximum(flux_map[np.ix_(inside_y, inside_x)], 0).sum())
 
 
-def _harp_region_fluxes(flux_map, regions, patch_uncertainty_map=None):
+def _harp_region_fluxes(flux_map, regions, flux_std_map=None):
     """Copy HARP boxes and sum their flux and additive variance contributions."""
     flux_map = np.asarray(flux_map)
     patch_variance = None
-    if patch_uncertainty_map is not None:
-        uncertainty = np.asarray(patch_uncertainty_map, dtype=float)
+    if flux_std_map is not None:
+        uncertainty = np.asarray(flux_std_map, dtype=float)
         if uncertainty.ndim != 2 or uncertainty.shape != flux_map.shape:
-            raise ValueError("patch_uncertainty_map must be 2D and match flux_map shape")
+            raise ValueError("flux_std_map must be 2D and match flux_map shape")
         if not np.isfinite(uncertainty).all() or (uncertainty < 0).any():
-            raise ValueError("patch_uncertainty_map must be finite and nonnegative")
+            raise ValueError("flux_std_map must be finite and nonnegative")
         patch_variance = np.square(uncertainty)
     if regions is None:
         return None
@@ -2217,10 +2217,10 @@ def _harp_region_fluxes(flux_map, regions, patch_uncertainty_map=None):
             "harpnum": int(harpnum),
             "top_pct": top, "left_pct": left,
             "width_pct": width, "height_pct": height,
-            "flux_sum": _harp_box_patch_sum(
+            "total_flux": _harp_box_patch_sum(
                 flux_map, top=top, left=left, width=width, height=height,
             ),
-            "flux_sum_uncertainty": float(np.sqrt(_harp_box_patch_sum(
+            "flux_std": float(np.sqrt(_harp_box_patch_sum(
                 patch_variance, top=top, left=left, width=width, height=height,
             ))) if patch_variance is not None else None,
         })

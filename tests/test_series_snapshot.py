@@ -16,9 +16,10 @@ class SnapshotModel:
     def predict(self, observation):
         # Reverse ID/flux rank order to ensure colors are keyed by identity.
         return foxes.Prediction(
-            metadata=observation.metadata, flux=10e-6,
+            metadata=observation.metadata, total_flux=10e-6,
             flux_map=np.array([[1, 4], [2, 3]]) * 1e-6,
-            harp_regions=observation.harp_regions,
+            harp_contributions=observation.harp_regions,
+            ground_truth=observation.sxr.get("xrsb_flux") if observation.sxr else None,
         )
 
 
@@ -26,8 +27,9 @@ class UncertainSnapshotModel(SnapshotModel):
     def predict(self, observation):
         result = super().predict(observation)
         return foxes.Prediction(
-            metadata=result.metadata, flux=result.flux, flux_map=result.flux_map,
-            harp_regions=result.harp_regions, patch_uncertainty_map=np.full((2, 2), 0.2e-6),
+            metadata=result.metadata, total_flux=result.total_flux, flux_map=result.flux_map,
+            harp_contributions=result.harp_contributions, flux_std_map=np.full((2, 2), 0.2e-6),
+            ground_truth=result.ground_truth,
         )
 
 
@@ -68,6 +70,22 @@ def test_target_ties_choose_earlier_and_channel_can_be_changed():
     assert series.snapshot.metadata.wavelengths == (171,)
     with pytest.raises(ValueError, match="absent"):
         make_series(snapshot_time="2023-08-01", snapshot_wavelength=999)
+
+
+def test_snapshot_keeps_goes_metadata_with_scalar_prediction_groundtruth():
+    original = next(observations())
+    sxr = {"xrsb_flux": 1e-6, "xrsa_flux": 1e-8, "satellite": "GOES-18"}
+    observation = foxes.Observation(
+        metadata=original.metadata, data=original.data,
+        harp_regions=original.harp_regions, sxr=sxr,
+    )
+    series = foxes.FOXESModel.predict_time_series(
+        SnapshotModel(), [observation], snapshot_time=observation.metadata.timestamp,
+    )
+    assert series.predictions[0].ground_truth == 1e-6
+    assert series.snapshot.sxr is sxr
+    assert series.snapshot.harp_regions is observation.harp_regions
+    assert list(series.full_disk_light_curve().columns) == ["total_flux", "ground_truth"]
 
 
 def test_no_target_retains_no_image(monkeypatch):
@@ -184,8 +202,8 @@ def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
     assert all("±" in label.get_text() for label in ax.figure.axes[1].texts)
     curves = series.harp_light_curves()
     for polygon, harpnum in zip(ax.collections, curves):
-        sigma = curves[harpnum].flux_sum_uncertainty.iloc[0]
-        flux = curves[harpnum].flux_sum.iloc[0]
+        sigma = curves[harpnum].flux_std.iloc[0]
+        flux = curves[harpnum].total_flux.iloc[0]
         ys = np.concatenate([path.vertices[:, 1] for path in polygon.get_paths()])
         assert min(ys) == pytest.approx(flux - sigma)
         assert max(ys) == pytest.approx(flux + sigma)
