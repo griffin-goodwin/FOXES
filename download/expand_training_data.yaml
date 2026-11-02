@@ -1,0 +1,47 @@
+# Settings for download/expand_training_data.py. All times are UTC.
+
+# Timestamps already in these folders (searched recursively) are never planned again.
+existing_dirs:
+  - /Volumes/T9/FOXES_Data/AIA_processed/train
+  - /Volumes/T9/AIA_flares
+# Nothing is sampled on, or within heldout_guard_minutes of, any day that appears here.
+heldout_dirs:
+  - /Volumes/T9/FOXES_Data/AIA_processed/val
+  - /Volumes/T9/FOXES_Data/AIA_processed/test
+output_dir: /Volumes/T9/FOXES_training_expansion
+# Combined GOES files (combined_g*_avg1m_*), read with data/align_aia_sxr.py.
+goes_dir: /Volumes/T9/SXR_2010_2023
+
+# Registered JSOC emails, assigned round-robin to download threads.
+jsoc_emails:
+  - ggoodwin5@gsu.edu
+  - griffingoodwin04@gmail.com
+  - griffingoodwin04@icloud.com
+
+# Inclusive date ranges to sample: the existing training periods. Validation covers
+# March-June 2023 and July 22-30; test starts August 2023.
+date_ranges:
+  - ["2012-01-14", "2022-12-31"]
+  - ["2023-07-01", "2023-07-20"]
+
+# Near-event samples: every event_cadence_minutes within ±event_half_window_minutes
+# of each peak whose GOES class letter is in event_classes.
+event_classes: ABCMX
+event_half_window_minutes: 45
+event_cadence_minutes: 1
+# Inter-event samples: a grid every inter_event_cadence_minutes, jittered by up to
+# ±inter_event_jitter_minutes. Skips any flare of any class (padded by
+# inter_event_guard_minutes) and every peak window.
+inter_event_cadence_minutes: 180
+inter_event_jitter_minutes: 45
+inter_event_guard_minutes: 30
+heldout_guard_minutes: 60
+# Randomly keep at most this many candidates (null keeps all); each pair is ~7 MiB.
+max_samples: 100000
+seed: 42
+catalog_workers: 4        # parallel HEK month queries
+
+resolution: 512
+aia_tolerance_seconds: 60
+parallel_timestamps: 15   # timestamps downloaded at once, one thread each
+wavelength_workers: 7     # parallel FITS downloads within one timestamp
