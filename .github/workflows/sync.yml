@@ -4,16 +4,35 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-hugging-face
+  cancel-in-progress: true
+
 jobs:
   sync-to-hub:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
           lfs: true
+      - name: Prepare Hugging Face LFS history
+        run: |
+          # Include historical LFS objects needed by the rewritten mirror.
+          git lfs fetch --all origin main
+          # Rewrite only this disposable runner checkout. GitHub Pages keeps
+          # its regular PNGs; Hugging Face needs LFS pointers for every PNG.
+          # Explicit paths override the Pages exceptions in .gitattributes.
+          git lfs migrate import \
+            --include-ref=refs/heads/main \
+            --include="*.png,docs/_static/foxes-logo.png,model_assets/UncertaintyModelResults/evaluation/plots/*.png" \
+            --yes
       - name: Push to HF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push --force https://griffingoodwin04:$HF_TOKEN@huggingface.co/griffingoodwin04/FOXES main:main
+          git push --force "https://griffingoodwin04:${HF_TOKEN}@huggingface.co/griffingoodwin04/FOXES" main:main
