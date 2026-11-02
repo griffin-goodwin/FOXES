@@ -63,9 +63,9 @@ class ObservationFetcher:
 
     The sources fail differently. If the AIA download or processing fails,
     you get an error, since there's nothing to predict on. HARP and GOES are
-    extras: if they fail you get an empty region list or ``sxr=None`` and
+    extras: if they fail you get an empty region list or ``sxr_data=None`` and
     the observation still comes back. A source you turned off shows up as
-    ``None`` (``data=None`` for AIA, ``harp_regions=None`` for HARPs).
+    ``None`` (``aia_data=None`` for AIA, ``harp_regions=None`` for HARPs).
     """
 
     def __init__(self, *, email=None,
@@ -153,7 +153,7 @@ class ObservationFetcher:
         regions = self.harp_processor.fetch(timestamp) if include_harps else None
         sxr = self.sxr_processor.fetch(timestamp) if include_sxr else None
         return Observation(
-            metadata=metadata, data=stack, harp_regions=regions, sxr=sxr,
+            metadata=metadata, aia_data=stack, harp_regions=regions, sxr_data=sxr,
         )
 
     def fetch_range(self, start, end, *, cadence="1h", on_error="raise",
@@ -276,13 +276,13 @@ class ObservationFetcher:
                     observation = Observation.load(paths[timestamp])
                     if observation.metadata.timestamp != timestamp:
                         raise ValueError(f"Cached observation timestamp does not match {paths[timestamp]}; use overwrite=True")
-                    if include_aia and observation.data is None:
+                    if include_aia and observation.aia_data is None:
                         raise ValueError(f"Cached observation has no AIA data: {paths[timestamp]}; use overwrite=True")
                     yield Observation(
                         metadata=observation.metadata,
-                        data=observation.data if include_aia else None,
+                        aia_data=observation.aia_data if include_aia else None,
                         harp_regions=observation.harp_regions if include_harps else None,
-                        sxr=observation.sxr if include_sxr else None,
+                        sxr_data=observation.sxr_data if include_sxr else None,
                     )
                     continue
                 #Set pending to the next sample if it is not already set, then check if it matches the current timestamp.
@@ -300,8 +300,8 @@ class ObservationFetcher:
                         include_harps=include_harps, include_sxr=include_sxr,
                     )
                     observation = Observation(
-                        metadata=auxiliary.metadata, data=stack,
-                        harp_regions=auxiliary.harp_regions, sxr=auxiliary.sxr,
+                        metadata=auxiliary.metadata, aia_data=stack,
+                        harp_regions=auxiliary.harp_regions, sxr_data=auxiliary.sxr_data,
                     )
                 except Exception as exc:
                     if on_error == "raise":
@@ -328,11 +328,16 @@ class Observation:
     Parameters
     ----------
     metadata : ObservationMetadata
-        Time, channel order, and crop geometry for ``data``.
-    data : array-like or None
+        Time, channel order, and crop geometry for ``aia_data``.
+    aia_data : array-like or None
         Channel-first ``(C, H, W)`` array matching ``metadata.image_shape``.
         ``None`` if AIA fetching was turned off. :meth:`from_array` checks
         the values and converts them to float32; this constructor doesn't.
+    sxr_data : dict or None, optional
+        Measured GOES flux from :meth:`SXRProcessor.fetch`, with
+        ``xrsa_flux`` and ``xrsb_flux`` in W/m². It's only there for
+        comparison; the model never sees it. ``None`` if SXR was turned off
+        or no data was available.
     harp_regions : list of dict or None, optional
         Active-region boxes. Each dict needs a ``HARPNUM`` (or ``harpnum``)
         and ``top_pct``, ``left_pct``, ``width_pct``, and ``height_pct``,
@@ -342,28 +347,23 @@ class Observation:
         requested. An empty list means they were requested but nothing usable
         came back, which includes failed queries. Prediction won't query
         HARPs for you.
-    sxr : dict or None, optional
-        Measured GOES flux from :meth:`SXRProcessor.fetch`, with
-        ``xrsa_flux`` and ``xrsb_flux`` in W/m². It's only there for
-        comparison; the model never sees it. ``None`` if SXR was turned off
-        or no data was available.
     """
 
     metadata: ObservationMetadata
-    data: np.ndarray | None
+    aia_data: np.ndarray | None
+    sxr_data: dict | None = None
     harp_regions: list[dict] | None = None
-    sxr: dict | None = None
 
     def __post_init__(self):
-        if self.data is None:
+        if self.aia_data is None:
             return
-        object.__setattr__(self, "data", np.asarray(self.data))
-        if self.data.shape != self.metadata.image_shape:
-            raise ValueError("Observation data shape does not match its metadata")
+        object.__setattr__(self, "aia_data", np.asarray(self.aia_data))
+        if self.aia_data.shape != self.metadata.image_shape:
+            raise ValueError("Observation aia_data shape does not match its metadata")
 
     @classmethod
-    def from_array(cls, data, *, timestamp, wavelengths=(94, 131, 171, 193, 211, 304, 335),
-                   padding_factor=0.1, harp_regions=None, sxr=None):
+    def from_array(cls, aia_data, *, timestamp, wavelengths=(94, 131, 171, 193, 211, 304, 335),
+                   padding_factor=0.1, sxr_data=None, harp_regions=None):
         """Wrap an AIA stack you've already preprocessed.
 
         The array is used as is. Nothing is downloaded, and there's no
@@ -372,7 +372,7 @@ class Observation:
 
         Parameters
         ----------
-        data : array-like
+        aia_data : array-like
             Finite numeric ``(C, H, W)`` stack, usually ``(7, 512, 512)``.
             A NumPy array or nested lists both work. Channels-last arrays
             aren't transposed for you. The observation stores a float32 copy.
@@ -383,25 +383,25 @@ class Observation:
             default ``(94, 131, 171, 193, 211, 304, 335)``.
         padding_factor : float, default 0.1
             Padding past the solar limb used when the stack was cropped.
+        sxr_data : dict or None, optional
+            Measured GOES flux; see :class:`Observation`.
         harp_regions : list of dict or None, optional
             Active-region boxes in percent of this crop; see :class:`Observation`.
-        sxr : dict or None, optional
-            Measured GOES flux; see :class:`Observation`.
 
         Returns
         -------
         Observation
         """
-        array = np.asarray(data)
+        array = np.asarray(aia_data)
         if array.ndim != 3 or array.dtype.kind not in "iuf" or not np.isfinite(array).all():
-            raise ValueError("data must be a finite real numeric channel-first (C, H, W) array")
+            raise ValueError("aia_data must be a finite real numeric channel-first (C, H, W) array")
         with np.errstate(over="ignore"):
             array = array.astype(np.float32, copy=True)
         if not np.isfinite(array).all():
-            raise ValueError("data exceeds the float32 range")
+            raise ValueError("aia_data exceeds the float32 range")
         return cls(
             metadata=ObservationMetadata(timestamp, array.shape, wavelengths, padding_factor),
-            data=array, harp_regions=harp_regions, sxr=sxr,
+            aia_data=array, sxr_data=sxr_data, harp_regions=harp_regions,
         )
 
     def save(self, path, *, overwrite=False):
@@ -436,14 +436,14 @@ class Observation:
             raise ValueError("Observation.save requires a .npz path")
         if path.exists() and not overwrite:
             raise FileExistsError(path)
-        if self.data is not None and (
-            self.data.dtype.kind not in "iuf" or not np.isfinite(self.data).all()
+        if self.aia_data is not None and (
+            self.aia_data.dtype.kind not in "iuf" or not np.isfinite(self.aia_data).all()
         ):
-            raise ValueError("Observation data must be finite real numeric values to save")
+            raise ValueError("Observation aia_data must be finite real numeric values to save")
         payload = {
-            "schema_version": 1, "has_data": self.data is not None,
+            "schema_version": 1, "has_data": self.aia_data is not None,
             "metadata": asdict(self.metadata),
-            "harp_regions": self.harp_regions, "sxr": self.sxr,
+            "harp_regions": self.harp_regions, "sxr": self.sxr_data,
         }
         encoded = json.dumps(_encode_observation_metadata(payload), allow_nan=False)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -452,8 +452,8 @@ class Observation:
             with NamedTemporaryFile(dir=path.parent, prefix=".foxes-", suffix=".tmp", delete=False) as stream:
                 temporary = Path(stream.name)
                 arrays = {"metadata": np.asarray(encoded)}
-                if self.data is not None:
-                    arrays["data"] = self.data
+                if self.aia_data is not None:
+                    arrays["data"] = self.aia_data
                 np.savez_compressed(stream, **arrays)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -469,6 +469,9 @@ class Observation:
     @classmethod
     def load(cls, path):
         """Reload an observation written by :meth:`save`.
+
+        Existing saved observations load into ``aia_data`` and ``sxr_data``
+        without conversion.
 
         Parameters
         ----------
@@ -492,7 +495,7 @@ class Observation:
         metadata = ObservationMetadata(**payload["metadata"])
         if data is not None and (data.dtype.kind not in "iuf" or not np.isfinite(data).all()):
             raise ValueError("Observation archive data must be finite real numeric values")
-        return cls(metadata=metadata, data=data, harp_regions=payload["harp_regions"], sxr=payload["sxr"])
+        return cls(metadata=metadata, aia_data=data, harp_regions=payload["harp_regions"], sxr_data=payload["sxr"])
 
 
 @dataclass(frozen=True)
@@ -695,10 +698,10 @@ class FOXESModel:
             distance = abs(timestamp - target)
             if (snapshot is None or distance < best_distance
                     or (distance == best_distance and timestamp < _utc_datetime(snapshot.metadata.timestamp))):
-                if observation.data is None:
+                if observation.aia_data is None:
                     raise ValueError("AIA data is required to retain a snapshot")
                 channel = observation.metadata.wavelengths.index(snapshot_wavelength)
-                snapshot = _make_aia_snapshot(observation.data[channel], observation, snapshot_wavelength)
+                snapshot = _make_aia_snapshot(observation.aia_data[channel], observation, snapshot_wavelength)
                 best_distance = distance
 
         if not predictions:
@@ -743,10 +746,10 @@ class FOXESModel:
                 "predict expects an Observation; wrap a plain array with "
                 "Observation.from_array(array, timestamp=...)"
             )
-        if observation.data is None:
+        if observation.aia_data is None:
             raise ValueError("Observation has no AIA data; fetch with include_aia=True before prediction")
         metadata = observation.metadata
-        array = np.asarray(observation.data)
+        array = np.asarray(observation.aia_data)
         patch_size = int(self.model_kwargs["patch_size"])
         patch_count = int(self.model_kwargs["num_patches"])
         grid = int(np.sqrt(patch_count))
@@ -784,7 +787,7 @@ class FOXESModel:
         flux_map = patches.reshape(grid, grid).detach().cpu().numpy()
         if scale != 1.0:
             flux_map = flux_map * scale
-        ground_truth = observation.sxr.get("xrsb_flux") if observation.sxr else None
+        ground_truth = observation.sxr_data.get("xrsb_flux") if observation.sxr_data else None
         return Prediction(
             metadata=metadata,
             total_flux=float(flux.item()) * scale, flux_map=flux_map,
@@ -847,7 +850,7 @@ class Prediction:
         Matched measured GOES XRS-B flux, for comparison with ``total_flux``.
         The sample may be offset from the requested time within the fetcher's
         tolerance, and may average multiple satellites. Its provenance is in
-        the input observation's ``sxr`` data. ``None`` if no sample is available.
+        the input observation's ``sxr_data``. ``None`` if no sample is available.
     legacy_correction_enabled : bool
         Whether legacy correction is enabled (see :class:`FOXESModel`).
         This can be ``True`` with a scale factor of 1.0 after the cutoff.
@@ -1198,7 +1201,7 @@ class PredictionTimeSeries:
             raise ValueError("Series predictions must have unique timestamps")
         if self.snapshot is not None:
             snapshot = self.snapshot
-            if snapshot.data is None or snapshot.data.shape[0] != 1:
+            if snapshot.aia_data is None or snapshot.aia_data.shape[0] != 1:
                 raise ValueError("Series snapshot must contain one processed AIA channel")
             if snapshot.metadata.timestamp not in times:
                 raise ValueError("Snapshot timestamp must match a series prediction")
@@ -1423,7 +1426,7 @@ class PredictionTimeSeries:
         """Reuse the standard flux map beside its matching plain AIA image."""
         from matplotlib.dates import date2num
 
-        assert snapshot is not None and snapshot.data is not None
+        assert snapshot is not None and snapshot.aia_data is not None
         assert snapshot_ax is not None and aia_ax is not None
         prediction = next(p for p in self.predictions if self._timestamp(p) == snapshot.metadata.timestamp)
         regions = [r for r in prediction.harp_contributions or []
@@ -1438,7 +1441,7 @@ class PredictionTimeSeries:
             show_harp_boxes=True, harp_regions=regions, harp_colors=colors,
             min_harp_flux=0, show_harp_uncertainty=show_uncertainty, harp_label_fontsize=8,
         )
-        image = snapshot.data[0]
+        image = snapshot.aia_data[0]
         low, high = np.percentile(image, [1, 99])
         if low == high:
             low, high = low - 0.5, high + 0.5
@@ -2151,13 +2154,13 @@ def _make_aia_snapshot(image, observation, wavelength):
     """Copy one channel into a visualization-only Observation with its provenance."""
     metadata = observation.metadata
     return Observation(
-        data=np.array(image, copy=True)[np.newaxis],
+        aia_data=np.array(image, copy=True)[np.newaxis],
         metadata=ObservationMetadata(
             timestamp=metadata.timestamp, image_shape=(1, *image.shape),
             wavelengths=(wavelength,), padding_factor=metadata.padding_factor,
             harp_bbox_expansion=metadata.harp_bbox_expansion,
         ),
-        harp_regions=observation.harp_regions, sxr=observation.sxr,
+        harp_regions=observation.harp_regions, sxr_data=observation.sxr_data,
     )
 
 

@@ -19,7 +19,7 @@ class SnapshotModel:
             metadata=observation.metadata, total_flux=10e-6,
             flux_map=np.array([[1, 4], [2, 3]]) * 1e-6,
             harp_contributions=observation.harp_regions,
-            ground_truth=observation.sxr.get("xrsb_flux") if observation.sxr else None,
+            ground_truth=observation.sxr_data.get("xrsb_flux") if observation.sxr_data else None,
         )
 
 
@@ -57,8 +57,8 @@ def test_target_retains_one_channel_without_temporary_files(monkeypatch):
     snapshot = series.snapshot
     assert snapshot.metadata.timestamp.minute == 4
     assert snapshot.metadata.wavelengths == (193,)
-    assert snapshot.data.shape == (1, 32, 32)
-    np.testing.assert_array_equal(snapshot.data[0], list(observations())[1].data[3])
+    assert snapshot.aia_data.shape == (1, 32, 32)
+    np.testing.assert_array_equal(snapshot.aia_data[0], list(observations())[1].aia_data[3])
 
 
 def test_target_ties_choose_earlier_and_channel_can_be_changed():
@@ -76,14 +76,14 @@ def test_snapshot_keeps_goes_metadata_with_scalar_prediction_groundtruth():
     original = next(observations())
     sxr = {"xrsb_flux": 1e-6, "xrsa_flux": 1e-8, "satellite": "GOES-18"}
     observation = foxes.Observation(
-        metadata=original.metadata, data=original.data,
-        harp_regions=original.harp_regions, sxr=sxr,
+        metadata=original.metadata, aia_data=original.aia_data,
+        harp_regions=original.harp_regions, sxr_data=sxr,
     )
     series = foxes.FOXESModel.predict_time_series(
         SnapshotModel(), [observation], snapshot_time=observation.metadata.timestamp,
     )
     assert series.predictions[0].ground_truth == 1e-6
-    assert series.snapshot.sxr is sxr
+    assert series.snapshot.sxr_data is sxr
     assert series.snapshot.harp_regions is observation.harp_regions
     assert list(series.full_disk_light_curve().columns) == ["total_flux", "ground_truth"]
 
@@ -130,7 +130,7 @@ def test_snapshot_reuses_overlay_and_matches_colors(monkeypatch):
     assert "aia_image" not in calls[0]
     np.testing.assert_array_equal(snapshot_ax.images[0].get_array(), series.predictions[1].flux_map)
     aia_ax = ax.figure.axes[2]
-    np.testing.assert_array_equal(aia_ax.images[0].get_array(), series.snapshot.data[0])
+    np.testing.assert_array_equal(aia_ax.images[0].get_array(), series.snapshot.aia_data[0])
     assert not aia_ax.patches and not aia_ax.texts
     assert aia_ax.get_position().x0 > snapshot_ax.get_position().x0
     assert "AIA 193" in aia_ax.get_title()
@@ -187,10 +187,10 @@ def test_failed_prediction_raises():
 def test_snapshot_is_independent_of_source_and_input_order():
     source = list(observations((10, 4, 0)))
     series = foxes.FOXESModel.predict_time_series(SnapshotModel(), iter(source), snapshot_time="2023-08-01 00:05")
-    expected = source[1].data[3].copy()
-    source[1].data[:] = -99
+    expected = source[1].aia_data[3].copy()
+    source[1].aia_data[:] = -99
     assert series.snapshot.metadata.timestamp.minute == 4
-    np.testing.assert_array_equal(series.snapshot.data[0], expected)
+    np.testing.assert_array_equal(series.snapshot.aia_data[0], expected)
     assert [p.metadata.timestamp.minute for p in series.predictions] == [0, 4, 10]
 
 

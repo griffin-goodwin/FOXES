@@ -68,6 +68,7 @@ import helio_foxes
 model = helio_foxes.FOXESModel()
 fetcher = helio_foxes.ObservationFetcher()
 observation = fetcher.fetch("2023-08-01T00:00:00Z")
+print("AIA stack shape:", observation.aia_data.shape)
 result = model.predict(observation)
 
 print(f"Predicted GOES XRS-B flux: {result.total_flux:.3e} W/m²")
@@ -81,6 +82,11 @@ plt.show()
 The prediction fields are `metadata`, `total_flux`, `flux_map`, `prediction_intervals`,
 `flux_std_map`, `harp_contributions`, `ground_truth`, `legacy_correction_enabled`, and
 `flux_scale_factor`.
+
+`observation.aia_data` holds the processed AIA stack; it is `None` when AIA
+fetching is disabled. The observation fields are `metadata`, `aia_data`,
+`sxr_data`, and `harp_regions`, in that order. `sxr_data` contains the measured
+GOES data and its provenance.
 
 `result.flux_map` holds the per-patch contribution to the soft x-ray flux... they add up to
 `result.total_flux`. The boxes drawn on the map are HARP active regions; the flux

@@ -53,7 +53,7 @@ def test_public_prediction_scales_all_physical_outputs(model, monkeypatch, tmp_p
         np.ones((7, 16, 16), dtype=np.float32), timestamp=timestamp,
         harp_regions=[{"HARPNUM": 1, "top_pct": 0, "left_pct": 0,
                        "width_pct": 100, "height_pct": 100}],
-        sxr={"xrsb_flux": 1e-6},
+        sxr_data={"xrsb_flux": 1e-6},
     )
     original = native.predict(observation)
     corrected = legacy.predict(observation)
@@ -61,7 +61,7 @@ def test_public_prediction_scales_all_physical_outputs(model, monkeypatch, tmp_p
     assert corrected.legacy_correction_enabled is True
     assert corrected.flux_scale_factor == scale
     assert corrected.metadata is observation.metadata
-    assert corrected.ground_truth == observation.sxr["xrsb_flux"] == 1e-6
+    assert corrected.ground_truth == observation.sxr_data["xrsb_flux"] == 1e-6
     assert corrected.total_flux == pytest.approx(original.total_flux * scale)
     np.testing.assert_allclose(corrected.flux_map, original.flux_map * scale)
     assert corrected.flux_map.sum() == pytest.approx(corrected.total_flux)

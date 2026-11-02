@@ -56,10 +56,10 @@ def test_aia_processor_uses_temporary_files_and_returns_stack(monkeypatch):
         "2023-07-31T20:00:00-04:00"
     )
     assert isinstance(observation, helio_foxes.Observation)
-    assert observation.data.shape == (7, 2, 2)
+    assert observation.aia_data.shape == (7, 2, 2)
     assert observation.metadata.timestamp == datetime(2023, 8, 1, tzinfo=timezone.utc)
     assert observation.metadata.wavelengths == helio_foxes.AIAProcessor.WAVELENGTHS
-    assert observation.metadata.image_shape == observation.data.shape
+    assert observation.metadata.image_shape == observation.aia_data.shape
     assert observation.metadata.padding_factor == 0.1
     assert observation.harp_regions is None
     assert not __import__("os").path.exists(staged[1])
@@ -110,7 +110,7 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     metadata = helio_foxes.api.ObservationMetadata(
         timestamp="2023-08-01T00:00:00Z", image_shape=image.shape, padding_factor=0.2,
     )
-    observation = helio_foxes.Observation(data=image, metadata=metadata, harp_regions=regions, sxr=sxr)
+    observation = helio_foxes.Observation(aia_data=image, metadata=metadata, harp_regions=regions, sxr_data=sxr)
     result = predictor.predict(observation)
     assert set(vars(result)) == {
         "metadata", "total_flux", "flux_map", "prediction_intervals", "flux_std_map",
@@ -163,7 +163,7 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     with pytest.raises(TypeError, match="Observation.from_array"):
         predictor.predict(image)
     with pytest.raises(ValueError, match="Observation has no AIA data"):
-        predictor.predict(helio_foxes.Observation(data=None, metadata=metadata))
+        predictor.predict(helio_foxes.Observation(aia_data=None, metadata=metadata))
     with pytest.raises(ValueError, match="shape"):
         predictor.predict(helio_foxes.Observation.from_array(np.zeros((7, 4, 4)), timestamp="2023-08-01"))
 
@@ -226,7 +226,7 @@ def test_plot_flux_map_never_queries_jsoc(monkeypatch):
 def test_observation_rejects_metadata_with_wrong_image_shape():
     metadata = helio_foxes.api.ObservationMetadata(timestamp="2023-08-01", image_shape=(7, 2, 2))
     with pytest.raises(ValueError, match="shape does not match"):
-        helio_foxes.Observation(data=np.zeros((7, 4, 4)), metadata=metadata)
+        helio_foxes.Observation(aia_data=np.zeros((7, 4, 4)), metadata=metadata)
 
 
 @pytest.mark.parametrize("include_aia,include_harps", [
@@ -276,9 +276,9 @@ def test_observation_processor_source_toggles(monkeypatch, include_aia, include_
     if include_sxr:
         expected.append(("sxr", timestamp, 90, 16))
     assert calls == expected
-    assert observation.data is (stack if include_aia else None)
+    assert observation.aia_data is (stack if include_aia else None)
     assert observation.harp_regions is (regions if include_harps else None)
-    assert observation.sxr is (sxr if include_sxr else None)
+    assert observation.sxr_data is (sxr if include_sxr else None)
     assert observation.metadata.timestamp == timestamp
     assert observation.metadata.image_shape == (7, 2, 2)
     assert processor.include_aia == configured["include_aia"]
@@ -307,9 +307,9 @@ def test_observation_processor_defaults_to_all_and_keeps_aia_when_supplements_mi
     monkeypatch.setattr(helio_foxes.SXRProcessor, "fetch", fetch_sxr)
     observation = helio_foxes.ObservationFetcher(resolution=2).fetch("2023-08-01")
     assert calls == ["aia", "harp", "sxr"]
-    assert observation.data is stack
+    assert observation.aia_data is stack
     assert observation.harp_regions == []
-    assert observation.sxr is None
+    assert observation.sxr_data is None
 
 
 def test_observation_records_harp_expansion(monkeypatch):

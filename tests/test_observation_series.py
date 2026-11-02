@@ -39,10 +39,12 @@ def test_numeric_timestamp_rejected():
 
 def test_local_array():
     data = np.ones((7, 2, 2))
-    observation = foxes.Observation.from_array(data, timestamp="2023/08/01", harp_regions=[])
-    assert observation.data.dtype == np.float32
+    observation = foxes.Observation.from_array(aia_data=data, timestamp="2023/08/01", harp_regions=[])
+    assert list(vars(observation)) == ["metadata", "aia_data", "sxr_data", "harp_regions"]
+    assert not hasattr(observation, "data")
+    assert observation.aia_data.dtype == np.float32
     data[:] = 2
-    assert np.all(observation.data == 1)
+    assert np.all(observation.aia_data == 1)
     for bad in [np.zeros((2, 2)), np.full((7, 2, 2), np.nan), np.ones((7, 2, 2), dtype=complex)]:
         with pytest.raises(ValueError, match="channel-first"):
             foxes.Observation.from_array(bad, timestamp="2023-08-01")
@@ -83,7 +85,7 @@ def test_range_grid_and_bulk_dispatch(monkeypatch):
     observations = list(processor.fetch_range("2023/08/01", "2023-08-01T00:25Z", cadence="12min"))
     assert len(calls) == 1
     assert [o.metadata.timestamp.minute for o in observations] == [0, 12, 24]
-    assert all(o.data.shape == (7, 2, 2) for o in observations)
+    assert all(o.aia_data.shape == (7, 2, 2) for o in observations)
     for cadence in [0, -1, "NaT", "nonsense", True, float("inf"), "500ms"]:
         with pytest.raises(ValueError, match="cadence"):
             list(processor.fetch_range("2023-08-01", "2023-08-02", cadence=cadence))
@@ -163,7 +165,7 @@ def test_range_without_aia_never_downloads(monkeypatch):
     monkeypatch.setattr(processor.aia_processor, "_iter_range", lambda *a, **kw: pytest.fail("download"))
     observations = list(processor.fetch_range("2023-08-01", "2023-08-01", include_aia=False))
     assert len(observations) == 1
-    assert observations[0].data is None
+    assert observations[0].aia_data is None
 
 
 def test_harp_series_gaps_and_model_reuse():

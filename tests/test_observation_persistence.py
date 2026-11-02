@@ -19,7 +19,7 @@ def test_full_observation_roundtrip(tmp_path, regions, include_data):
     data = np.arange(28, dtype=np.float64).reshape(7, 2, 2) if include_data else None
     sxr = {"timestamp": timestamp, "xrsb_flux": np.float64(1e-6), "satellites": ["GOES-18"],
            "measurements": [{"timestamp": timestamp, "xrsa_flux": None, "satellite": "GOES-18"}]}
-    observation = foxes.Observation(metadata=metadata, data=data, harp_regions=regions, sxr=sxr)
+    observation = foxes.Observation(metadata=metadata, aia_data=data, harp_regions=regions, sxr_data=sxr)
     path = observation.save(tmp_path / "nested" / "observation.npz")
     with np.load(path, allow_pickle=False) as archive:
         assert archive["metadata"].dtype.kind == "U"
@@ -27,12 +27,12 @@ def test_full_observation_roundtrip(tmp_path, regions, include_data):
             np.testing.assert_array_equal(archive["data"], data)
     restored = foxes.Observation.load(path)
     assert restored.metadata == metadata
-    assert restored.sxr == sxr
+    assert restored.sxr_data == sxr
     if include_data:
-        np.testing.assert_array_equal(restored.data, data)
-        assert restored.data.dtype == data.dtype
+        np.testing.assert_array_equal(restored.aia_data, data)
+        assert restored.aia_data.dtype == data.dtype
     else:
-        assert restored.data is None
+        assert restored.aia_data is None
     if regions:
         assert restored.harp_regions[0]["HARPNUM"] == 12
         assert np.isnan(restored.harp_regions[0]["missing_keyword"])
@@ -101,9 +101,9 @@ def test_iterator_saves_before_yield_and_reload_has_no_queries(tmp_path, monkeyp
     monkeypatch.setattr(processor, "fetch", lambda *a, **kw: pytest.fail("no network expected"))
     loaded = list(foxes.load_observations(tmp_path))
     assert [o.metadata.timestamp.hour for o in loaded] == [0, 1, 2]
-    np.testing.assert_array_equal(loaded[0].data, first.data)
+    np.testing.assert_array_equal(loaded[0].aia_data, first.aia_data)
     for i, restored in enumerate(loaded):
-        assert restored.data[0, 0, 0] == i
+        assert restored.aia_data[0, 0, 0] == i
 
 
 def test_existing_archive_skips_download_and_preprocessing(tmp_path, monkeypatch):
@@ -125,7 +125,7 @@ def test_existing_archive_skips_download_and_preprocessing(tmp_path, monkeypatch
         patch.setattr(processor, "fetch", lambda *a, **kw: pytest.fail("No supplementary query"))
         restored = list(processor.fetch_range("2023-08-01", "2023-08-01", save_dir=tmp_path, on_error="skip", progress=True))
     assert len(restored) == 1
-    assert restored[0].data.shape == (7, 2, 2)
+    assert restored[0].aia_data.shape == (7, 2, 2)
     list(processor.fetch_range("2023-08-01", "2023-08-01", save_dir=tmp_path, overwrite=True))
     assert closed == [True, True]
 
@@ -147,7 +147,7 @@ def test_partial_cache_only_fetches_missing_and_preserves_order_with_skips(tmp_p
     observations = list(processor.fetch_range("2023-08-01", "2023-08-01 04:00", save_dir=tmp_path, on_error="skip"))
     assert [stamp.hour for stamp in requested] == [0, 2, 4]
     assert [o.metadata.timestamp.hour for o in observations] == [1, 2, 3, 4]
-    assert [o.data[0, 0, 0] for o in observations] == [1, 2, 3, 4]
+    assert [o.aia_data[0, 0, 0] for o in observations] == [1, 2, 3, 4]
     assert len(list(tmp_path.glob("*.npz"))) == 4
 
 
@@ -161,11 +161,11 @@ def test_corrupt_cache_does_not_trigger_download(tmp_path, monkeypatch):
 
 def test_cached_observation_honors_disabled_sources(tmp_path, monkeypatch):
     processor = foxes.ObservationFetcher(resolution=2, include_harps=False, include_sxr=False)
-    observation = foxes.Observation.from_array(np.ones((7, 2, 2)), timestamp="2023-08-01", harp_regions=[], sxr={"xrsb_flux": 1e-6})
+    observation = foxes.Observation.from_array(np.ones((7, 2, 2)), timestamp="2023-08-01", harp_regions=[], sxr_data={"xrsb_flux": 1e-6})
     observation.save(tmp_path / "observation_20230801T000000.000000Z.npz")
     monkeypatch.setattr(processor, "fetch", lambda *a, **kw: pytest.fail("No query"))
     restored = list(processor.fetch_range("2023-08-01", "2023-08-01", save_dir=tmp_path, include_aia=False))[0]
-    assert restored.data is None and restored.harp_regions is None and restored.sxr is None
+    assert restored.aia_data is None and restored.harp_regions is None and restored.sxr_data is None
 
 
 def test_cache_timestamp_must_match_requested_time(tmp_path, monkeypatch):
