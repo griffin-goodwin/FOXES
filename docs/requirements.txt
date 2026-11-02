@@ -1,0 +1,5 @@
+# Documentation can be built without installing the package's ML dependencies.
+Sphinx>=8.2,<9
+myst-parser>=4,<5
+furo>=2025.9.25,<2027
+numpy>=1.26

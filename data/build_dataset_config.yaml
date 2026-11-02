@@ -1,3 +1,6 @@
+# Relative file paths use the repository root, independent of the working directory.
+path_root: ..
+
 # =============================================================================
 # FOXES Dataset Build Configuration
 # =============================================================================
@@ -16,9 +19,10 @@ aia:
 
 sxr:
   raw_dir:      "./foxes_data/SXR_raw"         # raw netCDF from download/download_sxr.py
-  combined_dir: "./foxes_data/SXR_combined"    # one interpolated CSV per satellite
-  apply_pre_goes16_scaling: false    # apply legacy scaling to GOES-13/14/15 (pre-GOES-16) flux;
-                                     # set false if your files are already scaled (e.g. NOAA's newest reprocessing)
+  combined_dir: "./foxes_data/SXR_combined"    # one lossless Parquet file per satellite
+  apply_pre_goes16_scaling: false  # use science-quality fluxes directly in W/m²
+                                 # true only for verified legacy SWPC-scaled files;
+                                 # sci_* GOES-13/14/15 files reject that setting
 
 output:
   sxr_dir:         "./foxes_data/SXR_processed" # per-timestamp xrsb_flux .npy, aligned to AIA
@@ -34,8 +38,8 @@ processing:
 steps:
   clean_aia:   false    # drop AIA FITS files with a bad DATE-OBS timestamp
   convert_aia: false    # raw AIA FITS -> paired .npy stacks
-  combine_sxr: false    # combine raw multi-satellite GOES files into per-satellite CSVs
-  align:       false    # match AIA timestamps to GOES CSVs -> per-timestamp SXR .npy
+  combine_sxr: false    # combine raw multi-satellite GOES files into per-satellite Parquet
+  align:       false    # match AIA timestamps to combined GOES data -> SXR .npy
   split:       false  # split aia.processed_dir / output.sxr_dir into train/val/test
 
 # Only needed if you're training (training/train_config.yaml expects

@@ -1,6 +1,6 @@
 import os
 import re
-import yaml
+import sys
 from statistics import NormalDist
 from pathlib import Path
 
@@ -13,6 +13,9 @@ import matplotlib.ticker as mticker
 import matplotlib.font_manager as fm
 from matplotlib import rcParams
 from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forecasting.config import load_config
 
 
 def _as_bool(value):
@@ -791,7 +794,7 @@ class FOXESEvaluator:
         }
 
         theme = 'white' if self.plot_background in ('white', 'light') else 'black'
-        axis_facecolor = '#FFFFFF' if theme == 'white' else '#FFFFFF'
+        axis_facecolor = '#FFFFFF'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
         legend_facecolor = '#FFFFFF' if theme == 'white' else '#1E1E2F'
         grid_color = '#CCCCCC' if theme == 'white' else '#3A3A5A'
@@ -850,7 +853,6 @@ class FOXESEvaluator:
 
             # Define flare classes
             flare_classes_mae = {
-                #'A': (1e-8, 1e-7, "#FFAAA5"),
                 'B': (1e-7, 1e-6, "#FFAAA5"),
                 'C': (1e-6, 1e-5, "#FFAAA5"),
                 'M': (1e-5, 1e-4, "#FFAAA5"),
@@ -886,7 +888,7 @@ class FOXESEvaluator:
                 if class_name == 'X':
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
                                          alpha=0.75,
-                                         label=f'MAE', color=color)
+                                         label='MAE', color=color)
                 else:
                     plot_ax.fill_between(x_class, lower_bound, upper_bound,
                                          alpha=0.75, color=color)
@@ -1047,10 +1049,7 @@ def load_evaluation_config(config_path):
     Returns:
         dict: Loaded and processed configuration dictionary
     """
-    with open(config_path, 'r') as stream:
-        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
-
-    return config_data
+    return load_config(config_path)
 
 
 def main():
@@ -1063,7 +1062,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Run FOXES solar flare evaluation')
-    parser.add_argument('--config', type=str, default='evaluation_config.yaml',
+    parser.add_argument('--config', type=str, default=str(Path(__file__).with_name('evaluation_config.yaml')),
                         help='Path to evaluation config YAML file')
     args = parser.parse_args()
 

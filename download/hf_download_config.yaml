@@ -1,3 +1,6 @@
+# Relative file paths use the repository root, independent of the working directory.
+path_root: ..
+
 # =============================================================================
 # HuggingFace Dataset Download Configuration
 # =============================================================================

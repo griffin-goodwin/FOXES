@@ -57,7 +57,7 @@ def compute_sxr_norm(sxr_dir):
     sxr_files = sorted(glob.glob(os.path.join(sxr_dir, "*.npy")))
     print(f"Found {len(sxr_files)} SXR files in {sxr_dir}")
     if len(sxr_files) == 0:
-        print(f"No files matching '*.npy' found. Listing directory contents:")
+        print("No files matching '*.npy' found. Listing directory contents:")
         print(os.listdir(sxr_dir)[:10])  # Show first 10 files
         raise ValueError(f"No SXR files found in {sxr_dir}")
 

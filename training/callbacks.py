@@ -356,10 +356,10 @@ class AttentionMapCallback(Callback):
     PyTorch Lightning callback for visualizing transformer attention maps
     during validation epochs.
 
-    Supports CLS-token-based and local patch attention visualization.
+    Visualizes patch-to-patch attention for both maintained architectures.
     """
 
-    def __init__(self, log_every_n_epochs=1, num_samples=4, patch_size=8, use_local_attention=False):
+    def __init__(self, log_every_n_epochs=1, num_samples=4, patch_size=8):
         """
         Initialize callback.
 
@@ -371,14 +371,11 @@ class AttentionMapCallback(Callback):
             Number of samples to visualize per epoch.
         patch_size : int
             Patch size used in the Vision Transformer.
-        use_local_attention : bool
-            If True, visualize local attention patterns instead of CLS attention.
         """
         super().__init__()
         self.patch_size = patch_size
         self.log_every_n_epochs = log_every_n_epochs
         self.num_samples = num_samples
-        self.use_local_attention = use_local_attention
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """Trigger visualization of attention maps at the end of validation epochs."""
@@ -401,7 +398,7 @@ class AttentionMapCallback(Callback):
             # Attention is O(num_patches^2) per head and layer. Forwarding all
             # visualization samples together can consume tens of GiB for a
             # 64x64 patch grid, even though each plot only needs one sample.
-            for sample_idx, sample in enumerate(samples):
+            for sample in samples:
                 img = sample[0].unsqueeze(0).to(pl_module.device)
                 outputs = pl_module(img, return_attention=True)
                 if getattr(pl_module, 'predicts_uncertainty', False):
@@ -410,18 +407,10 @@ class AttentionMapCallback(Callback):
                         patch_variance_raw,
                     ) = outputs
                     patch_uncertainty = torch.sqrt(patch_variance_raw)
-                    patch_uncertainty_title = (
-                        'Sqrt Global Variance Contribution [W/m²]'
-                        if getattr(
-                            pl_module, 'patch_uncertainty_semantics', None
-                        ) == 'variance_attribution'
-                        else 'Patch Flux Std [W/m²]'
-                    )
                 else:
                     # (global_flux_raw, attention, patch_flux_raw)
                     _, attention_weights, patch_flux_raw = outputs
                     patch_uncertainty = None
-                    patch_uncertainty_title = None
 
                 target_norm = float(sample[1].item())
                 sxr_transform = getattr(val_ds, 'sxr_transform', None)
@@ -451,7 +440,6 @@ class AttentionMapCallback(Callback):
                     patch_flux=patch_flux_raw[0] if patch_flux_raw is not None else None,
                     patch_std=(patch_uncertainty[0]
                                if patch_uncertainty is not None else None),
-                    patch_uncertainty_title=patch_uncertainty_title,
                 )
                 trainer.logger.experiment.log({"Attention plots": wandb.Image(fig)})
                 plt.close(fig)
@@ -508,8 +496,7 @@ class AttentionMapCallback(Callback):
 
     def _plot_attention_map(self, image, attention_weights, sample_idx, epoch,
                             patch_size, aia_transform=None, patch_flux=None,
-                            patch_std=None, sample_description=None,
-                            patch_uncertainty_title=None):
+                            patch_std=None, sample_description=None):
         """Plot and return a visualization of the attention heatmaps for a single image."""
         img_np = image.detach().cpu().numpy()
 
@@ -520,18 +507,10 @@ class AttentionMapCallback(Callback):
         sample_attention = last_layer_attention[sample_idx]
         avg_attention = sample_attention.mean(dim=0)
 
-        if self.use_local_attention:
-            # Spatial center of the grid, not the middle of the flattened sequence
-            # (those only coincide when grid_w == 1) — row-major flatten: idx = row*grid_w + col.
-            center_patch_idx = (grid_h // 2) * grid_w + (grid_w // 2)
-            center_attention = avg_attention[center_patch_idx, :].cpu()
-            avg_attention_map = avg_attention.mean(dim=0).cpu()
-            attention_map = avg_attention_map.reshape(grid_h, grid_w)
-            center_map = center_attention.reshape(grid_h, grid_w)
-        else:
-            cls_attention = avg_attention[0, 1:].cpu()
-            attention_map = cls_attention.reshape(grid_h, grid_w)
-            center_map = None
+        # The maintained models have one token per patch and no CLS token.
+        center_patch_idx = (grid_h // 2) * grid_w + (grid_w // 2)
+        center_map = avg_attention[center_patch_idx, :].cpu().reshape(grid_h, grid_w)
+        attention_map = avg_attention.mean(dim=0).cpu().reshape(grid_h, grid_w)
 
         img_display = self._display_image(image, aia_transform)
 
@@ -555,16 +534,10 @@ class AttentionMapCallback(Callback):
         axes[0, 2].set_title('Attention Overlay')
         axes[0, 2].axis('off')
 
-        if center_map is not None:
-            im2 = axes[1, 0].imshow(center_map, cmap='hot', interpolation='nearest')
-            axes[1, 0].set_title('Center Patch Attention')
-            axes[1, 0].axis('off')
-            plt.colorbar(im2, ax=axes[1, 0])
-        else:
-            axes[1, 0].text(0.5, 0.5, 'Center attention\nnot available',
-                           ha='center', va='center', transform=axes[1, 0].transAxes)
-            axes[1, 0].set_title('Center Patch Attention')
-            axes[1, 0].axis('off')
+        im2 = axes[1, 0].imshow(center_map, cmap='hot', interpolation='nearest')
+        axes[1, 0].set_title('Center Patch Attention')
+        axes[1, 0].axis('off')
+        plt.colorbar(im2, ax=axes[1, 0])
 
         if patch_flux is not None:
             patch_flux_np = patch_flux.detach().cpu().float().numpy().reshape(grid_h, grid_w)
@@ -598,7 +571,7 @@ class AttentionMapCallback(Callback):
                 patch_std_np, cmap='magma', interpolation='nearest'
             )
             axes[1, 2].set_title(
-                patch_uncertainty_title or 'Patch Flux Std [W/m²]'
+                'Sqrt Global Variance Contribution [W/m²]'
             )
             axes[1, 2].axis('off')
             plt.colorbar(im4, ax=axes[1, 2])
@@ -637,8 +610,6 @@ class SpatialUncertaintyMapCallback(Callback):
     def _plot_spatial_uncertainty_maps(
         cls, image, patch_flux_raw, patch_variance_raw, patch_size,
         aia_transform=None, sample_description=None,
-        patch_uncertainty_title='Patch Flux Std',
-        patch_uncertainty_label='Std [W/m²]',
     ):
         height, width = image.shape[:2]
         grid_h, grid_w = height // patch_size, width // patch_size
@@ -686,8 +657,8 @@ class SpatialUncertaintyMapCallback(Callback):
                 cls._positive_log_norm(100.0 * patch_fraction),
             ),
             (
-                axes[3], patch_std, patch_uncertainty_title,
-                patch_uncertainty_label, 'magma',
+                axes[3], patch_std, 'Sqrt Global Variance Contribution',
+                'Sqrt variance contribution [W/m²]', 'magma',
                 cls._positive_log_norm(patch_std),
             ),
         )
@@ -782,16 +753,7 @@ class SpatialUncertaintyMapCallback(Callback):
                     pl_module(images, return_attention=False)
                 )
                 network = getattr(pl_module, 'model', None)
-                global_adjustment = getattr(
-                    network, 'last_log10_patch_global_adjustment', None
-                )
-                if global_adjustment is None:
-                    global_adjustment = getattr(
-                        network, 'last_log10_global_patch_adjustment', None
-                    )
-                is_variance_attribution = getattr(
-                    pl_module, 'patch_uncertainty_semantics', None
-                ) == 'variance_attribution'
+                global_adjustment = network.last_log10_global_patch_adjustment
 
                 sxr_transform = getattr(val_ds, 'sxr_transform', None)
                 aia_transform = getattr(val_ds, 'aia_transform', None)
@@ -818,35 +780,18 @@ class SpatialUncertaintyMapCallback(Callback):
                         patch_size=self.patch_size,
                         aia_transform=aia_transform,
                         sample_description=description,
-                        patch_uncertainty_title=(
-                            'Sqrt Global Variance Contribution'
-                            if is_variance_attribution
-                            else 'Patch Flux Std'
-                        ),
-                        patch_uncertainty_label=(
-                            'Sqrt variance contribution [W/m²]'
-                            if is_variance_attribution
-                            else 'Std [W/m²]'
-                        ),
                     )
                     trainer.logger.experiment.log({
                         'Spatial uncertainty plots': wandb.Image(figure)
                     })
                     plt.close(figure)
                     if global_adjustment is not None:
-                        max_abs_adjustment = getattr(
-                            network, 'max_abs_log10_global_adjustment', None
-                        )
-                        if max_abs_adjustment is None:
-                            max_abs_adjustment = (
-                                network.patch_global_context.max_abs_adjustment
-                            )
                         adjustment_figure = self._plot_global_patch_adjustment(
                             images[sample_index],
                             patch_flux_raw[sample_index],
                             global_adjustment[sample_index],
                             patch_size=self.patch_size,
-                            max_abs_adjustment=max_abs_adjustment,
+                            max_abs_adjustment=network.max_abs_log10_global_adjustment,
                             aia_transform=aia_transform,
                             sample_description=description,
                         )

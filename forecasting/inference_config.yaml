@@ -1,7 +1,10 @@
+# Relative file paths use the repository root, independent of the working directory.
+path_root: ..
+
 # =============================================================================
 # FOXES Inference Configuration
 # =============================================================================
-# Used by inference.py to run a trained ViTLocal checkpoint over a folder of
+# Used by inference.py to run a deterministic or Gaussian checkpoint over a folder of
 # AIA data and write out SXR predictions (+ optional attention/flux maps).
 #
 # Usage:
@@ -31,10 +34,18 @@ data:
   sxr_norm_path:   null  # optional check against the normalization stored in the checkpoint
   # Enable only for a checkpoint trained with this exact AIA transform/artifact.
   aia_norm_path:   null  # set to the matching AIA normalization artifact if used in training
-  checkpoint_path: "./foxes_data/checkpoints/your_model.ckpt"  # select your trained checkpoint
+  checkpoint_path: "./model_assets/UncertaintyModel.ckpt"
 
 # Detect the model type from the selected checkpoint.
 model_type: auto
+
+# Keep false for UncertaintyModel.ckpt. When selecting a LegacyModels checkpoint,
+# opt in to the approximate date rule below for the older SXR targets.
+# Before the exclusive UTC cutoff, total/patch flux, interval bounds and patch
+# standard deviations are multiplied by 0.7 (raw variances by 0.49).
+# Native checkpoint normalization and attention weights are preserved.
+legacy_model: false
+legacy_cutoff: "2016-11-19"
 
 output_path: "./foxes_outputs/inference/predictions.csv"
 
@@ -52,13 +63,13 @@ patch_uncertainty_path: "./foxes_outputs/inference_patch/patch_uncertainty/"
 model_params:
   input_size: 512
   patch_size: 8
-  batch_size: 512  # benchmarked at ~89 samples/s, ~26/24 GiB peak VRAM
+  batch_size: 16  # tune for the selected checkpoint and available device memory
   no_weights: true   # true = skip saving attention weights (saves ~3GB/batch of GPU memory)
   no_flux:    false   # true = skip saving flux contribution maps
   no_patch_uncertainty: false  # true = skip per-patch uncertainty map files
 
 device: auto      # auto chooses CUDA, then Apple MPS, then CPU; or set cuda/mps/cpu
-num_workers: 16   # 48 CPU cores and 685 GB of test NPY files: keep I/O prefetched
+num_workers: 4
 pin_memory:  false
 prefetch_factor: 4
 persistent_workers: true
@@ -67,4 +78,3 @@ use_amp:     false
 amp_dtype:   bfloat16  # Blackwell-native and safer numerically than FP16
 matmul_precision: high # enables fast TF32 for operations outside autocast
 progress_update_interval: 1024
-multi_gpu:   false  # set true to use all available GPUs via DataParallel

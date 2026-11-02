@@ -1,3 +1,6 @@
+# Relative file paths use the repository root, independent of the working directory.
+path_root: ..
+
 # =============================================================================
 # FOXES Training Configuration
 # =============================================================================
@@ -30,7 +33,6 @@ mean_loss:
 vit_architecture:
   embed_dim: 256
   num_channels: 7
-  num_classes: 1
   patch_size: 8
   num_patches: 4096
   hidden_dim: 1024
@@ -51,10 +53,9 @@ optimizer:
   # Optional: clips gradient norm - guards against loss spikes (e.g. a rare
   # X-class sample with its 43x loss weight) blowing up into a NaN that never
   # recovers. Omit this key or set it to null to disable clipping entirely.
-  gradient_clip_val: None
-  scheduler:              # CosineAnnealingWarmRestarts
-    T_0: 250
-    T_mult: 2
+  gradient_clip_val: null
+  scheduler:              # CosineAnnealingLR; T_max is measured in epochs
+    T_max: 250
     eta_min: 0.0000001
 
 loss:

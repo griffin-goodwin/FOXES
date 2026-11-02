@@ -1,44 +1,62 @@
-# Model background
+# Models and checkpoints
 
-[Back to the README](../README.md) · [Checkpoint files and inference](workflows.md#2-run-inference)
+FOXES predicts a flux contribution for each image patch. These contributions
+sum to the full-disk soft X-ray flux. HARP regions summarize contributions
+inside active-region boxes; overlapping boxes can count the same patches.
 
-## Original FOXES abstract
-The solar soft X-ray (SXR) irradiance is a long-standing proxy of solar activity, used for the classification of flare strength. As a result, the flare class, along with the SXR light curve, are routinely used as the primary input to many forecasting methods, from coronal mass ejection speed to energetic particle output. However, the SXR irradiance lacks spatial information leading to dubious classification during periods of high activity, and is  applicable only for observations from Earth orbit, hindering forecasting for other places in the heliosphere. This work introduces the Framework for Operational X-ray Emission Synthesis (FOXES), a Vision Transformer-based approach for translating Extreme Ultraviolet (EUV) spatially-resolved observations into SXR irradiance predictions. The model produces two outputs: (1) a global SXR flux prediction and (2) per-patch flux contributions, which offer a spatially resolved interpretation of where the model attributes SXR emission. This paves the way for EUV-based flare detection to be extended beyond Earth's line of sight, allowing for a more comprehensive and reliable flare catalog to support robust, scalable, and real-time forecasting, extending our monitoring into a true multiviewpoint system.
+## Download a checkpoint
 
-**Team**: Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger, Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, Lorien Pratt
+Save weights under `model_assets/`, using the paths below. They are separate
+from the Python package; after cloning this repository, `git lfs pull` retrieves
+the checkpoint files.
 
----
+| Checkpoint path | Model | Download |
+| --- | --- | --- |
+| `model_assets/UncertaintyModel.ckpt` | Current local + global model, with Gaussian uncertainty | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/UncertaintyModel.ckpt) |
+| `model_assets/LegacyModels/inverted-attention-mask.ckpt` | Legacy deterministic, distant-patch attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/inverted-attention-mask.ckpt) |
+| `model_assets/LegacyModels/localized-attention-mask.ckpt` | Legacy deterministic, local attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/localized-attention-mask.ckpt) |
+| `model_assets/LegacyModels/no-attention-mask.ckpt` | Legacy deterministic, full attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/no-attention-mask.ckpt) |
 
-## The Original FOXES Model
+## Current uncertainty model
 
-The original model predicts a raw SXR flux contribution for each image patch.
-Its three trained checkpoints use **global**, **local**, or **inverted**
-attention. The model converts patch logits to flux and clamps very small
-contributions to a positive floor (`1e-15` W/m²). Maps with many contributions
-near that floor can appear sparse. In the evaluations run so far, global RMSE and MSE were
-good, but the spatial maps for weak flares and quiet-Sun images were less
-convincing. This motivated the updated model below.
+`UncertaintyModel.ckpt` combines local patch features with shared global
+context. A seven-channel `(7, 512, 512)` AIA input produces a 64 × 64 flux map,
+full-disk flux, and Gaussian prediction intervals.
 
-## The Updated (Post Publication) FOXES Model: Local + Global Context
+Load it with the default `legacy_model=False`. Its SXR normalization is embedded
+in the checkpoint; no separate SXR normalization file is needed.
 
-The maintained model in this repository extends the released FOXES patch
-predictor. Local attention builds a feature for each AIA image patch. Patch
-flux starts from a positive, image-wide baseline divided across the patches;
-each patch's output scales its share. A global query summarizes projected
-patches from the original AIA image. Each patch's correction combines that
-shared context, its projected image patch, and its local Transformer features
-to adjust its flux contribution. The corrected patch fluxes sum to the
-full-disk SXR prediction.
+Patch variances add to the full-disk variance. The patch uncertainty map
+attributes that variance across the image; there are no local SXR labels to
+validate regional error bars. See [Results](results.md) for full-disk metrics,
+figures, and measured interval coverage.
 
-This local + global design produces **less sparse, visually better spatial
-flux maps** in the examples examined so far. It also predicts a global
-Gaussian uncertainty and a map of each patch's contribution to that variance.
-The uncertainty map is an attribution of global uncertainty; there are no patch-level SXR labels
-to establish calibrated local error bars.
+## Legacy models
 
-The tradeoff is **somewhat worse global SXR prediction performance** than the
-original released FOXES model in the evaluations run so far. The visual map
-improvement is qualitative.
-The newer local + global checkpoints listed in the [workflow guide](workflows.md#2-run-inference) have **not yet been
-validated**; these earlier observations should not be read as evaluation
-results for either new checkpoint file.
+The three deterministic checkpoints use the older SXR targets and do not
+produce uncertainty estimates. Enable their approximate output correction
+when loading them:
+
+```python
+import helio_foxes
+
+model = helio_foxes.load_model(
+    "model_assets/LegacyModels/inverted-attention-mask.ckpt",
+    legacy_model=True,
+)
+```
+
+Predictions strictly before **2016-11-19 00:00 UTC** receive a **0.7** flux
+factor; later predictions use 1.0. The same factor applies to full-disk and
+patch flux, preserving their sum. Timestamps are required; an `Observation`
+supplies its time automatically.
+
+This date rule approximates the older mixed-satellite targets and does not
+establish predictive calibration. Keep each checkpoint's original weights
+and embedded normalization. The original normalization artifact is
+`model_assets/LegacyModels/normalized_sxr_FOXES_paper.npy`.
+
+## Team
+
+Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger,
+Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, and Lorien Pratt.

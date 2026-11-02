@@ -1,6 +1,7 @@
 """
-Combine raw multi-satellite GOES XRS netCDF files into one interpolated CSV
-per satellite (combined_g<N>_avg1m_<start>_<end>.csv).
+Combine raw multi-satellite GOES XRS netCDF files into one interpolated Parquet
+file per satellite (combined_g<N>_avg1m_<start>_<end>.parquet). Binary output
+preserves the flux values used by the science reprocessing pipeline.
 
 Called by build_dataset.py — not meant to be run standalone.
 """
@@ -13,6 +14,25 @@ import xarray as xr
 from tqdm import tqdm
 
 
+def prepare_sxr_frame(dataset, columns_to_interp=("xrsb_flux", "xrsa_flux")):
+    """Apply diode/quality filters and interpolate retained fluxes in log space.
+
+    Flagged rows are removed. Zero/NaN fluxes at retained timestamps are filled
+    by time interpolation with both-end filling; no new timestamps are added.
+    Callers concatenate and sort source data before calling this helper.
+    """
+    df = dataset.to_dataframe().reset_index()
+    if 'quad_diode' in df.columns:
+        df = df[df['quad_diode'] == 0]
+    df = df[df['xrsb_flag'] == 0]
+    df['time'] = pd.to_datetime(df['time'])
+    df.set_index('time', inplace=True)
+    columns = list(columns_to_interp)
+    df_log = np.log10(df[columns].replace(0, np.nan))
+    df[columns] = 10 ** df_log.interpolate(method="time", limit_direction="both")
+    return df
+
+
 class SXRDataProcessor:
     """Class to combine raw multi-satellite GOES X-ray data and interpolate it in log space.
     This class combines data from different satellites and applies interpolation
@@ -23,7 +43,7 @@ class SXRDataProcessor:
     data_dir : str
         Directory containing the raw GOES netCDF files to combine.
     output_dir : str
-        Directory where the combined per-satellite CSVs will be saved.
+        Directory where the combined per-satellite Parquet files will be saved.
     """
 
     def __init__(self, data_dir: str, output_dir: str):
@@ -37,15 +57,17 @@ class SXRDataProcessor:
         self.used_g17_files = []
         self.used_g18_files = []
 
-    def combine_goes_data(self, columns_to_interp=["xrsb_flux", "xrsa_flux"], apply_pre_goes16_scaling=True):
+    def combine_goes_data(self, columns_to_interp=("xrsb_flux", "xrsa_flux"), apply_pre_goes16_scaling=False):
         """
-        Combine GOES-16 and GOES-18 files and track source files used.
+        Combine GOES-13 through GOES-18 files and track source files used.
+        Writes Parquet files preserving the processed values and dtypes for
+        exact timestamp alignment and satellite averaging.
         Parameters
         ----------
-        apply_pre_goes16_scaling : bool
-            Whether to apply the legacy GOES-13/14/15 (pre-GOES-16) scaling
-            correction. Set to False if your GOES-13/14/15 files are already
-            scaled to match GOES-16 (as with NOAA's newest reprocessed data).
+        apply_pre_goes16_scaling : bool, default False
+            Enable only for verified legacy SWPC-scaled GOES-13/14/15 files.
+            Files named sci_* already have those scaling factors removed;
+            enabling this option for them raises ValueError before processing.
         """
         print("Scanning for GOES data files...")
 
@@ -60,6 +82,14 @@ class SXRDataProcessor:
         g16_files = _glob("*g16*.nc")
         g17_files = _glob("*g17*.nc")
         g18_files = _glob("*g18*.nc")
+
+        if apply_pre_goes16_scaling and any(
+            path.name.startswith("sci_") for path in g13_files + g14_files + g15_files
+        ):
+            raise ValueError(
+                "NOAA science-quality GOES files already have SWPC scaling removed. "
+                "Set apply_pre_goes16_scaling=False."
+            )
         
         total_files = len(g13_files) + len(g14_files) + len(g15_files) + len(g16_files) + len(g17_files) + len(g18_files)
         logging.info(
@@ -83,8 +113,8 @@ class SXRDataProcessor:
                 for file_path in pbar:
                     pbar.set_postfix_str(f"Loading {file_path.name}")
                     try:
-                        ds = xr.open_dataset(str(file_path))
-                        datasets.append(ds)
+                        with xr.open_dataset(str(file_path)) as ds:
+                            datasets.append(ds.load())
                         used_file_list.append(file_path)  # Track file used
                         successful_files += 1
                         logging.info(f"Loaded {file_path.name}")
@@ -92,19 +122,16 @@ class SXRDataProcessor:
                         failed_files += 1
                         logging.error(f"Could not load {file_path.name}: {e}")
                         continue
-                    finally:
-                        if 'ds' in locals():
-                            ds.close() # type: ignore[attr-defined]
 
             if not datasets:
                 print(f"No valid datasets for {satellite_name}")
                 logging.warning(f"No valid datasets for {satellite_name}")
-                return
+                return False
 
             print(f"Processing {len(datasets)} datasets for {satellite_name}...")
             
             try:
-                print(f"Concatenating datasets...")
+                print("Concatenating datasets...")
                 combined_ds = xr.concat(datasets, dim='time').sortby('time')
                 
                 # Scaling factors for GOES-13, GOES-14, and GOES-15
@@ -116,43 +143,27 @@ class SXRDataProcessor:
                     else:
                         print(f"Skipping pre-GOES-16 scaling factors for {satellite_name}...")
                 
-                print(f"Converting to DataFrame...")
-                df = combined_ds.to_dataframe().reset_index()
-                
-                if 'quad_diode' in df.columns:
-                    print(f"Filtering quad diode data...")
-                    df = df[df['quad_diode'] == 0]  # Filter out quad diode data
-
-                #Filter out data where xrsb_flux has a quality flag of >0
-                print(f"Filtering out data where xrsb_flux has a quality flag of >0...")
-                df = df[df['xrsb_flag'] == 0]
-                
-                df['time'] = pd.to_datetime(df['time'])
-                df.set_index('time', inplace=True)
-                
-                print(f"Applying log interpolation...")
-                df_log = np.log10(df[columns_to_interp].replace(0, np.nan))
-
-                # Step 3: Interpolate in log space
-                df_log_interp = df_log.interpolate(method="time", limit_direction="both")
-
-                # Step 4: Back-transform to linear space
-                df[columns_to_interp] = 10 ** df_log_interp
+                print("Converting to DataFrame...")
+                df = prepare_sxr_frame(combined_ds, columns_to_interp)
 
                 # Add min and max dates to filename
                 min_date = df.index.min().strftime('%Y%m%d')
                 max_date = df.index.max().strftime('%Y%m%d')
-                filename = f"{str(output_file)}_{min_date}_{max_date}.csv"
+                filename = Path(f"{output_file}_{min_date}_{max_date}.parquet")
                 
                 print(f"Saving to {filename}...")
-                df.to_csv(filename, index=True)
+                temporary = filename.with_suffix(".parquet.tmp")
+                df.to_parquet(temporary, index=True, engine="pyarrow")
+                temporary.replace(filename)
 
                 print(f"Successfully processed {satellite_name}: {successful_files} files loaded, {failed_files} failed")
                 logging.info(f"Saved combined file: {output_file}")
+                return True
                 
             except Exception as e:
                 print(f"Failed to process {satellite_name}: {e}")
                 logging.error(f"Failed to write {output_file}: {e}")
+                return False
             finally:
                 for ds in datasets:
                     ds.close()
@@ -184,8 +195,10 @@ class SXRDataProcessor:
             print(f"{'='*60}")
             
             try:
-                process_files(files, satellite_name, output_file, used_file_list)
-                successful_satellites += 1
+                if process_files(files, satellite_name, output_file, used_file_list):
+                    successful_satellites += 1
+                else:
+                    failed_satellites += 1
             except Exception as e:
                 print(f"Failed to process {satellite_name}: {e}")
                 failed_satellites += 1
@@ -193,7 +206,7 @@ class SXRDataProcessor:
         
         # Print final summary
         print(f"\n{'='*60}")
-        print(f"PROCESSING COMPLETE")
+        print("PROCESSING COMPLETE")
         print(f"{'='*60}")
         print(f"Successfully processed: {successful_satellites} satellites")
         print(f"Failed: {failed_satellites} satellites")
@@ -207,6 +220,6 @@ class SXRDataProcessor:
         print(f"Files used in processing: {total_used_files}")
         
         if successful_satellites > 0:
-            print(f"\nSXR data processing completed successfully!")
+            print("\nSXR data processing completed successfully!")
         else:
-            print(f"\n⚠No satellites were processed successfully.")
+            print("\n⚠No satellites were processed successfully.")

@@ -23,7 +23,6 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 from pathlib import Path
-import yaml
 from tqdm import tqdm
 
 # Add project root to Python path
@@ -31,6 +30,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.dataset import AIAGOESDataset, AIANormTransform
+from forecasting.config import load_config
+from forecasting.calibration import LegacyCalibration
 from forecasting.model import (
     CoupledGaussianViTLocal,
     ViTLocal,
@@ -103,8 +104,19 @@ def select_inference_samples(dataset, sampling=None):
     return Subset(dataset, indices.tolist()), times
 
 
-def _unwrap_model(model):
-    return model.module if isinstance(model, torch.nn.DataParallel) else model
+def _legacy_calibration(config, model=None):
+    """Resolve explicit output options, falling back to a loaded model's options."""
+    current = getattr(model, 'legacy_calibration', None) or LegacyCalibration()
+    calibration = LegacyCalibration(
+        config.get('legacy_model', current.enabled),
+        config.get('legacy_cutoff', current.cutoff),
+    )
+    if calibration.enabled and getattr(model, 'predicts_uncertainty', False):
+        raise ValueError(
+            'legacy_model=True is only supported for deterministic legacy '
+            'checkpoints; use legacy_model=False for uncertainty models'
+        )
+    return calibration
 
 
 def _auto_checkpoint_model_class(checkpoint):
@@ -116,8 +128,8 @@ def _auto_checkpoint_model_class(checkpoint):
     )
     hyperparameters = checkpoint.get('hyper_parameters', {})
     if ('model.global_query' in state_dict
-            and hyperparameters.get('mean_parameterization') == 'positive'
-            and not hyperparameters.get('model_kwargs', {}).get('independent_local_global', False)
+            and hyperparameters.get('uncertainty_parameterization')
+            == CoupledGaussianViTLocal.uncertainty_parameterization
             and not any(k.startswith('model.patch_global_context.') for k in state_keys)):
         return CoupledGaussianViTLocal
     is_uncertainty_checkpoint = (
@@ -126,8 +138,8 @@ def _auto_checkpoint_model_class(checkpoint):
     )
     if has_uncertainty_head or is_uncertainty_checkpoint:
         raise ValueError(
-            'Exploratory uncertainty checkpoint; use '
-            'python -m forecasting.experimental.inference.'
+            'Unsupported uncertainty checkpoint. Use a deterministic legacy '
+            'checkpoint or the maintained coupled Gaussian checkpoint.'
         )
     return ViTLocal
 
@@ -159,36 +171,6 @@ def _resolve_amp_dtype(config_data, data_device):
             "support BF16; use amp_dtype=float16 or disable AMP"
         )
     return dtype
-
-
-class _AutocastForwardWrapper(torch.nn.Module):
-    """Enter the requested autocast dtype inside DataParallel workers.
-
-    DataParallel propagates whether autocast is enabled, but not its configured
-    dtype. Without this wrapper, a BF16 context in the caller silently becomes
-    FP16 in replica threads.
-    """
-
-    def __init__(self, module, device_type, dtype):
-        super().__init__()
-        self.wrapped_module = module
-        self.device_type = str(device_type)
-        self.amp_dtype = dtype
-
-    def forward(self, *args, **kwargs):
-        with torch.autocast(
-            device_type=self.device_type,
-            dtype=self.amp_dtype,
-            enabled=True,
-        ):
-            return self.wrapped_module(*args, **kwargs)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            wrapped_module = super().__getattr__('wrapped_module')
-            return getattr(wrapped_module, name)
 
 
 def uncertainty_from_prediction(prediction_raw, variance_normalized, sxr_norm):
@@ -249,7 +231,9 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     times : list, optional
         List of timestamps corresponding to each sample.
     config_data : dict, optional
-        YAML configuration dictionary.
+        YAML configuration dictionary. legacy_model=True applies the
+        approximate 0.7 physical output correction before legacy_cutoff.
+        Times must be supplied and aligned with every dataset item.
     save_weights : bool, default=True
         Whether to save attention weights for visualization.
     input_size : int, default=512
@@ -276,11 +260,15 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     num_workers = int(config_data.get('num_workers', 4))
     pin_memory = _as_bool(config_data.get('pin_memory', True))
     
-    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    # Unwrapped model used as fallback for batches smaller than n_gpus
-    base_model = _unwrap_model(model)
+    calibration = _legacy_calibration(config_data, model)
+    if calibration.enabled and (times is None or len(times) != len(dataset)):
+        raise ValueError("legacy_model=True requires one timestamp per inference sample")
+    scale_factors = (
+        np.asarray([calibration.factor(stamp) for stamp in times], dtype=np.float32)
+        if calibration.enabled else None
+    )
     predicts_uncertainty = bool(
-        getattr(base_model, 'predicts_uncertainty', False)
+        getattr(model, 'predicts_uncertainty', False)
     )
     loader_kwargs = {
         'batch_size': batch_size,
@@ -326,7 +314,8 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
         flux_dir = Path(config_data['flux_path'])
         flux_dir.mkdir(parents=True, exist_ok=True)
     uncertainty_dir = None
-    if save_patch_uncertainty and config_data.get('patch_uncertainty_path'):
+    if (predicts_uncertainty and save_patch_uncertainty
+            and config_data.get('patch_uncertainty_path')):
         uncertainty_dir = Path(config_data['patch_uncertainty_path'])
         uncertainty_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -356,17 +345,12 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             # FP16 on V100 can spike peak memory due to FP32 fallbacks in attention.
             # Only compute the large attention-weight tensors when saving them.
             # Keep this explicit even though ViTLocal now defaults to False.
-            # Fall back to single GPU for batches smaller than n_gpus to avoid
-            # DataParallel crashing when some replicas receive empty inputs.
-            active_model = (base_model
-                            if isinstance(model, torch.nn.DataParallel) and aia_imgs.shape[0] < n_gpus
-                            else model)
             with torch.autocast(
                 device_type=data_device.type,
                 dtype=amp_dtype,
                 enabled=use_amp,
             ):
-                pred = active_model(
+                pred = model(
                     aia_imgs, return_attention=save_weights
                 )
 
@@ -391,22 +375,17 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                     all_flux_contributions if save_flux else None
                 )
                 uncertainty_batch = uncertainty_from_prediction(
-                    predictions, variance_normalized, base_model.sxr_norm
+                    predictions, variance_normalized, model.sxr_norm
                 )
-            elif isinstance(pred, tuple) and len(pred) >= 3:
-                predictions = pred[0]
-                weights = pred[1] if save_weights else None
-                flux_contributions = pred[2] if save_flux else None
-                uncertainty_batch = None
-            elif isinstance(pred, tuple) and len(pred) == 2:
-                predictions = pred[0]
-                weights = None
-                flux_contributions = pred[1] if save_flux else None
-                uncertainty_batch = None
             else:
-                predictions = pred
-                weights = None
-                flux_contributions = None
+                if save_weights:
+                    predictions, weights, all_flux_contributions = pred
+                else:
+                    predictions, all_flux_contributions = pred
+                    weights = None
+                flux_contributions = (
+                    all_flux_contributions if save_flux else None
+                )
                 uncertainty_batch = None
 
             current_batch_size = predictions.shape[0]
@@ -415,6 +394,10 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
             # batch. Per-sample .cpu().item() calls serialize the GPU hundreds
             # of times and can dominate otherwise fast inference.
             predictions_cpu = predictions.detach().cpu().numpy()
+            assert predictions_cpu.shape == (current_batch_size, 1), (
+                f"expected predictions of shape ({current_batch_size}, 1), "
+                f"got {predictions_cpu.shape}"
+            )
             targets_cpu = sxr.detach().cpu().numpy()
 
             uncertainty_keys = None
@@ -452,6 +435,15 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                 ).reshape(
                     current_batch_size, grid_h, grid_w
                 ).float().cpu().numpy()
+
+            # Legacy checkpoints are deterministic: correct only total and
+            # patch flux. Their attention weights stay in the native scale.
+            if calibration.enabled:
+                start = batch_idx * batch_size
+                factors = scale_factors[start:start + current_batch_size]
+                predictions_cpu = predictions_cpu * factors[:, None]
+                if flux_maps_cpu is not None:
+                    flux_maps_cpu = flux_maps_cpu * factors[:, None, None]
 
             # Drop the CUDA output tree before yielding individual CPU records.
             # Keep allocator blocks cached so the next batch can reuse them.
@@ -542,6 +534,7 @@ def load_model_from_config(config_data):
         Loaded model ready for inference.
     """
     checkpoint_path = config_data['data']['checkpoint_path']
+    calibration = _legacy_calibration(config_data)
 
     load_device = resolve_inference_device(config_data)
     print(f"Using {load_device} for inference")
@@ -553,8 +546,6 @@ def load_model_from_config(config_data):
         ).strip().lower()
         model_types = {
             'deterministic': ViTLocal,
-            'og_uncertainty': CoupledGaussianViTLocal,
-            'uncertainty_coupled_single_query': CoupledGaussianViTLocal,
             'coupled_uncertainty': CoupledGaussianViTLocal,
         }
         if requested_type == 'auto':
@@ -568,7 +559,7 @@ def load_model_from_config(config_data):
             model_class = model_types[requested_type]
         else:
             raise ValueError(
-                "model_type must be auto, deterministic, or coupled_uncertainty (legacy coupled aliases also work)"
+                "model_type must be auto, deterministic, or coupled_uncertainty"
             )
         print(f"Loading {model_class.__name__} model...")
         model = model_class.load_from_checkpoint(
@@ -577,33 +568,18 @@ def load_model_from_config(config_data):
     else:
         state = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
         model = state['model']
-        model = model.to(load_device)
         print(f"Loaded serialized {type(model).__name__} model...")
 
+    calibration = _legacy_calibration(config_data, model)
+    model = model.to(load_device)
+    model.legacy_calibration = calibration
+    model.legacy_model = calibration.enabled
     model.eval()
-
-    inference_branch = str(config_data.get('inference_branch', 'final')).strip().lower()
-    if inference_branch not in {'final', 'local'}:
-        raise ValueError("inference_branch must be 'final' or 'local'")
-    if inference_branch == 'local':
-        raise ValueError(
-            'Local-only inference belongs to the exploratory independent model; '
-            'use python -m forecasting.experimental.inference.'
+    if calibration.enabled:
+        print(
+            f"Legacy model: approximate 0.7 output correction before "
+            f"{calibration.cutoff.isoformat()} (UTC)."
         )
-
-    raw_multi_gpu = config_data.get('multi_gpu', False) if config_data else False
-    use_multi_gpu = (_as_bool(raw_multi_gpu)
-                     and load_device.type == 'cuda'
-                     and torch.cuda.device_count() > 1)
-    if use_multi_gpu:
-        n_gpus = torch.cuda.device_count()
-        if _as_bool(config_data.get('use_amp', False)):
-            amp_dtype = _resolve_amp_dtype(config_data, load_device)
-            model = _AutocastForwardWrapper(
-                model, load_device.type, amp_dtype
-            )
-        model = torch.nn.DataParallel(model)
-        print(f"Using DataParallel across {n_gpus} GPUs — ensure batch_size >= {n_gpus}")
 
     return model
 
@@ -624,8 +600,7 @@ def main():
                         help='Path to the inference configuration YAML file.')
     args = parser.parse_args()
 
-    with open(args.config, 'r') as stream:
-        config_data = yaml.load(stream, Loader=yaml.SafeLoader)
+    config_data = load_config(args.config)
 
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)
@@ -637,13 +612,12 @@ def main():
         model_params.get('no_patch_uncertainty', False)
     )
     
-    print(f"Using parameters from config:")
+    print("Using parameters from config:")
     print(f"  Input size: {input_size}\n  Patch size: {patch_size}\n  Batch size: {batch_size}\n  Skip weights: {no_weights}\n  Skip flux: {no_flux}")
 
     model = load_model_from_config(config_data)
-    base_model = _unwrap_model(model)
     predicts_uncertainty = bool(
-        getattr(base_model, 'predicts_uncertainty', False)
+        getattr(model, 'predicts_uncertainty', False)
     )
 
     save_weights = not no_weights
@@ -666,25 +640,17 @@ def main():
         print("No flux path specified.")
 
     save_patch_uncertainty = (
-        bool(getattr(base_model, 'predicts_patch_uncertainty', False))
+        predicts_uncertainty
         and bool(config_data.get('patch_uncertainty_path'))
         and not no_patch_uncertainty
     )
     if predicts_uncertainty:
         print("Uncertainty model detected; global intervals will be saved to CSV.")
         if save_patch_uncertainty:
-            if getattr(
-                base_model, 'patch_uncertainty_semantics', None
-            ) == 'variance_attribution':
-                print(
-                    "Will save square-root global-variance contribution "
-                    "maps in raw W/m² as NPY files."
-                )
-            else:
-                print(
-                    "Will save Gaussian patch standard-deviation maps "
-                    "in raw W/m² as NPY files."
-                )
+            print(
+                "Will save square-root global-variance contribution "
+                "maps in raw W/m² as NPY files."
+            )
         else:
             print("Patch uncertainty map saving is disabled.")
     elif config_data.get('patch_uncertainty_path'):
@@ -724,7 +690,7 @@ def main():
     
     # The uncertainty checkpoint carries the exact training normalization. The
     # optional file is checked against it to catch accidentally mixed artifacts.
-    checkpoint_sxr_norm = getattr(base_model, 'sxr_norm', None)
+    checkpoint_sxr_norm = getattr(model, 'sxr_norm', None)
     if checkpoint_sxr_norm is not None:
         checkpoint_sxr_norm = torch.as_tensor(
             checkpoint_sxr_norm
@@ -753,6 +719,8 @@ def main():
 
     timestamp, predictions, ground = [], [], []
     uncertainty_rows = []
+    calibration = _legacy_calibration(config_data, model)
+    output_factors = []
     total_samples = len(times)
     print(f"Processing {total_samples} samples with batch size {batch_size}...")
 
@@ -779,18 +747,17 @@ def main():
 
     for result in pbar:
         if len(result) == 6:
-            prediction, sxr, weight, flux_data, idx, uncertainty = result
+            prediction, sxr, _, _, idx, uncertainty = result
         else:
-            prediction, sxr, weight, flux_data, idx = result
+            prediction, sxr, _, _, idx = result
             uncertainty = None
-        # ViTLocal models already return unnormalized predictions, so no need to unnormalize
-        pred = prediction
-
-        predictions.append(pred.item() if hasattr(pred, 'item') else float(pred))
+        predictions.append(float(prediction.item()))
+        if calibration.enabled:
+            output_factors.append(calibration.factor(times[idx]))
         
         # Only collect ground truth if not in prediction-only mode
         if not prediction_only:
-            ground.append(sxr.item() if hasattr(sxr, 'item') else float(sxr))
+            ground.append(float(sxr.item()))
         else:
             ground.append(np.nan)
 
@@ -802,9 +769,7 @@ def main():
             if prediction_only:
                 uncertainty['groundtruth_normalized'] = np.nan
             else:
-                target_raw = torch.tensor(
-                    ground[-1], dtype=torch.float32
-                )
+                target_raw = torch.tensor(ground[-1], dtype=torch.float32)
                 uncertainty['groundtruth_normalized'] = normalize_sxr(
                     target_raw, checkpoint_sxr_norm
                 ).item()
@@ -821,6 +786,9 @@ def main():
             pbar.set_postfix({'sample': idx + 1, 'total': total_samples})
 
     output_df = pd.DataFrame({'timestamp': timestamp, 'predictions': predictions, 'groundtruth': ground})
+    if calibration.enabled:
+        output_df['legacy_model'] = True
+        output_df['flux_scale_factor'] = output_factors
     if predicts_uncertainty:
         uncertainty_df = pd.DataFrame(uncertainty_rows)
         output_df = pd.concat([output_df, uncertainty_df], axis=1)

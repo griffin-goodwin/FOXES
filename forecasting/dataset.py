@@ -145,7 +145,7 @@ class AIAGOESDataset(torch.utils.data.Dataset):
         Directory containing SXR .npy files. Only required when `only_prediction`
         is False (i.e. you have ground truth to compare against).
     wavelengths : list of int, optional
-        AIA wavelengths to include (default: [94, 131, 171, 193, 211, 304]).
+        AIA wavelengths to include (default: 94, 131, 171, 193, 211, 304, 335).
     sxr_transform : callable, optional
         Transform to normalize or preprocess SXR flux values.
     aia_transform : callable, optional
@@ -171,6 +171,10 @@ class AIAGOESDataset(torch.utils.data.Dataset):
         if self.sxr_dir is None and not only_prediction:
             raise ValueError("sxr_dir is required unless only_prediction=True")
         self.wavelengths = wavelengths
+        unknown = set(wavelengths) - set(AIA_WAVELENGTHS)
+        if unknown:
+            raise ValueError(f"Unsupported AIA wavelengths: {sorted(unknown)}")
+        self.channel_indices = [AIA_WAVELENGTHS.index(wav) for wav in wavelengths]
         self.sxr_transform = sxr_transform
         self.aia_transform = aia_transform
         self.target_size = target_size
@@ -230,10 +234,7 @@ class AIAGOESDataset(torch.utils.data.Dataset):
                     timestamp_dt - last_valid_time).total_seconds() < self.cadence.total_seconds():
                 continue
 
-            if self.only_prediction:
-                valid_samples.append(timestamp)
-                last_valid_time = timestamp_dt
-            elif (self.sxr_dir / f"{timestamp}.npy").exists():
+            if self.only_prediction or (self.sxr_dir / f"{timestamp}.npy").exists():
                 valid_samples.append(timestamp)
                 last_valid_time = timestamp_dt
 
@@ -271,15 +272,12 @@ class AIAGOESDataset(torch.utils.data.Dataset):
 
         # Load AIA image as (7, H, W)
         try:
-            all_wavelengths = [94, 131, 171, 193, 211, 304, 335]
             aia_img = _restore_aia_shape(
-                np.load(aia_path), target_size=self.target_size
+                np.load(aia_path, allow_pickle=False), target_size=self.target_size
             )
-            indices = [all_wavelengths.index(wav) for wav in self.wavelengths if wav in all_wavelengths]
-            aia_img = aia_img[indices]
-        except:
-            print(f"Error loading AIA image from {aia_path}. Skipping sample.")
-            return self.__getitem__((idx + 1) % len(self))
+            aia_img = aia_img[self.channel_indices]
+        except (OSError, ValueError, EOFError) as exc:
+            raise ValueError(f"Could not load AIA image from {aia_path}: {exc}") from exc
 
         # Convert to torch for transforms
         aia_img = torch.tensor(aia_img, dtype=torch.float32)  # (C, H, W)
@@ -303,19 +301,6 @@ class AIAGOESDataset(torch.utils.data.Dataset):
             sxr_val = self.sxr_transform(sxr_val)
 
         return aia_img, torch.tensor(sxr_val, dtype=torch.float32)
-
-    def __gettimestamp__(self, idx):
-        """
-        Get the timestamp corresponding to a given index.
-
-        Returns
-        -------
-        str
-            Timestamp string of sample.
-        """
-        timestamp = self.samples[idx]
-        return timestamp
-
 
 class AIAGOESDataModule(LightningDataModule):
     """

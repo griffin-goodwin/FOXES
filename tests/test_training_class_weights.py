@@ -50,7 +50,7 @@ def test_four_class_macro_weights_are_derived_from_training_targets(tmp_path):
     )
 
 
-def test_legacy_base_weight_request_uses_macro_counts_without_a_loader(tmp_path):
+def test_deterministic_macro_weights_allow_an_absent_training_class(tmp_path):
     fluxes = [5e-8, 5e-8, 2e-6, 2e-5]
     samples = [f"sample_{index}" for index in range(len(fluxes))]
     for timestamp, flux in zip(samples, fluxes):
@@ -58,7 +58,7 @@ def test_legacy_base_weight_request_uses_macro_counts_without_a_loader(tmp_path)
     data_module = SimpleNamespace(
         train_ds=SimpleNamespace(samples=samples, sxr_dir=tmp_path)
     )
-    config = {'calculate_base_weights': True}
+    config = {'mean_loss': {'class_weighting': 'inverse_frequency'}}
 
     weights, _ = configure_class_weights(config, data_module, 'deterministic')
 

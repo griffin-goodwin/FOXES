@@ -1291,6 +1291,12 @@ class Prediction:
         Measured GOES fluxes and sample provenance, preserved from Observation.
         Compare ``sxr["xrsb_flux"]`` with the predicted ``flux``. This measured
         value is not an input to the model. None when disabled or unavailable.
+    legacy_model : bool
+        Whether the predictor opted into the approximate legacy SXR correction.
+    flux_scale_factor : float
+        Physical output factor applied to this prediction: 0.7 before the
+        legacy cutoff, otherwise 1.0. Flux-map sums use
+        the same factor. Measured SXR is preserved.
     """
 
     metadata: ObservationMetadata | None = field(default=None, kw_only=True)
@@ -1300,6 +1306,8 @@ class Prediction:
     patch_uncertainty_map: np.ndarray | None = None
     harp_regions: list[dict] | None = None
     sxr: dict | None = None
+    legacy_model: bool = field(default=False, kw_only=True)
+    flux_scale_factor: float = field(default=1.0, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(
@@ -1377,12 +1385,15 @@ class PredictionSeries:
         object.__setattr__(self, "predictions", predictions)
 
     def to_dataframe(self):
-        """Return full-disk predicted and measured XRS-B flux (W/m²)."""
+        """Return full-disk flux (W/m²), with scale for legacy series."""
         rows = [{
             "timestamp": self._timestamp(p), "flux": p.flux,
             "observed_xrsb_flux": p.sxr.get("xrsb_flux") if p.sxr else None,
         } for p in self.predictions]
         frame = pd.DataFrame(rows, columns=["timestamp", "flux", "observed_xrsb_flux"])
+        if any(p.legacy_model for p in self.predictions):
+            frame["legacy_model"] = [p.legacy_model for p in self.predictions]
+            frame["flux_scale_factor"] = [p.flux_scale_factor for p in self.predictions]
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         return frame.set_index("timestamp")
 
@@ -1639,13 +1650,21 @@ class Predictor:
     aia_norm_path : str or pathlib.Path or None, optional
         Matching AIA normalization artifact, if the checkpoint was trained
         with one. Do not apply that artifact in :class:`AIAProcessor` too.
+    legacy_model : bool, default False
+        Opt into the approximate 0.7 correction for old SXR-trained checkpoints.
+        Applies before legacy_cutoff to total and patch flux. Only deterministic
+        legacy checkpoints support this correction. Timestamps are required.
+    legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
+        Exclusive UTC cutoff for the legacy correction. Naive times mean UTC.
+        This configurable date rule approximates mixed-satellite training data.
 
     Notes
     -----
     Create the predictor once when the UI starts and reuse it for requests.
     """
 
-    def __init__(self, checkpoint_path, *, device="auto", aia_norm_path=None):
+    def __init__(self, checkpoint_path, *, device="auto", aia_norm_path=None,
+                 legacy_model=False, legacy_cutoff="2016-11-19"):
         """Load the checkpoint and its optional input normalization.
 
         Parameters
@@ -1657,23 +1676,32 @@ class Predictor:
         aia_norm_path : str or pathlib.Path or None, optional
             Matching .npz/.csv AIA normalization artifact. Supply only if input
             arrays have not already received that normalization.
+        legacy_model : bool, default False
+            Approximate legacy output correction; enable for the bundled old
+            checkpoints. Leave False for models retrained on corrected targets.
+        legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
+            Exclusive UTC cutoff. Outputs before it are multiplied by 0.7.
         """
-        from forecasting.inference import _unwrap_model, load_model_from_config
+        from forecasting.inference import load_model_from_config
         from forecasting.dataset import AIANormTransform
+        from forecasting.calibration import LegacyCalibration
 
+        self.legacy_calibration = LegacyCalibration(legacy_model, legacy_cutoff)
+        self.legacy_model = self.legacy_calibration.enabled
+        self.legacy_cutoff = self.legacy_calibration.cutoff
         path = Path(checkpoint_path).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
         self.model = load_model_from_config({
             "data": {"checkpoint_path": str(path)}, "device": device,
+            "legacy_model": legacy_model, "legacy_cutoff": self.legacy_cutoff,
         })
-        self.base_model = _unwrap_model(self.model)
         self.device = next(self.model.parameters()).device
         self.transform = (
             AIANormTransform.from_file(aia_norm_path)
             if aia_norm_path is not None else None
         )
-        self.model_kwargs = dict(self.base_model.hparams["model_kwargs"])
+        self.model_kwargs = dict(self.model.hparams["model_kwargs"])
 
     def predict_series(self, observations, *, snapshot_time=None, snapshot_wavelength=193):
         """Predict observations, optionally keeping the AIA image nearest a target time.
@@ -1750,6 +1778,7 @@ class Predictor:
             mean UTC; None leaves an array prediction without time metadata. Its crop is assumed to use
             the standard AIA channel order and 0.1 padding. For other crops,
             supply an Observation with explicit ObservationMetadata.
+            Required for array inputs when legacy_model=True.
 
         Returns
         -------
@@ -1784,16 +1813,17 @@ class Predictor:
                 raise ValueError("timestamp conflicts with the observation metadata")
         elif timestamp is not None:
             metadata = ObservationMetadata(timestamp=timestamp, image_shape=array.shape)
+        scale = self.legacy_calibration.factor(metadata.timestamp if metadata else None)
         tensor = torch.as_tensor(np.array(array, dtype=np.float32, copy=True))
         if self.transform is not None:
             tensor = self.transform(tensor)
         tensor = tensor.permute(1, 2, 0).unsqueeze(0).to(self.device)
         with torch.inference_mode():
             outputs = self.model(tensor, return_attention=False)
-            if getattr(self.base_model, "predicts_uncertainty", False):
+            if getattr(self.model, "predicts_uncertainty", False):
                 flux, variance, patches, patch_variance = outputs
                 intervals_raw = uncertainty_from_prediction(
-                    flux, variance, self.base_model.sxr_norm,
+                    flux, variance, self.model.sxr_norm,
                 )
                 intervals = {
                     level: (
@@ -1809,35 +1839,53 @@ class Predictor:
                 intervals = None
                 patch_uncertainty = None
         flux_map = patches.reshape(grid, grid).detach().cpu().numpy()
+        if scale != 1.0:
+            flux_map = flux_map * scale
         return Prediction(
             metadata=metadata,
-            flux=float(flux.item()), flux_map=flux_map,
+            flux=float(flux.item()) * scale, flux_map=flux_map,
             intervals=intervals, patch_uncertainty_map=patch_uncertainty,
             harp_regions=image.harp_regions if isinstance(image, Observation) else None,
             sxr=image.sxr if isinstance(image, Observation) else None,
+            legacy_model=self.legacy_model, flux_scale_factor=scale,
         )
 
 
-def load_model(checkpoint_path, *, device="auto", aia_norm_path=None):
+def load_model(checkpoint_path, *, device="auto", aia_norm_path=None,
+               legacy_model=False, legacy_cutoff="2016-11-19"):
     """Load a checkpoint for repeated calls to :func:`predict`.
 
     Parameters
     ----------
     checkpoint_path : str or pathlib.Path
-        Existing full checkpoint/model file, e.g. "models/ComplexModel.ckpt".
+        Existing full checkpoint/model file, e.g.
+        "model_assets/UncertaintyModel.ckpt". Checkpoints are distributed
+        separately from the Python package.
         Git LFS pointer text files are not model checkpoints. ~ is expanded.
     device : {"auto", "cpu", "cuda", "mps"}, default "auto"
         Inference device; auto selects an available accelerator.
     aia_norm_path : str or pathlib.Path or None, optional
         Checkpoint-matched .npz/.csv AIA normalization artifact. Apply it once:
         omit here if preprocessing already applied the same normalization.
+    legacy_model : bool, default False
+        Approximate correction for legacy checkpoints: multiply total/patch
+        flux by 0.7 before legacy_cutoff. Only deterministic legacy checkpoints
+        support this correction. Requires timestamps. Leave False for retrained
+        models using corrected SXR. Weights and checkpoint normalization stay
+        in their original training scale.
+    legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
+        Exclusive UTC cutoff; naive times mean UTC. The date rule is an
+        approximation during the mixed-satellite era, not a calibrated model.
 
     Returns
     -------
     Predictor
         Loaded model and optional AIA transform.
     """
-    return Predictor(checkpoint_path, device=device, aia_norm_path=aia_norm_path)
+    return Predictor(
+        checkpoint_path, device=device, aia_norm_path=aia_norm_path,
+        legacy_model=legacy_model, legacy_cutoff=legacy_cutoff,
+    )
 
 
 def predict(image, *, model, timestamp=None):

@@ -2,23 +2,27 @@ import argparse
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from datetime import timedelta, datetime
 from multiprocessing.pool import ThreadPool
 from http.client import IncompleteRead
 from urllib import request
+from pathlib import Path
 
 
 import drms
 import numpy as np
 import pandas as pd
-import yaml
 from astropy.io import fits
 from sunpy.io._fits import header_to_fits
 from sunpy.util import MetaDict
-from astropy import units as u
 from tqdm.auto import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forecasting.config import load_config
+
 _JSOC_CONNECTION_LIMIT = threading.Semaphore(6)
 
 
@@ -39,16 +43,16 @@ class SDODownloader:
         timeout (int): Per-file HTTP download timeout in seconds.
     """
     def __init__(self, base_path, email=None,
-                 wavelengths=['94', '131', '171', '193', '211', '304', '335'],
-                 n_workers=4, cadence=60, tolerance=120, timeout=120):
+                 wavelengths=('94', '131', '171', '193', '211', '304', '335'),
+                 n_workers=4, tolerance=120, timeout=120):
         self.ds_path = base_path
         self.wavelengths = [str(wl) for wl in wavelengths]
         self.n_workers = n_workers
         self.tolerance = tolerance
         self.timeout = timeout
-        [os.makedirs(os.path.join(base_path, wl), exist_ok=True) for wl in self.wavelengths]
+        for wl in self.wavelengths:
+            os.makedirs(os.path.join(base_path, wl), exist_ok=True)
         self.drms_client = drms.Client(email=email)
-        self.cadence = cadence
         self._keys_cache = None
 
     # ------------------------------------------------------------------ helpers
@@ -288,19 +292,19 @@ class SDODownloader:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download SDO data from JSOC with quality check and fallback')
-    parser.add_argument('--config', type=str, default='download/sdo_download_config.yaml',
+    parser.add_argument('--config', type=str, default=str(Path(__file__).with_name('sdo_download_config.yaml')),
                         help='Path to sdo_download_config.yaml')
     args = parser.parse_args()
 
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     download_dir = config['download_dir']
     wavelengths = config['wavelengths']
     cadence = config['cadence']
 
-    [os.makedirs(os.path.join(download_dir, str(c)), exist_ok=True) for c in wavelengths]
-    downloader = SDODownloader(base_path=download_dir, email=config['email'])
+    downloader = SDODownloader(
+        base_path=download_dir, email=config['email'], wavelengths=wavelengths,
+    )
     start_date_datetime = datetime.strptime(config['start_date'], "%Y-%m-%d %H:%M:%S")
     end_date_datetime = datetime.strptime(config['end_date'], "%Y-%m-%d %H:%M:%S")
 

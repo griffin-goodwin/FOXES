@@ -12,7 +12,6 @@ import yaml
 from forecasting.inference import _auto_checkpoint_model_class
 from forecasting.model import (
     CoupledGaussianViTLocal,
-    CoupledSingleQueryGaussianNLLViTLocal,
     ViTLocal,
 )
 from training.train import load_training_config
@@ -41,7 +40,7 @@ class CheckpointCompatibilityTest(unittest.TestCase):
             embed_dim=8, hidden_dim=16, num_channels=7,
             num_heads=2, num_layers=1, patch_size=1,
             num_patches=4, dropout=0.0, mask_mode='local',
-            local_window=3, global_patch_adjustment=True,
+            local_window=3,
             global_attention_heads=1, global_head_hidden_dim=12,
             global_attention_dropout=0.05,
         )
@@ -62,7 +61,8 @@ class CheckpointCompatibilityTest(unittest.TestCase):
                 'pytorch-lightning_version': pl.__version__,
                 'hyper_parameters': {
                     **dict(model.hparams),
-                    'contrast_prior_kwargs': {'channel_indices': []},
+                    'mean_parameterization': 'positive',
+                    'model_kwargs': {**architecture, 'global_patch_adjustment': True},
                 },
                 'state_dict': model.state_dict(),
             }, path)
@@ -81,8 +81,6 @@ class CheckpointCompatibilityTest(unittest.TestCase):
             torch.testing.assert_close(actual, expected)
 
     def test_checkpoint_architecture(self):
-        self.assertIs(CoupledSingleQueryGaussianNLLViTLocal, CoupledGaussianViTLocal)
-
         with tempfile.TemporaryDirectory() as temp_dir:
             for model_class, layers in (
                 (ViTLocal, 2),
@@ -96,7 +94,6 @@ class CheckpointCompatibilityTest(unittest.TestCase):
                     local_window=3,
                 )
                 if model_class is CoupledGaussianViTLocal:
-                    architecture['global_patch_adjustment'] = True
                     kwargs = dict(uncertainty_kwargs={'enabled': True})
                 else:
                     kwargs = {}

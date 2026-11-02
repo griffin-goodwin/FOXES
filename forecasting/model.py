@@ -111,9 +111,6 @@ class ViTLocal(pl.LightningModule):
     def forward(self, x, return_attention=False):
         return self.model(x, self.sxr_norm, return_attention=return_attention)
 
-    def forward_for_callback(self, x, return_attention=True):
-        return self.model(x, self.sxr_norm, return_attention=return_attention)
-
     def configure_optimizers(self):
         # Use AdamW with weight decay for better regularization
         optimizer = torch.optim.AdamW(
@@ -136,7 +133,7 @@ class ViTLocal(pl.LightningModule):
 
     def _calculate_loss(self, batch, mode="train"):
         imgs, sxr = batch
-        raw_preds, raw_patch_contributions = self.model(imgs, self.sxr_norm)
+        raw_preds, _ = self.model(imgs, self.sxr_norm)
         raw_preds_squeezed = torch.squeeze(raw_preds)
 
         if not torch.isfinite(raw_preds_squeezed).all():
@@ -155,7 +152,7 @@ class ViTLocal(pl.LightningModule):
         # Use adaptive rare event loss. Only train batches should feed the
         # per-class error history the adaptive multipliers are computed from --
         # otherwise val/test performance silently leaks into training dynamics.
-        base_loss, weights = self.adaptive_loss.calculate_loss(
+        base_loss, _ = self.adaptive_loss.calculate_loss(
             norm_preds_squeezed, sxr, sxr_un, update_tracking=(mode == "train")
         )
         signed_error = (norm_preds_squeezed - sxr).mean()
@@ -288,7 +285,6 @@ class VisionTransformerLocal(nn.Module):
     def forward(self, x, sxr_norm, return_attention=False):
         # Preprocess input
         x = img_to_patch(x, self.patch_size)
-        B, T, _ = x.shape
         x = self.input_layer(x)
 
         # Add positional encoding (no CLS token for local attention)
@@ -345,12 +341,6 @@ class VisionTransformerLocal(nn.Module):
 
         return x
 
-    def forward_for_callback(self, x, return_attention=True):
-        """Forward method compatible with AttentionMapCallback"""
-        global_flux_raw, attention_weights, patch_flux_raw = self.forward(x, return_attention=return_attention)
-        # Callback expects (outputs, attention_weights, _)
-        return global_flux_raw, attention_weights
-
     def set_mask_mode(self, mask_mode, local_window=None):
         """Override the attention mask in every block (e.g. to ablate a loaded
         checkpoint). Normal checkpoint loading keeps each block's saved mask."""
@@ -359,52 +349,6 @@ class VisionTransformerLocal(nn.Module):
             self.local_window = local_window
         for block in self.transformer_blocks:
             block.set_mask_mode(mask_mode, local_window=local_window)
-
-
-class AttentionBlock(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, num_heads, dropout=0.0):
-        """Attention Block.
-
-        Args:
-            embed_dim: Dimensionality of input and attention feature vectors
-            hidden_dim: Dimensionality of hidden layer in feed-forward network
-                         (usually 2-4x larger than embed_dim)
-            num_heads: Number of heads to use in the Multi-Head Attention block
-            dropout: Amount of dropout to apply in the feed-forward network
-
-        """
-        super().__init__()
-
-        self.layer_norm_1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=False)
-        self.layer_norm_2 = nn.LayerNorm(embed_dim)
-        self.linear = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x, return_attention=False):
-        inp_x = self.layer_norm_1(x)
-
-        if return_attention:
-            attn_output, attn_weights = self.attn(inp_x, inp_x, inp_x, average_attn_weights=False)
-            x = x + attn_output
-            x = x + self.linear(self.layer_norm_2(x))
-            return x, attn_weights
-        else:
-            # Do not materialize the O(T^2) attention-weight tensor when the
-            # caller only needs the transformed embeddings.  Besides saving
-            # memory, need_weights=False lets PyTorch use its optimized scaled
-            # dot-product attention implementation when available.
-            attn_output = self.attn(
-                inp_x, inp_x, inp_x, need_weights=False
-            )[0]
-            x = x + attn_output
-            x = x + self.linear(self.layer_norm_2(x))
-            return x
 
 
 class InvertedAttentionBlock(nn.Module):
@@ -695,63 +639,45 @@ class SXRRegressionDynamicLoss:
             'x_weight': self.base_weights['x_class'] * x_mult,
         }
 
-# Coupled single-query uncertainty model (shared by OG and depth variants).
+# Coupled single-query uncertainty model.
 class CoupledVisionTransformerLocal(VisionTransformerLocal):
-    """Similar to the original FOXES model, but now starts with a local attention Transformer that outputs per-patch flux contributions, and adds a single global query that sees all patches and outputs a global correction to the sum of the local patch contributions. The global correction is initialized to zero, so the model starts with the same behavior as the original FOXES model. The global query can also be used to predict uncertainty in the global flux prediction. The predictions (starting on the local scale) are initialized as the average flux spread across the patches, the logits then scale each patch's contibution up or down... the global query can then adjust each patch by a certain dex by taking into account the global context.
+    """Predict additive patch flux with local attention and one global query.
+
+    Local logits scale a positive image-wide baseline spread over the patches.
+    A zero-initialized global head adjusts each patch using raw AIA tokens and
+    shared context. The uncertainty head consumes detached local logits.
     """
 
-    def __init__(self, *args, mean_parameterization='positive',
-                 uncertainty_enabled=True, patch_flux_scale_multiplier=1.0,
+    def __init__(self, *args, uncertainty_enabled=True,
                  max_abs_log10_patch_multiplier=8.0,
-                 global_patch_adjustment=False,
                  max_abs_log10_global_adjustment=0.3,
-                 global_patch_head_init_std=0.0,
                  global_attention_heads=None,
                  global_head_hidden_dim=None,
                  global_attention_dropout=None,
-                 independent_local_global=False,
-                 patch_global_context=None,
                  initial_relative_std=1.0,
                  min_log10_relative_std=-4.0,
                  max_log10_relative_std=4.0,
                  uncertainty_hidden_dim=16, **kwargs):
         super().__init__(*args, **kwargs)
 
-        if mean_parameterization != 'positive':
-            raise ValueError("Coupled single-query model requires mean_parameterization='positive'")
-        self.mean_parameterization = 'positive'
-        self.mean_head_initialization = 'pytorch_linear_default'
         self.uncertainty_enabled = bool(uncertainty_enabled)
-        self.patch_flux_scale_multiplier = float(patch_flux_scale_multiplier)
         self.max_abs_log10_patch_multiplier = float(
             max_abs_log10_patch_multiplier
         )
-        self.global_patch_adjustment = bool(global_patch_adjustment)
         self.max_abs_log10_global_adjustment = float(
             max_abs_log10_global_adjustment
         )
-        self.global_patch_head_init_std = float(global_patch_head_init_std)
-        # Accept inactive legacy flags so saved OG hyperparameters still load.
-        if independent_local_global or patch_global_context:
-            raise ValueError('Coupled single-query model does not use a separate global head')
-        if not global_patch_adjustment or global_patch_head_init_std != 0:
-            raise ValueError('Coupled single-query model requires a zero-initialized global correction head')
-        self.independent_local_global = False
         self.initial_relative_std = float(initial_relative_std)
         self.min_log10_relative_std = float(min_log10_relative_std)
         self.max_log10_relative_std = float(max_log10_relative_std)
         self.uncertainty_hidden_dim = int(uncertainty_hidden_dim)
-        if self.patch_flux_scale_multiplier <= 0:
-            raise ValueError("patch_flux_scale_multiplier must be positive")
         if self.max_abs_log10_patch_multiplier <= 0:
             raise ValueError("max_abs_log10_patch_multiplier must be positive")
         if self.max_abs_log10_global_adjustment <= 0:
             raise ValueError("max_abs_log10_global_adjustment must be positive")
-        if self.global_patch_head_init_std < 0:
-            raise ValueError("global_patch_head_init_std must be nonnegative")
-        if self.global_patch_adjustment and self.mask_mode != 'local':
+        if self.mask_mode != 'local':
             raise ValueError(
-                "global_patch_adjustment requires local patch attention so the "
+                "The coupled model requires local patch attention so the "
                 "spatial head cannot import distant activity"
             )
         if self.initial_relative_std <= 0:
@@ -816,8 +742,6 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
         )
         nn.init.zeros_(self.global_patch_head[-1].weight)
         nn.init.zeros_(self.global_patch_head[-1].bias)
-
-        self.patch_global_context = None  # Checkpoint inspection compatibility.
 
         self.patch_uncertainty_head = None
         self.initial_log10_relative_std = None
@@ -888,20 +812,14 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                 x = block(x)
         return x.transpose(0, 1), attention_weights
 
-    def _patch_mean_from_embeddings(self, patch_embeddings, sxr_norm,
-                                    images=None, return_local=False):
+    def _patch_mean_from_embeddings(self, patch_embeddings, sxr_norm, images):
         """Return logits and nonnegative additive patch means."""
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)
         patch_flux_raw = self._patch_flux_from_logits(patch_logits, sxr_norm)
-        local_patch_flux_raw = patch_flux_raw
-        correction_features = patch_embeddings
-        correction_positions = self.pos_embedding_2d
-        if images is None:
-            raise ValueError('Global correction requires original AIA images')
         raw_tokens = self.global_raw_patch_projection(
             img_to_patch(images, self.patch_size)
         )
-        raw_tokens = raw_tokens + correction_positions.reshape(
+        raw_tokens = raw_tokens + self.pos_embedding_2d.reshape(
             1, -1, raw_tokens.shape[-1]
         )
         query = self.global_query.expand(patch_embeddings.shape[0], -1, -1)
@@ -910,7 +828,7 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
         )
         context_per_patch = context.expand(-1, patch_embeddings.shape[1], -1)
         correction_input = torch.cat(
-            (correction_features, raw_tokens, context_per_patch), dim=-1
+            (patch_embeddings, raw_tokens, context_per_patch), dim=-1
         )
         log10_adjustment = (
             self.max_abs_log10_global_adjustment
@@ -921,8 +839,6 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             torch.tensor(10.0, device=patch_flux_raw.device),
             log10_adjustment.float(),
         )
-        if return_local:
-            return patch_logits, patch_flux_raw, local_patch_flux_raw
         return patch_logits, patch_flux_raw
 
     def _patch_variance_from_logits(self, patch_logits, patch_flux_raw):
@@ -950,19 +866,15 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
         patch_std_raw = relative_std * detached_patch_flux
         return patch_std_raw.square()
 
-    def forward(self, x, sxr_norm, return_attention=False, return_local=False):
-        """Return corrected predictions, optionally appending local patch flux.
-
-        The optional local map is diagnostic; training uses corrected flux.
-        """
+    def forward(self, x, sxr_norm, return_attention=False):
+        """Return corrected predictions and additive patch contributions."""
         patch_embeddings, attention_weights = self._encode_patch_embeddings(
             x, return_attention
         )
         _, sxr_std = sxr_norm
-        patch_outputs = self._patch_mean_from_embeddings(
-            patch_embeddings, sxr_norm, images=x, return_local=True
+        patch_logits, patch_flux_raw = self._patch_mean_from_embeddings(
+            patch_embeddings, sxr_norm, images=x,
         )
-        patch_logits, patch_flux_raw, local_patch_flux_raw = patch_outputs
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
         mean_normalized = normalize_sxr(global_flux_raw.squeeze(-1), sxr_norm)
 
@@ -974,7 +886,7 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                 )
             else:
                 outputs = global_flux_raw, mean_normalized, patch_flux_raw
-            return outputs + (local_patch_flux_raw,) if return_local else outputs
+            return outputs
         patch_variance_raw = self._patch_variance_from_logits(
             patch_logits, patch_flux_raw
         )
@@ -1008,11 +920,11 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                 global_flux_raw, mean_normalized, variance_normalized,
                 patch_flux_raw, patch_variance_raw,
             )
-        return outputs + (local_patch_flux_raw,) if return_local else outputs
+        return outputs
 
 
 class CoupledGaussianViTLocal(pl.LightningModule):
-    """Train the canonical FOXES patch model with calibrated uncertainty.
+    """Train the canonical FOXES patch model with Gaussian uncertainty.
 
     The mean/backbone is optimized only by an optionally class-weighted Huber
     loss. A separate Gaussian NLL trains relative patch standard deviations
@@ -1028,12 +940,8 @@ class CoupledGaussianViTLocal(pl.LightningModule):
     DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
     predicts_uncertainty = True
     uncertainty_kind = 'gaussian'
-    predicts_patch_uncertainty = True
-    patch_uncertainty_semantics = 'variance_attribution'
     uncertainty_parameterization = 'logit_conditioned_relative_log10_patch_std'
-    NETWORK_CLASS = CoupledVisionTransformerLocal
     NETWORK_UNCERTAINTY_KEYS = (
-        'patch_flux_scale_multiplier',
         'max_abs_log10_patch_multiplier',
         'initial_relative_std',
         'min_log10_relative_std',
@@ -1041,10 +949,9 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         'uncertainty_hidden_dim',
     )
 
-    def __init__(self, model_kwargs, sxr_norm, base_weights=None,
+    def __init__(self, model_kwargs, sxr_norm,
                  weight_decay=1e-5, scheduler_kwargs=None,
-                 uncertainty_kwargs=None,
-                 mean_parameterization='positive'):
+                 uncertainty_kwargs=None):
         super().__init__()
         self.lr = model_kwargs.get('learning_rate', model_kwargs.get('lr', 1e-4))
         self.save_hyperparameters()
@@ -1053,23 +960,10 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         filtered_kwargs.pop('learning_rate', None)
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
+        # This fixed architecture flag is present in the distributed checkpoint.
+        if filtered_kwargs.pop('global_patch_adjustment', True) is not True:
+            raise ValueError('The coupled model always applies global patch adjustment')
         uncertainty_kwargs = dict(uncertainty_kwargs or {})
-        incompatible_uncertainty_keys = {
-            'relative_std_floor',
-            'relative_std_max',
-            'patch_scale_floor_fraction',
-            'initial_global_sigma_normalized',
-            'min_log10_patch_std',
-            'max_log10_patch_std',
-        }
-        configured_incompatible_keys = (
-            incompatible_uncertainty_keys & set(uncertainty_kwargs)
-        )
-        if configured_incompatible_keys:
-            raise ValueError(
-                "Incompatible legacy patch uncertainty settings: "
-                + ', '.join(sorted(configured_incompatible_keys))
-            )
         self.uncertainty_enabled = bool(
             uncertainty_kwargs.pop('enabled', True)
         )
@@ -1087,37 +981,13 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         else:
             self.uncertainty_start_epoch = configured_start_epoch
         self.predicts_uncertainty = self.uncertainty_enabled
-        self.predicts_patch_uncertainty = self.uncertainty_enabled
         allowed_uncertainty_keys = set(self.NETWORK_UNCERTAINTY_KEYS) | {
             'huber_delta',
             'class_weighting',
-            'class_weight_exponent',
             'class_weights',
             'bias_penalty_weight',
         }
-        # Old checkpoints include objective settings in their saved
-        # hyperparameters. They do not affect inference, so accept them only
-        # for loading compatibility; new configs never emit them.
-        legacy_loss_only_keys = {
-            'beta_nll_beta',
-            'mean_loss',
-            'train_uncertainty',
-            'spatial_sparsity',
-            'mean_huber_delta',
-            'mean_loss_weighting',
-            'mean_class_weights',
-            'use_class_weights',
-            'mean_huber_weight',
-            'mean_huber_use_class_weights',
-            'detach_uncertainty_features',
-            'global_sigma_init_dex',
-            'global_sigma_floor_dex',
-        }
-        unknown_keys = (
-            set(uncertainty_kwargs)
-            - allowed_uncertainty_keys
-            - legacy_loss_only_keys
-        )
+        unknown_keys = set(uncertainty_kwargs) - allowed_uncertainty_keys
         if unknown_keys:
             raise ValueError(
                 f"Unknown uncertainty settings: {sorted(unknown_keys)}"
@@ -1130,16 +1000,10 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         self.bias_penalty_weight = validate_bias_penalty_weight(
             uncertainty_kwargs.get('bias_penalty_weight', 0.0)
         )
-        self.model = self.NETWORK_CLASS(
+        self.model = CoupledVisionTransformerLocal(
             **filtered_kwargs,
             **network_uncertainty_kwargs,
-            mean_parameterization=mean_parameterization,
             uncertainty_enabled=self.uncertainty_enabled,
-        )
-        self.mean_parameterization = self.model.mean_parameterization
-        self.mean_head_initialization = self.model.mean_head_initialization
-        self.hparams['mean_head_initialization'] = (
-            self.mean_head_initialization
         )
         self.hparams['uncertainty_parameterization'] = (
             self.uncertainty_parameterization
@@ -1154,30 +1018,10 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         self.scheduler_kwargs = {
             **self.DEFAULT_SCHEDULER_KWARGS, **(scheduler_kwargs or {})
         }
-        self.huber_delta = float(
-            uncertainty_kwargs.get(
-                'huber_delta',
-                uncertainty_kwargs.get('mean_huber_delta', 1.0),
-            )
-        )
+        self.huber_delta = float(uncertainty_kwargs.get('huber_delta', 1.0))
         if self.huber_delta <= 0:
             raise ValueError("uncertainty.huber_delta must be positive")
-        legacy_weighting_names = {
-            'none': 'none',
-            'four_class_macro': 'inverse_frequency',
-            'sqrt_four_class_macro': 'sqrt_inverse_frequency',
-        }
-        legacy_weighting = uncertainty_kwargs.get(
-            'mean_loss_weighting', 'none'
-        )
-        self.class_weighting = str(
-            uncertainty_kwargs.get(
-                'class_weighting',
-                legacy_weighting_names.get(
-                    legacy_weighting, legacy_weighting,
-                ),
-            )
-        )
+        self.class_weighting = str(uncertainty_kwargs.get('class_weighting', 'none'))
         if self.class_weighting not in {
             'none', 'inverse_frequency', 'sqrt_inverse_frequency',
             'power_inverse_frequency',
@@ -1188,9 +1032,7 @@ class CoupledGaussianViTLocal(pl.LightningModule):
                 "or 'power_inverse_frequency'"
             )
         class_names = ('quiet', 'c_class', 'm_class', 'x_class')
-        configured_weights = uncertainty_kwargs.get(
-            'class_weights', uncertainty_kwargs.get('mean_class_weights')
-        )
+        configured_weights = uncertainty_kwargs.get('class_weights')
         if self.class_weighting != 'none':
             if not isinstance(configured_weights, dict):
                 raise ValueError(
@@ -1219,18 +1061,6 @@ class CoupledGaussianViTLocal(pl.LightningModule):
 
     def on_load_checkpoint(self, checkpoint):
         checkpoint_hparams = checkpoint.get('hyper_parameters', {})
-        checkpoint_parameterization = checkpoint_hparams.get(
-            'mean_parameterization'
-        )
-        if (
-            checkpoint_parameterization is not None
-            and checkpoint_parameterization != self.mean_parameterization
-        ):
-            raise RuntimeError(
-                'Checkpoint mean_parameterization '
-                f'{checkpoint_parameterization!r} does not match configured '
-                f'{self.mean_parameterization!r}.'
-            )
         checkpoint_uncertainty_parameterization = checkpoint_hparams.get(
             'uncertainty_parameterization'
         )
@@ -1323,18 +1153,17 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         if self.uncertainty_enabled:
             (
                 raw_prediction, mean_norm, variance_norm,
-                patch_flux_raw, patch_variance_raw,
+                _, patch_variance_raw,
             ) = outputs
         else:
-            raw_prediction, mean_norm, patch_flux_raw = outputs
+            raw_prediction, mean_norm, _ = outputs
             variance_norm = patch_variance_raw = None
         target_norm = target_norm.reshape_as(mean_norm)
         target_raw = unnormalize_sxr(target_norm, self.sxr_norm)
 
-        global_mean_loss = self._weighted_huber_loss(
+        mean_loss = self._weighted_huber_loss(
             mean_norm, target_norm, target_raw,
         )
-        mean_loss = global_mean_loss
         signed_error = (mean_norm - target_norm).mean()
         bias_penalty = mean_class_signed_error_penalty(
             mean_norm, target_norm, target_raw, self.bias_penalty_weight,
@@ -1381,13 +1210,8 @@ class CoupledGaussianViTLocal(pl.LightningModule):
                 f'{prefix}/mean_sigma_dex', sigma_dex.mean(),
                 on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
             )
-            patch_uncertainty_metric = (
-                'mean_sqrt_variance_contribution_raw'
-                if self.patch_uncertainty_semantics == 'variance_attribution'
-                else 'mean_patch_std_raw'
-            )
             self.log(
-                f'{prefix}/{patch_uncertainty_metric}',
+                f'{prefix}/mean_sqrt_variance_contribution_raw',
                 torch.sqrt(patch_variance_raw).mean(),
                 on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
             )
@@ -1409,12 +1233,11 @@ class CoupledGaussianViTLocal(pl.LightningModule):
                  logger=True, sync_dist=True)
         self.log(f'{prefix}/mae', mae, on_step=on_step, on_epoch=True,
                  logger=True, sync_dist=True)
-        if self.model.global_patch_adjustment:
-            self.log(
-                f'{prefix}/global_patch_adjustment_dex',
-                self.model.last_log10_global_patch_adjustment.abs().mean(),
-                on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
-            )
+        self.log(
+            f'{prefix}/global_patch_adjustment_dex',
+            self.model.last_log10_global_patch_adjustment.abs().mean(),
+            on_step=on_step, on_epoch=True, logger=True, sync_dist=True,
+        )
         if mode == 'val':
             self.log('val_total_loss', loss, on_step=False, on_epoch=True,
                      prog_bar=True, logger=True, sync_dist=True)
@@ -1462,9 +1285,3 @@ class CoupledGaussianViTLocal(pl.LightningModule):
                 'name': 'learning_rate',
             },
         }
-
-
-# Imports created while developing the coupled model remain valid for scripts
-# and any serialized objects that refer to those historical class names.
-CoupledSingleQueryVisionTransformerLocal = CoupledVisionTransformerLocal
-CoupledSingleQueryGaussianNLLViTLocal = CoupledGaussianViTLocal

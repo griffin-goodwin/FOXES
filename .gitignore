@@ -70,6 +70,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+.venv-docs/
 
 # PyBuilder
 .pybuilder/
@@ -150,6 +151,26 @@ cython_debug/
 wandb/
 
 *.csv
+# Keep the published evaluation summaries; raw predictions remain local.
+!model_assets/UncertaintyModelResults/evaluation/metrics/performance_metrics.csv
+!model_assets/UncertaintyModelResults/evaluation/metrics/uncertainty_metrics.csv
+/model_assets/UncertaintyModelResults/inference/
+
+# Deferred downloader/training-data expansion work (excluded from this release).
+/download/download_flares.py
+/download/expand_training_data.py
+/download/expand_training_data.yaml
+/download/jsoc_emails.py
+/download/TRAINING_DATA.md
+/tests/test_jsoc_emails.py
+/tests/test_training_expansion.py
+
+# Local SXR science reprocessing tools restored from the pinball stash.
+/data/reprocess_sxr.py
+/data/sxr_hf_manifest.py
+/data/plot_sxr_comparison.py
+/docs/sxr_reprocessing.md
+/tests/test_sxr_reprocessing.py
 
 *.code-workspace
 
@@ -171,7 +192,6 @@ testing.ipynb
 analysis/ablation_lollipop.png
 analysis/ablation_lollipop.psd
 analysis/performance_heatmap_all.png
-download/download_flares.py
 download/test_download_sdo.py
 forecasting/models/test_vit_mask.py
 forecasting/griffin_config.yaml

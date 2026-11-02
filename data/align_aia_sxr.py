@@ -1,6 +1,7 @@
 """
-Align processed AIA .npy timestamps with combined GOES SXR CSVs (as produced
-by sxr_data_processing.py), writing one xrsb_flux .npy per matched timestamp.
+Align processed AIA .npy timestamps with combined GOES SXR Parquet files from
+combine_sxr.py, writing one xrsb_flux .npy per matched timestamp. Historical
+CSV inputs remain supported when no Parquet file is present for that satellite.
 AIA files with no matching SXR value are moved to a "missing" directory.
 
 Called by build_dataset.py — not meant to be run standalone.
@@ -22,23 +23,37 @@ warnings.filterwarnings('ignore')
 
 def load_and_prepare_goes_data(goes_data_dir):
     """
-    Load all GOES data and prepare it for efficient lookups.
+    Load combined GOES data, preferring lossless Parquet over historical CSV.
+
+    One selected file per satellite is required. Parquet retains the binary
+    flux values and dtypes so averaging matches science reprocessing exactly.
     """
     print(f"Loading GOES data from: {goes_data_dir}")
 
     # Regex to match filenames and extract G-number
-    pattern = re.compile(r"combined_g(\d+)_avg1m_\d+_\d+\.csv")
+    pattern = re.compile(r"combined_g(\d+)_avg1m_\d{8}_\d{8}\.(parquet|csv)")
 
     # Find all files matching the pattern and extract G-numbers
-    goes_files = []
+    files_by_satellite = {}
     for fname in os.listdir(goes_data_dir):
-        match = pattern.match(fname)
+        match = pattern.fullmatch(fname)
         if match:
             g_number = int(match.group(1))
-            goes_files.append((g_number, fname))
+            files_by_satellite.setdefault(g_number, []).append(fname)
 
-    if not goes_files:
-        raise FileNotFoundError(f"No GOES CSV files found in directory: {goes_data_dir}")
+    if not files_by_satellite:
+        raise FileNotFoundError(f"No combined GOES Parquet or CSV files found in directory: {goes_data_dir}")
+
+    goes_files = []
+    for g_number, filenames in files_by_satellite.items():
+        parquet_files = [name for name in filenames if name.endswith('.parquet')]
+        selected = parquet_files or filenames
+        if len(selected) != 1:
+            raise ValueError(
+                f"Multiple combined files for GOES-{g_number}: {sorted(selected)}. "
+                "Use a directory containing one combined file per satellite."
+            )
+        goes_files.append((g_number, selected[0]))
 
     # Load all available GOES instruments
     goes_data_dict = {}
@@ -47,10 +62,15 @@ def load_and_prepare_goes_data(goes_data_dir):
     for g_number, filename in sorted(goes_files, reverse=True):  # Most recent first
         print(f"  Loading GOES-{g_number} from {filename}")
         try:
-            goes_df = pd.read_csv(os.path.join(goes_data_dir, filename))
-            goes_df['time'] = pd.to_datetime(goes_df['time'], format='%Y-%m-%d %H:%M:%S')
-
-            goes_df.set_index('time', inplace=True)
+            path = os.path.join(goes_data_dir, filename)
+            if filename.endswith('.parquet'):
+                goes_df = pd.read_parquet(path, engine="pyarrow")
+                if not isinstance(goes_df.index, pd.DatetimeIndex) or goes_df.index.name != 'time':
+                    raise ValueError("Combined Parquet file must have a datetime index named 'time'")
+            else:
+                goes_df = pd.read_csv(path)
+                goes_df['time'] = pd.to_datetime(goes_df['time'], format='%Y-%m-%d %H:%M:%S')
+                goes_df.set_index('time', inplace=True)
             goes_df.sort_index(inplace=True)  # Ensure sorted for faster lookups
             #Make sure quality flag requirement is in place:
             goes_df = goes_df[goes_df['xrsb_flag']==0]
@@ -118,24 +138,20 @@ def process_batch(batch_data, output_sxr_dir):
     """
     successful_count = 0
     failed_count = 0
-    results = []
-
     for data in batch_data:
+        timestamp = data['timestamp']
         try:
-            timestamp = data['timestamp']
             sxr_b = data['sxr_b']
-            instrument = data['instrument']
 
             np.save(f"{output_sxr_dir}/{timestamp}.npy", np.array([sxr_b], dtype=np.float32))
 
             successful_count += 1
-            results.append((timestamp, True, f"Success using {instrument}"))
 
         except Exception as e:
             failed_count += 1
-            results.append((timestamp, False, f"Error processing timestamp {timestamp}: {e}"))
+            print(f"Error processing timestamp {timestamp}: {e}")
 
-    return results, successful_count, failed_count
+    return successful_count, failed_count
 
 
 def split_into_batches(data, batch_size):
@@ -146,7 +162,7 @@ def split_into_batches(data, batch_size):
 
 def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_dir,
                    max_processes=None, batch_size_multiplier=4, min_batch_size=1):
-    """Match AIA .npy timestamps to combined GOES SXR data, writing one xrsb_flux .npy per match."""
+    """Match AIA timestamps to combined GOES Parquet/CSV data and write SXR NPYs."""
     print("=" * 60)
     print("GOES Data Alignment Tool")
     print("=" * 60)
@@ -206,7 +222,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
         # Single-threaded processing for small datasets
         pbar = tqdm(batches, desc="Processing batches")
         for batch in pbar:
-            results, successful, failed = process_batch(batch, output_sxr_dir)
+            successful, failed = process_batch(batch, output_sxr_dir)
             total_successful += successful
             total_failed += failed
             pbar.set_postfix(success=total_successful, failed=total_failed)
@@ -222,7 +238,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
             # Collect results with progress bar
             pbar = tqdm(total=len(results), desc="Processing batches")
             for result in results:
-                batch_results, successful, failed = result.get()
+                successful, failed = result.get()
                 total_successful += successful
                 total_failed += failed
                 pbar.set_postfix(success=total_successful, failed=total_failed)
@@ -233,9 +249,9 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
     end_time = time.time()
     total_time = end_time - start_time
 
-    print(f"\n" + "=" * 60)
-    print(f"PROCESSING COMPLETE!")
-    print(f"=" * 60)
+    print("\n" + "=" * 60)
+    print("PROCESSING COMPLETE!")
+    print("=" * 60)
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per timestamp: {total_time / len(lookup_data):.4f} seconds")
     print(f"Successfully processed: {total_successful}/{len(lookup_data)} timestamps")
@@ -253,7 +269,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
         print("  - Time gaps between different GOES instruments")
 
     # For AIA data that has missing GOES data, move files to missing directory
-    print(f"\nChecking for AIA files with missing GOES data...")
+    print("\nChecking for AIA files with missing GOES data...")
     print(f"Moving files with missing GOES data to: {aia_missing_dir}")
 
     # Create a set of timestamps that have valid GOES data for faster lookup

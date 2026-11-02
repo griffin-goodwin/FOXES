@@ -13,13 +13,32 @@ from torch.utils.data import TensorDataset
 
 from forecasting.inference import (
     evaluate_model_on_dataset, resolve_inference_device,
-    select_inference_samples,
+    select_inference_samples, load_model_from_config,
 )
 from forecasting.dataset import AIAGOESDataset
 from forecasting.model import CoupledGaussianViTLocal, ViTLocal
 
 
 class InferenceContractTest(unittest.TestCase):
+    def test_loader_uses_one_device_even_with_multiple_gpus(self):
+        class DeviceRecordingModel(torch.nn.Module):
+            def to(self, device):
+                self.loaded_device = device
+                return self
+
+        model = DeviceRecordingModel()
+        with (patch('torch.load', return_value={'model': model}),
+              patch('torch.cuda.is_available', return_value=True),
+              patch('torch.cuda.device_count', return_value=4),
+              patch('torch.nn.DataParallel.__init__', side_effect=AssertionError('parallel inference'))):
+            loaded = load_model_from_config({
+                'data': {'checkpoint_path': 'saved.pt'}, 'device': 'cuda',
+                'multi_gpu': True, 'use_amp': True,
+            })
+        self.assertIs(loaded, model)
+        self.assertEqual(loaded.loaded_device, torch.device('cuda:0'))
+        self.assertFalse(loaded.training)
+
     def test_inference_device_selection(self):
         with (patch('torch.cuda.is_available', return_value=False),
               patch('torch.backends.mps.is_available', return_value=True)):
@@ -115,11 +134,7 @@ class InferenceContractTest(unittest.TestCase):
         ):
             with self.subTest(model=model_class.__name__):
                 model = model_class(
-                    model_kwargs={
-                        **architecture,
-                        **({'global_patch_adjustment': True}
-                           if model_class is CoupledGaussianViTLocal else {}),
-                    },
+                    model_kwargs=architecture,
                     sxr_norm=normalization, **kwargs,
                 )
                 result = next(evaluate_model_on_dataset(

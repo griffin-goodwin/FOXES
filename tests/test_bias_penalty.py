@@ -15,7 +15,6 @@ MODEL_KWARGS = dict(
 )
 COUPLED_KWARGS = dict(
     MODEL_KWARGS, mask_mode='local', local_window=3,
-    global_patch_adjustment=True,
 )
 
 

@@ -15,6 +15,7 @@ pytorch-lightning
 numpy
 scipy
 pandas
+pyarrow
 xarray
 h5netcdf
 h5py

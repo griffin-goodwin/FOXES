@@ -14,26 +14,23 @@ conversion instead of a per-row Python loop.
 Usage:
     python download/hugging_face_data_download.py --config download/hf_download_config.yaml
 
-Repair already-converted flattened AIA ``.npy`` files in place (header-only;
-the multi-terabyte pixel payload is not rewritten):
-    python download/hugging_face_data_download.py \
-        --config download/hf_download_config.yaml --repair-existing-numpy
 """
 
 import argparse
-from io import BytesIO
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
-from numpy.lib import format as npy_format
 import pyarrow.parquet as pq
-import yaml
 from datasets import load_dataset
 from huggingface_hub import login
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forecasting.config import load_config
 
 
 # HuggingFace uses "validation"; local pipeline directories use "val"
@@ -54,11 +51,6 @@ def _restore_aia_shape(array: np.ndarray) -> np.ndarray:
         f"Expected AIA shape {AIA_SHAPE} or {AIA_SIZE} flattened values, "
         f"got shape {array.shape} ({array.size} values)"
     )
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def _write_arrays(filename: str, aia_arr: np.ndarray, sxr_arr: np.ndarray,
@@ -97,7 +89,7 @@ def resolve_n(repo_id: str, hf_split: str, cfg: dict) -> int | None:
         total = info.splits[hf_split].num_examples
         return max(1, int(total * frac))
     except Exception:
-        print(f"[warn] Could not resolve total size for frac subsampling; downloading all rows.")
+        print("[warn] Could not resolve total size for frac subsampling; downloading all rows.")
         return None
 
 
@@ -141,9 +133,9 @@ def download_split(hf_split: str, cfg: dict):
     start = time.time()
 
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = {}
+        futures = set()
 
-        for i, row in enumerate(ds):
+        for row in ds:
             # Materialize arrays in the main thread before submitting — this
             # detaches them from the pyarrow buffer so threads never touch the
             # parquet file descriptor (which causes [Errno 9] Bad file descriptor).
@@ -152,7 +144,7 @@ def download_split(hf_split: str, cfg: dict):
             filename = row["filename"]
 
             fut = pool.submit(_write_arrays, filename, aia_arr, sxr_arr, aia_split_dir, sxr_split_dir)
-            futures[fut] = i
+            futures.add(fut)
             submitted += 1
 
             # Drain completed futures periodically to track progress and free memory
@@ -163,7 +155,7 @@ def download_split(hf_split: str, cfg: dict):
                         saved += 1
                     else:
                         skipped += 1
-                    del futures[f]
+                    futures.remove(f)
 
                 elapsed = time.time() - start
                 rate = submitted / elapsed if elapsed > 0 else 0
@@ -246,7 +238,7 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
     start = time.time()
 
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = {}
+        futures = set()
 
         for pq_file in parquet_files:
             table = pq.read_table(pq_file, columns=["filename", "aia_stack", "sxr_value"])
@@ -274,7 +266,7 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
 
                 fut = pool.submit(_write_arrays, filename, aia_arr, sxr_arr, aia_split_dir, sxr_split_dir)
                 file_futures.append(fut)
-                futures[fut] = submitted
+                futures.add(fut)
                 submitted += 1
 
                 if submitted % print_every == 0:
@@ -284,7 +276,7 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
                             saved += 1
                         else:
                             skipped += 1
-                        del futures[f]
+                        futures.remove(f)
 
                     elapsed = time.time() - start
                     rate = submitted / elapsed if elapsed > 0 else 0
@@ -297,7 +289,7 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
             # Wait for all writes from this file to finish before deleting it
             if delete_after:
                 for fut in as_completed(file_futures):
-                    pass
+                    fut.result()
                 pq_file.unlink()
                 print(f"  Deleted {pq_file.name}", flush=True)
 
@@ -313,7 +305,7 @@ def convert_local_parquet_split(parquet_dir: str, hf_split: str, cfg: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Get FOXES data from HuggingFace Hub (stream or local parquet)")
-    parser.add_argument("--config", default="download/hf_download_config.yaml")
+    parser.add_argument("--config", default=str(Path(__file__).with_name('hf_download_config.yaml')))
     args = parser.parse_args()
     cfg = load_config(args.config)
 

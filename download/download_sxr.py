@@ -1,10 +1,13 @@
 import argparse
+import sys
 from pathlib import Path
 
-import yaml
 from sunpy.net import Fido, attrs as a
 from concurrent.futures import ThreadPoolExecutor
 import logging
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forecasting.config import load_config
 
 
 class SXRDownloader:
@@ -13,12 +16,6 @@ class SXRDownloader:
     def __init__(self, save_dir: str):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        self.used_g13_files = []
-        self.used_g14_files = []
-        self.used_g15_files = []
-        self.used_g16_files = []
-        self.used_g17_files = []
-        self.used_g18_files = []
 
     def download_and_save_goes_data(self, start='2023-07-01', end='2023-08-15', max_workers=4):
         """
@@ -74,12 +71,11 @@ class SXRDownloader:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Download raw GOES XRS data via SunPy Fido.')
-    parser.add_argument('--config', type=str, default='download/sxr_download_config.yaml',
+    parser.add_argument('--config', type=str, default=str(Path(__file__).with_name('sxr_download_config.yaml')),
                         help='Path to sxr_download_config.yaml')
     args = parser.parse_args()
 
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     downloader = SXRDownloader(save_dir=config['save_dir'])
     downloader.download_and_save_goes_data(

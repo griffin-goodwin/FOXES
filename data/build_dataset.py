@@ -16,24 +16,19 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import yaml
-
-from clean_aia import clean_aia_data
-from convert_aia import process_aia_to_npy
-from combine_sxr import SXRDataProcessor
-from align_aia_sxr import align_aia_sxr
-from split_train_val_test import split_train_val_test
-from sxr_normalization import compute_sxr_norm
-
-
-def load_config(config_path):
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forecasting.config import load_config
+from data.clean_aia import clean_aia_data
+from data.convert_aia import process_aia_to_npy
+from data.combine_sxr import SXRDataProcessor
+from data.align_aia_sxr import align_aia_sxr
+from data.split_train_val_test import split_train_val_test
+from data.sxr_normalization import compute_sxr_norm
 
 
 def main():
     parser = argparse.ArgumentParser(description='Build a FOXES-ready dataset from raw AIA/GOES data.')
-    parser.add_argument('--config', type=str, default='data/build_dataset_config.yaml',
+    parser.add_argument('--config', type=str, default=str(Path(__file__).with_name('build_dataset_config.yaml')),
                         help='Path to build_dataset config YAML file')
     args = parser.parse_args()
 
@@ -66,7 +61,7 @@ def main():
     if steps.get('combine_sxr', True):
         print("\n--- Step 3/5: Combine raw GOES satellite files ---")
         SXRDataProcessor(data_dir=sxr['raw_dir'], output_dir=sxr['combined_dir']).combine_goes_data(
-            apply_pre_goes16_scaling=sxr.get('apply_pre_goes16_scaling', True)
+            apply_pre_goes16_scaling=sxr.get('apply_pre_goes16_scaling', False)
         )
     else:
         print("\n--- Step 3/5: Combine raw GOES satellite files (skipped) ---")

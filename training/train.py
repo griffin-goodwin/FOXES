@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import wandb
-import yaml
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
@@ -17,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from forecasting.dataset import AIAGOESDataModule
+from forecasting.config import load_config
 from forecasting.model import (
     CoupledGaussianViTLocal, ViTLocal, SXRRegressionDynamicLoss,
 )
@@ -26,9 +26,6 @@ from training.callbacks import (
 )
 from training.strategies import TrainingStreamDDPStrategy
 
-COUPLED_MODEL_TYPES = frozenset({
-    'coupled_uncertainty', 'og_uncertainty', 'uncertainty_coupled_single_query',
-})
 FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
 
 
@@ -45,20 +42,17 @@ def _deep_merge_config(base, overrides):
 
 def load_training_config(config_path):
     """Load a training YAML, optionally inheriting from ``base_config``."""
-    config_path = Path(config_path).expanduser().resolve()
+    config_path = Path(os.path.expandvars(os.fspath(config_path))).expanduser().resolve()
 
     def load_one(path, ancestors):
         if path in ancestors:
             chain = ' -> '.join(str(item) for item in (*ancestors, path))
             raise ValueError(f"Circular base_config chain: {chain}")
-        with path.open('r') as stream:
-            current = yaml.safe_load(stream) or {}
-        if not isinstance(current, dict):
-            raise ValueError(f"Training config must be a mapping: {path}")
+        current = load_config(path)
         base_reference = current.pop('base_config', None)
         if base_reference is None:
             return current
-        base_path = Path(base_reference).expanduser()
+        base_path = Path(os.path.expandvars(base_reference)).expanduser()
         if not base_path.is_absolute():
             base_path = path.parent / base_path
         base = load_one(base_path.resolve(), (*ancestors, path))
@@ -140,19 +134,11 @@ def get_four_class_macro_weights(data_module, exponent=1.0,
 
 def configure_class_weights(config, data_module, model_type):
     """Compute mean-loss class weights once for either maintained model."""
-    coupled = model_type in COUPLED_MODEL_TYPES
+    coupled = model_type == 'coupled_uncertainty'
     mean_loss = config.get('mean_loss', {})
     uncertainty = dict(config.get('uncertainty', {}))
     loss = config.get('loss', {})
-    weighting = mean_loss.get('class_weighting')
-    if weighting is None:
-        if coupled:
-            weighting = uncertainty.get('class_weighting', 'none')
-        else:
-            weighting = (
-                'inverse_frequency' if config.get('calculate_base_weights')
-                else 'none'
-            )
+    weighting = mean_loss.get('class_weighting', 'none')
     if weighting not in {
         'none', 'inverse_frequency', 'sqrt_inverse_frequency',
         'power_inverse_frequency',
@@ -172,8 +158,7 @@ def configure_class_weights(config, data_module, model_type):
             'sqrt_inverse_frequency': 0.5,
         }.get(
             weighting,
-            mean_loss.get('class_weight_exponent',
-                          uncertainty.get('class_weight_exponent')),
+            mean_loss.get('class_weight_exponent'),
         )
         counts, weights = get_four_class_macro_weights(
             data_module, exponent=exponent,
@@ -213,7 +198,7 @@ def resolve_devices(gpu_config):
 
 def build_checkpoint_callback(config_data, checkpoint_config):
     """Build the checkpoint callback for training."""
-    default_monitor = 'val/total_loss' if config_data.get('model_type') in COUPLED_MODEL_TYPES else 'val_total_loss'
+    default_monitor = 'val/total_loss' if config_data.get('model_type') == 'coupled_uncertainty' else 'val_total_loss'
     monitor = checkpoint_config.get('monitor', default_monitor)
     filename = f"{config_data['wandb']['run_name']}-epoch={{epoch:02d}}"
     if checkpoint_config.get('include_step_in_filename', True):
@@ -254,7 +239,7 @@ def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
         'patch_size', 8
     )
     if (
-        model_type in COUPLED_MODEL_TYPES
+        model_type == 'coupled_uncertainty'
         and config_data.get('uncertainty', {}).get('enabled', True)
         and callbacks_cfg.get('spatial_uncertainty_enabled', False)
     ):
@@ -270,7 +255,6 @@ def build_model_callbacks(config_data, data_module, sxr_norm, model_type):
     if callbacks_cfg.get('attention_enabled', True):
         callbacks.append(AttentionMapCallback(
             patch_size=patch_size,
-            use_local_attention=True,
             num_samples=callbacks_cfg.get('attention_num_samples', 4),
             log_every_n_epochs=callbacks_cfg.get(
                 'attention_log_every_n_epochs', 1
@@ -285,11 +269,10 @@ def main():
 
     config = load_training_config(args.config)
     model_type = config.get('model_type', 'deterministic')
-    if model_type not in COUPLED_MODEL_TYPES | {'deterministic'}:
+    if model_type not in {'coupled_uncertainty', 'deterministic'}:
         raise ValueError(
             f'Unsupported model_type {model_type!r}; use deterministic or '
-            'coupled_uncertainty. Older experiments use '
-            'python -m training.experimental.train.'
+            'coupled_uncertainty.'
         )
     checkpoint_cfg = config.get('checkpoint', {})
     supported_checkpoint_keys = {
@@ -332,11 +315,10 @@ def main():
     common_kwargs = dict(
         model_kwargs=config['vit_architecture'],
         sxr_norm=sxr_norm,
-        base_weights=base_weights,
         weight_decay=optimizer_cfg.get('weight_decay', 1e-5),
         scheduler_kwargs=optimizer_cfg.get('scheduler'),
     )
-    if model_type in COUPLED_MODEL_TYPES:
+    if model_type == 'coupled_uncertainty':
         model = CoupledGaussianViTLocal(
             **common_kwargs,
             uncertainty_kwargs=uncertainty_cfg,
@@ -344,6 +326,7 @@ def main():
     else:
         model = ViTLocal(
             **common_kwargs,
+            base_weights=base_weights,
             bias_penalty_weight=config.get('mean_loss', {}).get(
                 'bias_penalty_weight', 0.0,
             ),
@@ -370,7 +353,7 @@ def main():
     if early_stopping.get('enabled', False):
         callbacks.append(EarlyStopping(
             monitor=early_stopping.get('monitor', checkpoint_cfg.get(
-                'monitor', 'val/total_loss' if model_type in COUPLED_MODEL_TYPES
+                'monitor', 'val/total_loss' if model_type == 'coupled_uncertainty'
                 else 'val_total_loss')),
             mode=early_stopping.get('mode', 'min'),
             patience=early_stopping.get('patience', 8),

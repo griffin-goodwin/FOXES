@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.urls]
+Documentation = "https://griffin-goodwin.github.io/FOXES/"
 Source = "https://github.com/griffin-goodwin/FOXES"
 Issues = "https://github.com/griffin-goodwin/FOXES/issues"
 Releases = "https://github.com/griffin-goodwin/FOXES/releases"

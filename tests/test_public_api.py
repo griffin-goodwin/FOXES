@@ -77,25 +77,21 @@ def test_aia_processor_rejects_partial_download_and_cleans_up(monkeypatch):
 
 
 @pytest.mark.parametrize("model_class", [ViTLocal, CoupledGaussianViTLocal])
-@pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("input_kind", ["array", "observation", "timestamped_array"])
-def test_predict_matches_model_outputs(model_class, wrapped, input_kind, monkeypatch, tmp_path):
+def test_predict_matches_model_outputs(model_class, input_kind, monkeypatch, tmp_path):
     kwargs = dict(
         embed_dim=8, hidden_dim=16, num_channels=7,
         num_heads=2, num_layers=1, patch_size=1,
         num_patches=4, dropout=0.0, mask_mode="local", local_window=3,
     )
-    if model_class is CoupledGaussianViTLocal:
-        kwargs["global_patch_adjustment"] = True
     model = model_class(
         model_kwargs=kwargs, sxr_norm=np.array([-6.0, 1.0], dtype=np.float32),
         **({"uncertainty_kwargs": {"enabled": True}}
            if model_class is CoupledGaussianViTLocal else {}),
     ).eval()
-    loaded_model = torch.nn.DataParallel(model) if wrapped else model
     monkeypatch.setattr(
         "forecasting.inference.load_model_from_config",
-        lambda config: loaded_model,
+        lambda config: model,
     )
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
