@@ -52,6 +52,7 @@ split:
   # across boundaries: train covers solar cycle 24's rise/max/decline, val
   # lands on the cycle-24 minimum/transition, test is cycle-25's rise --
   # genuinely unseen solar-cycle conditions, matching real forecasting deployment.
+  # NOTE: these ranges are placeholders and don't match the released checkpoint.
   train_range: ["2010-01-01", "2020-10-31"]
   val_range:   ["2020-12-01", "2022-10-31"]
   test_range:  ["2022-12-01", "2023-12-31"]

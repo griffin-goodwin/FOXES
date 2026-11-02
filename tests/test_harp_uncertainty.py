@@ -65,8 +65,9 @@ def test_prediction_rejects_invalid_uncertainty_maps(uncertainty, match):
 @pytest.mark.parametrize("with_uncertainty", [False, True])
 def test_uncertainty_label_toggle_does_not_change_results(show_uncertainty, with_uncertainty):
     result = prediction([box()], with_uncertainty=with_uncertainty)
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0,
-                             show_harp_uncertainty=show_uncertainty)
+    ax = result.plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0,
+        show_harp_uncertainty=show_uncertainty)
     text = "#1234\n1.00e-07"
     if show_uncertainty and with_uncertainty:
         text += "\n± 1.30e-08"
@@ -75,21 +76,12 @@ def test_uncertainty_label_toggle_does_not_change_results(show_uncertainty, with
     plt.close(ax.figure)
 
 
-@pytest.mark.parametrize("deferred", [False, True])
-def test_explicit_and_deferred_boxes_get_uncertainty_from_prediction_map(monkeypatch, deferred):
-    metadata = helio_foxes.ObservationMetadata(timestamp="2023-08-01", image_shape=(7, 2, 2))
+def test_explicit_boxes_get_uncertainty_from_prediction_map(monkeypatch):
+    metadata = helio_foxes.api.ObservationMetadata(timestamp="2023-08-01", image_shape=(7, 2, 2))
     result = prediction(None, metadata=metadata)
-    calls = []
-
-    def fetch(self, timestamp):
-        calls.append(timestamp)
-        return [box(top=50, height=50)]
-
-    monkeypatch.setattr(helio_foxes.HARPProcessor, "fetch_date", fetch)
-    kwargs = {} if deferred else {"harp_regions": [box(top=50, height=50)]}
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0, **kwargs)
+    monkeypatch.setattr(helio_foxes.HARPProcessor, "fetch", lambda *a, **kw: pytest.fail("Plot must not query"))
+    ax = result.plot_flux_map(min_harp_flux=0, harp_regions=[box(top=50, height=50)])
     assert ax.texts[0].get_text() == "#1234\n3.00e-08\n± 5.00e-09"
-    assert calls == ([metadata.timestamp] if deferred else [])
     assert result.harp_regions is None
     plt.close(ax.figure)
 
@@ -100,8 +92,9 @@ def test_manual_offsets_keep_uncertainty_labels_readable_after_resize():
     result = helio_foxes.Prediction(flux=4.096e-6, flux_map=np.full((64, 64), 1e-9),
                               patch_uncertainty_map=np.full((64, 64), 2e-10), harp_regions=regions)
     offsets = {10000: (-100, 30), 10001: (0, -70), 10002: (100, 30)}
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0,
-                             harp_label_offsets=offsets, harp_label_fontsize=10)
+    ax = result.plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0,
+        harp_label_offsets=offsets, harp_label_fontsize=10)
     for size, dpi in [((7, 6), 100), ((5.5, 5.5), 150)]:
         ax.figure.set_size_inches(*size)
         ax.figure.set_dpi(dpi)
@@ -127,7 +120,7 @@ def test_colliding_labels_shift_without_overlap_or_font_shrinking(top, left, wit
         flux=4.096e-6, flux_map=np.full((64, 64), 1e-9), harp_regions=regions,
         patch_uncertainty_map=np.full((64, 64), 2e-10) if with_uncertainty else None,
     )
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0, harp_label_fontsize=10)
+    ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=0, harp_label_fontsize=10)
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     bounds = [label.get_bbox_patch().get_window_extent(renderer) for label in ax.texts]
@@ -146,7 +139,7 @@ def test_colliding_labels_shift_without_overlap_or_font_shrinking(top, left, wit
 def test_small_label_overlap_gets_a_small_nudge_instead_of_a_full_height_jump():
     result = prediction([box(10000, top=30, left=20, width=5, height=5),
                          box(10001, top=30, left=20, width=5, height=5)])
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0, harp_label_max_shift=0)
+    ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=0, harp_label_max_shift=0)
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     height = ax.texts[0].get_bbox_patch().get_window_extent(renderer).height / renderer.points_to_pixels(1)
@@ -154,8 +147,9 @@ def test_small_label_overlap_gets_a_small_nudge_instead_of_a_full_height_jump():
 
     # Start the second label just one point inside the first label's bottom edge.
     start = (3, -3 - height + 1)
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0,
-                             harp_label_offsets={10001: start})
+    ax = result.plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0,
+        harp_label_offsets={10001: start})
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     first, second = [label.get_bbox_patch().get_window_extent(renderer) for label in ax.texts]
@@ -170,8 +164,9 @@ def test_small_label_overlap_gets_a_small_nudge_instead_of_a_full_height_jump():
 def test_automatic_label_movement_stays_within_limit(max_shift):
     regions = [box(10000 + i, top=45, left=45, width=3, height=3) for i in range(6)]
     result = prediction(regions)
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0,
-                             harp_label_max_shift=max_shift)
+    ax = result.plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0,
+        harp_label_max_shift=max_shift)
     for label in ax.texts:
         corner_offset = (-3 if label.get_ha() == "right" else 3,
                          3 if label.get_va() == "bottom" else -3)
@@ -183,13 +178,13 @@ def test_automatic_label_movement_stays_within_limit(max_shift):
 @pytest.mark.parametrize("max_shift", [-1, np.inf, np.nan])
 def test_invalid_label_shift_limit_is_rejected(max_shift):
     with pytest.raises(ValueError, match="harp_label_max_shift must be finite and nonnegative"):
-        helio_foxes.plot_flux_map(np.ones((2, 2)), harp_label_max_shift=max_shift)
+        prediction([]).plot_flux_map(harp_label_max_shift=max_shift)
 
 
 @pytest.mark.parametrize("top,left", [(10, 10), (10, 75), (75, 10), (75, 75)])
 def test_default_label_is_outside_its_box_at_a_corner(top, left):
-    ax = helio_foxes.plot_flux_map(prediction([box(top=top, left=left, width=10, height=10)]),
-                             show_harp_boxes=True, min_harp_flux=0)
+    ax = prediction([box(top=top, left=left, width=10, height=10)]).plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0)
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     label = ax.texts[0]
@@ -204,9 +199,9 @@ def test_default_label_is_outside_its_box_at_a_corner(top, left):
 
 
 def test_other_corners_are_tried_before_nudges():
-    ax = helio_foxes.plot_flux_map(prediction([box(10000, top=40, left=40, width=20, height=20),
-                                       box(10001, top=40, left=40, width=20, height=20)]),
-                             show_harp_boxes=True, min_harp_flux=0, harp_label_fontsize=10)
+    ax = prediction([box(10000, top=40, left=40, width=20, height=20),
+                                       box(10001, top=40, left=40, width=20, height=20)]).plot_flux_map(
+        show_harp_boxes=True, min_harp_flux=0, harp_label_fontsize=10)
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     first, second = ax.texts
@@ -221,7 +216,7 @@ def test_other_corners_are_tried_before_nudges():
 def test_small_harp_label_avoids_a_larger_preceding_box():
     result = prediction([box(10000, top=40, left=40, width=20, height=20),
                          box(10001, top=39, left=61, width=2, height=2)])
-    ax = helio_foxes.plot_flux_map(result, show_harp_boxes=True, min_harp_flux=0)
+    ax = result.plot_flux_map(show_harp_boxes=True, min_harp_flux=0)
     ax.figure.canvas.draw()
     renderer = ax.figure.canvas.get_renderer()
     for label in ax.texts:

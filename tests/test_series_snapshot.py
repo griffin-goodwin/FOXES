@@ -46,7 +46,7 @@ def observations(minutes=(0, 4, 10)):
 
 
 def make_series(**kwargs):
-    return foxes.Predictor.predict_series(SnapshotModel(), observations(), **kwargs)
+    return foxes.FOXESModel.predict_time_series(SnapshotModel(), observations(), **kwargs)
 
 
 def test_target_retains_one_channel_without_temporary_files(monkeypatch):
@@ -60,7 +60,7 @@ def test_target_retains_one_channel_without_temporary_files(monkeypatch):
 
 
 def test_target_ties_choose_earlier_and_channel_can_be_changed():
-    series = foxes.Predictor.predict_series(
+    series = foxes.FOXESModel.predict_time_series(
         SnapshotModel(), observations((10, 4, 0)),
         snapshot_time="2023-08-01 00:07", snapshot_wavelength=171,
     )
@@ -76,9 +76,10 @@ def test_no_target_retains_no_image(monkeypatch):
 
 
 def test_empty_series_has_no_snapshot():
-    series = foxes.Predictor.predict_series(
-        SnapshotModel(), iter(()), snapshot_time="2023-08-01",
-    )
+    with pytest.warns(UserWarning, match="can only be used once"):
+        series = foxes.FOXESModel.predict_time_series(
+            SnapshotModel(), iter(()), snapshot_time="2023-08-01",
+        )
     assert series.predictions == ()
     assert series.snapshot is None
 
@@ -92,15 +93,15 @@ def test_target_selects_nearest_available_observation(target, expected_minute):
 
 def test_snapshot_reuses_overlay_and_matches_colors(monkeypatch):
     series = make_series(snapshot_time="2023-08-01 00:05")
-    original = foxes.api.plot_flux_map
+    original = foxes.Prediction.plot_flux_map
     calls = []
 
     def plot(*args, **kwargs):
         calls.append(kwargs)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr("helio_foxes.api.plot_flux_map", plot)
-    ax = series.plot(show_snapshot=True)
+    monkeypatch.setattr(foxes.Prediction, "plot_flux_map", plot)
+    ax = series.plot_light_curves(show_snapshot=True)
     assert len(calls) == 1
     snapshot_ax = ax.figure.axes[1]
     assert len(ax.figure.axes) == 4  # Curves, standard flux map, AIA, flux colorbar.
@@ -128,27 +129,27 @@ def test_snapshot_reuses_overlay_and_matches_colors(monkeypatch):
 
 def test_toggle_and_selected_regions_keep_colors_stable():
     series = make_series(snapshot_time="2023-08-01 00:05")
-    plain_ax = series.plot()
+    plain_ax = series.plot_light_curves()
     assert len(plain_ax.figure.axes) == 1
     color = next(line.get_color() for line in plain_ax.lines if line.get_label() == "HARP 200")
-    ax = series.plot(show_snapshot=True, harpnums=[200])
+    ax = series.plot_light_curves(show_snapshot=True, harpnums=[200])
     assert len(ax.figure.axes[1].patches) == 1
     assert ax.lines[0].get_color() == color
     assert ax.figure.axes[1].texts[0].get_text().startswith("#200")
     plt.close(plain_ax.figure)
     plt.close(ax.figure)
     with pytest.raises(ValueError, match="No AIA snapshot"):
-        make_series().plot(show_snapshot=True)
+        make_series().plot_light_curves(show_snapshot=True)
 
 
 def test_existing_axes_and_no_snapshot_harps_do_not_query(monkeypatch):
     series = make_series(snapshot_time="2023-08-01 00:05")
-    monkeypatch.setattr(foxes.HARPProcessor, "fetch_date", lambda *args: pytest.fail("No query"))
+    monkeypatch.setattr(foxes.HARPProcessor, "fetch", lambda *args: pytest.fail("No query"))
     fig, (left, right, aia) = plt.subplots(1, 3)
-    assert series.plot(ax=left, snapshot_ax=right, aia_ax=aia, show_snapshot=True, harpnums=[]) is left
+    assert series.plot_light_curves(ax=left, snapshot_ax=right, aia_ax=aia, show_snapshot=True, harpnums=[]) is left
     assert not right.patches
     with pytest.raises(ValueError, match="snapshot_ax"):
-        series.plot(ax=left, show_snapshot=True)
+        series.plot_light_curves(ax=left, show_snapshot=True)
     plt.close(fig)
 
 
@@ -160,14 +161,14 @@ def test_failed_prediction_raises():
             return super().predict(observation)
 
     with pytest.raises(RuntimeError, match="model failure"):
-        foxes.Predictor.predict_series(
+        foxes.FOXESModel.predict_time_series(
             FailingModel(), observations(), snapshot_time="2023-08-01 00:05",
         )
 
 
 def test_snapshot_is_independent_of_source_and_input_order():
     source = list(observations((10, 4, 0)))
-    series = foxes.Predictor.predict_series(SnapshotModel(), iter(source), snapshot_time="2023-08-01 00:05")
+    series = foxes.FOXESModel.predict_time_series(SnapshotModel(), iter(source), snapshot_time="2023-08-01 00:05")
     expected = source[1].data[3].copy()
     source[1].data[:] = -99
     assert series.snapshot.metadata.timestamp.minute == 4
@@ -176,8 +177,8 @@ def test_snapshot_is_independent_of_source_and_input_order():
 
 
 def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
-    series = foxes.Predictor.predict_series(UncertainSnapshotModel(), observations(), snapshot_time="2023-08-01 00:05")
-    ax = series.plot(show_snapshot=True)
+    series = foxes.FOXESModel.predict_time_series(UncertainSnapshotModel(), observations(), snapshot_time="2023-08-01 00:05")
+    ax = series.plot_light_curves(show_snapshot=True)
     assert len(ax.collections) == 2
     assert r"\sigma" in ax.get_title()
     assert all("±" in label.get_text() for label in ax.figure.axes[1].texts)
@@ -189,7 +190,7 @@ def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
         assert min(ys) == pytest.approx(flux - sigma)
         assert max(ys) == pytest.approx(flux + sigma)
     plt.close(ax.figure)
-    ax = series.plot(show_snapshot=True, show_uncertainty=False)
+    ax = series.plot_light_curves(show_snapshot=True, show_uncertainty=False)
     assert not ax.collections
     assert all("±" not in label.get_text() for label in ax.figure.axes[1].texts)
     plt.close(ax.figure)
@@ -197,7 +198,7 @@ def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
 
 def test_deterministic_model_never_fabricates_uncertainty():
     series = make_series(snapshot_time="2023-08-01 00:05")
-    ax = series.plot(show_snapshot=True, show_uncertainty=True)
+    ax = series.plot_light_curves(show_snapshot=True, show_uncertainty=True)
     assert not ax.collections
     assert all("±" not in label.get_text() for label in ax.figure.axes[1].texts)
     assert r"\sigma" not in ax.get_title()
@@ -208,9 +209,9 @@ def test_mixed_models_do_not_bridge_unknown_uncertainties():
     images = list(observations())
     uncertain = UncertainSnapshotModel()
     deterministic = SnapshotModel()
-    series = foxes.PredictionSeries((uncertain.predict(images[0]), deterministic.predict(images[1]),
+    series = foxes.PredictionTimeSeries((uncertain.predict(images[0]), deterministic.predict(images[1]),
                                      uncertain.predict(images[2])))
-    ax = series.plot()
+    ax = series.plot_light_curves()
     for collection in ax.collections:
         for path in collection.get_paths():
             # Isolated known uncertainties must not shade across the middle sample.

@@ -70,7 +70,7 @@ def test_fetch_returns_raw_rows_from_selected_good_sweep(monkeypatch):
         "top_pct": 20.0, "left_pct": 30.0, "width_pct": 10.0, "height_pct": 5.0,
     })
 
-    assert processor.fetch_date(datetime(2023, 8, 1)) == [
+    assert processor.fetch(datetime(2023, 8, 1)) == [
         {"T_REC": "2023.08.01_00:12:00_TAI", "QUALITY": 0,
          "HARPNUM": 2, "NOAA_ARS": "10002,10003",
          "top_pct": 20.0, "left_pct": 30.0,
@@ -94,7 +94,7 @@ def test_fetch_accepts_aia_timestamp_formats(monkeypatch, timestamp):
 
     monkeypatch.setattr(processor, "_query_sharp", query)
     monkeypatch.setattr(processor, "_bbox_to_pixel_fractions", lambda row: {"top_pct": 20.0})
-    assert processor.fetch_date(timestamp)[0]["HARPNUM"] == 2
+    assert processor.fetch(timestamp)[0]["HARPNUM"] == 2
     assert seen == [(datetime(2023, 8, 1), "test@example.com")]
 
 

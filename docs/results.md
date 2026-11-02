@@ -1,9 +1,8 @@
 # Results
 
-These saved results are for `model_assets/UncertaintyModel.ckpt`, evaluated on
-**100,058 timestamps** from **2023-08-01 00:00:00** through
-**2025-09-26 20:21:00 UTC**. They measure full-disk predictions at individual
-timestamps, rather than independent flare events.
+These numbers come from `model_assets/UncertaintyModel.ckpt`, evaluated on the
+held-out test set: **100,058 timestamps** between **2023-08-01 00:00** and
+**2025-09-26 20:21 UTC**.
 
 ## Metrics
 
@@ -15,23 +14,26 @@ timestamps, rather than independent flare events.
 | M | 22,386 | 0.1317 | 0.0932 | 0.7173 | 0.8734 | 62.01% | 89.08% |
 | X | 1,082 | 0.2181 | 0.1667 | −0.1556 | 0.5969 | 30.87% | 58.69% |
 
-Regression metrics use `log10(flux)`; errors are in dex. Coverage counts
-targets within 1 or 1.96 predicted standard deviations in the checkpoint's
-normalized `log10(flux + 1e-8)` space.
+Errors are computed on `log10(flux)`, so they're in dex. Coverage is the
+fraction of measured values that land within 1 (68%) or 1.96 (95%) predicted
+standard deviations, measured in the checkpoint's normalized
+`log10(flux + 1e-8)` space.
 
-Download the full summaries:
+The model does well on B through M class, but X-class flux is its weak spot.Keep that in mind if you're using FOXES during large events.
+
+Full summaries:
 
 - {download}`Regression metrics <../model_assets/UncertaintyModelResults/evaluation/metrics/performance_metrics.csv>`
 - {download}`Uncertainty metrics <../model_assets/UncertaintyModelResults/evaluation/metrics/uncertainty_metrics.csv>`
 
-## Predicted versus measured flux
+## Predicted Versus Measured Flux
 
 ```{figure} ../model_assets/UncertaintyModelResults/evaluation/plots/regression_plot.png
 :alt: Density of predicted versus measured SXR flux, with a perfect-agreement line and class-specific MAE band.
 :width: 100%
 
-Full-disk flux in W/m². The red line marks perfect agreement; shading shows
-class-specific log-space MAE.
+Full-disk flux in W/m². The red line is perfect agreement, and the shading
+shows the mean absolute error (in log space) for each flare class.
 ```
 
 ## Calibration
@@ -40,7 +42,9 @@ class-specific log-space MAE.
 :alt: Nominal versus empirical coverage by class and a histogram of standardized residuals.
 :width: 100%
 
-Nominal versus measured coverage (left) and standardized residuals (right).
+Left: how often the measured flux actually falls inside each nominal interval.
+Right: the distribution of standardized residuals.
 ```
 
-To evaluate your own predictions, follow the [command-line workflow](workflows.md#evaluate-predictions).
+To run the same evaluation on your own predictions, see the
+[Evaluate Predictions](workflows.md#evaluate-predictions) workflow.

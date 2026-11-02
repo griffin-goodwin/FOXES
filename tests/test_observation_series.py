@@ -37,17 +37,12 @@ def test_numeric_timestamp_rejected():
         foxes.parse_timestamp(1690848000)
 
 
-def test_local_array_and_npy(tmp_path):
+def test_local_array():
     data = np.ones((7, 2, 2))
     observation = foxes.Observation.from_array(data, timestamp="2023/08/01", harp_regions=[])
     assert observation.data.dtype == np.float32
     data[:] = 2
     assert np.all(observation.data == 1)
-    path = tmp_path / "stack.npy"
-    np.save(path, observation.data)
-    loaded = foxes.Observation.from_npy(path, timestamp="August 1, 2023")
-    assert loaded.metadata == observation.metadata
-    np.testing.assert_array_equal(loaded.data, observation.data)
     for bad in [np.zeros((2, 2)), np.full((7, 2, 2), np.nan), np.ones((7, 2, 2), dtype=complex)]:
         with pytest.raises(ValueError, match="channel-first"):
             foxes.Observation.from_array(bad, timestamp="2023-08-01")
@@ -75,7 +70,7 @@ def test_local_fits_preprocessing_preserves_files(monkeypatch, tmp_path):
 
 
 def test_range_grid_and_bulk_dispatch(monkeypatch):
-    processor = foxes.ObservationProcessor(resolution=2, include_harps=False, include_sxr=False)
+    processor = foxes.ObservationFetcher(resolution=2, include_harps=False, include_sxr=False)
     calls = []
 
     def bulk(times, *, on_error, progress=False):
@@ -84,16 +79,16 @@ def test_range_grid_and_bulk_dispatch(monkeypatch):
             yield stamp, np.zeros((7, 2, 2))
 
     monkeypatch.setattr(processor.aia_processor, "_iter_range", bulk)
-    monkeypatch.setattr(processor.aia_processor, "fetch_date", lambda *a: pytest.fail("single fetch"))
-    observations = list(processor.iter_observations("2023/08/01", "2023-08-01T00:25Z", cadence="12min"))
+    monkeypatch.setattr(processor.aia_processor, "fetch", lambda *a: pytest.fail("single fetch"))
+    observations = list(processor.fetch_range("2023/08/01", "2023-08-01T00:25Z", cadence="12min"))
     assert len(calls) == 1
     assert [o.metadata.timestamp.minute for o in observations] == [0, 12, 24]
     assert all(o.data.shape == (7, 2, 2) for o in observations)
     for cadence in [0, -1, "NaT", "nonsense", True, float("inf"), "500ms"]:
         with pytest.raises(ValueError, match="cadence"):
-            list(processor.iter_observations("2023-08-01", "2023-08-02", cadence=cadence))
+            list(processor.fetch_range("2023-08-01", "2023-08-02", cadence=cadence))
     with pytest.raises(ValueError, match="end"):
-        list(processor.iter_observations("2023-08-02", "2023-08-01"))
+        list(processor.fetch_range("2023-08-02", "2023-08-01"))
 
 
 def test_bulk_query_once_and_bounded_selection(monkeypatch, tmp_path, capsys):
@@ -164,9 +159,9 @@ def test_bulk_preprocessing_cleanup(monkeypatch):
 
 
 def test_range_without_aia_never_downloads(monkeypatch):
-    processor = foxes.ObservationProcessor(resolution=2, include_harps=False, include_sxr=False)
+    processor = foxes.ObservationFetcher(resolution=2, include_harps=False, include_sxr=False)
     monkeypatch.setattr(processor.aia_processor, "_iter_range", lambda *a, **kw: pytest.fail("download"))
-    observations = list(processor.iter_observations("2023-08-01", "2023-08-01", include_aia=False))
+    observations = list(processor.fetch_range("2023-08-01", "2023-08-01", include_aia=False))
     assert len(observations) == 1
     assert observations[0].data is None
 
@@ -184,16 +179,16 @@ def test_harp_series_gaps_and_model_reuse():
                 harp_regions=[region] if len(calls) != 2 else [],
             )
 
-    series = foxes.Predictor.predict_series(Model(), iter(observations))
+    series = foxes.FOXESModel.predict_time_series(Model(), iter(observations))
     assert len(calls) == 3
     curve = series.harp_light_curves()[12]
     np.testing.assert_allclose(curve.flux_sum, [4e-6, np.nan, 4e-6], equal_nan=True)
     assert curve.flux_sum_uncertainty.isna().all()
     assert str(curve.index.tz) == "UTC"
-    ax = series.plot(include_full_disk=True)
+    ax = series.plot_light_curves(show_full_disk=True)
     assert len(ax.lines) == 2
     assert np.isnan(ax.lines[0].get_ydata()[1])
     plt.close(ax.figure)
     with pytest.raises(ValueError, match="unique"):
-        foxes.PredictionSeries((series.predictions[0], series.predictions[0]))
-    assert foxes.PredictionSeries(()).to_dataframe().empty
+        foxes.PredictionTimeSeries((series.predictions[0], series.predictions[0]))
+    assert foxes.PredictionTimeSeries(()).full_disk_light_curve().empty

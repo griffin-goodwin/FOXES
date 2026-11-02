@@ -34,8 +34,8 @@ def predictors(model, monkeypatch, tmp_path, **options):
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.touch()
     return (
-        helio_foxes.load_model(checkpoint, device="cpu"),
-        helio_foxes.load_model(checkpoint, device="cpu", legacy_model=True, **options),
+        helio_foxes.FOXESModel(checkpoint, device="cpu"),
+        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_model=True, **options),
     )
 
 
@@ -70,26 +70,27 @@ def test_public_prediction_scales_all_physical_outputs(model, monkeypatch, tmp_p
     np.testing.assert_array_equal(np.asarray(model.sxr_norm), norm)
     assert corrected.intervals is None
     assert corrected.patch_uncertainty_map is None
-    frame = helio_foxes.PredictionSeries((corrected,)).to_dataframe()
+    frame = helio_foxes.PredictionTimeSeries((corrected,)).full_disk_light_curve()
     assert frame.iloc[0].flux_scale_factor == scale
-    assert frame.iloc[0].observed_xrsb_flux == 1e-6
+    assert frame.iloc[0].observed_flux == 1e-6
 
 
-def test_timestamp_requirement_and_custom_cutoff(model, monkeypatch, tmp_path):
+def test_custom_cutoff(model, monkeypatch, tmp_path):
     native, legacy = predictors(model, monkeypatch, tmp_path, legacy_cutoff="2019-01-01")
     image = np.ones((7, 16, 16), dtype=np.float32)
-    assert native.predict(image).flux_scale_factor == 1
-    with pytest.raises(ValueError, match="timestamp is required"):
-        legacy.predict(image)
-    corrected = legacy.predict(image, timestamp="2018-12-31T23:59:59Z")
-    assert corrected.flux_scale_factor == .7
-    assert legacy.predict(image, timestamp="2019-01-01").flux_scale_factor == 1
+
+    def at(timestamp):
+        return helio_foxes.Observation.from_array(image, timestamp=timestamp)
+
+    assert native.predict(at("2018-12-31T23:59:59Z")).flux_scale_factor == 1
+    assert legacy.predict(at("2018-12-31T23:59:59Z")).flux_scale_factor == .7
+    assert legacy.predict(at("2019-01-01")).flux_scale_factor == 1
 
 
-@pytest.mark.parametrize("bad", ["true", "false", None, 1])
+@pytest.mark.parametrize("bad", ["true", "false", 1])
 def test_invalid_legacy_flag_rejected_before_loading(bad):
     with pytest.raises(ValueError, match="legacy_model must be a boolean"):
-        helio_foxes.load_model("missing.ckpt", legacy_model=bad)
+        helio_foxes.FOXESModel("missing.ckpt", legacy_model=bad)
 
 
 def test_timestamp_stems_and_invalid_dates():
@@ -192,10 +193,30 @@ def test_gaussian_checkpoints_reject_legacy_correction(tmp_path, checkpoint_form
         checkpoint = tmp_path / 'gaussian.pt'
         torch.save({'model': gaussian}, checkpoint)
     with pytest.raises(ValueError, match="only supported for deterministic"):
-        helio_foxes.load_model(checkpoint, device="cpu", legacy_model=True)
+        helio_foxes.FOXESModel(checkpoint, device="cpu", legacy_model=True)
     dataset = TensorDataset(torch.ones(1, 2, 2, 7), torch.tensor([1e-6]))
     with pytest.raises(ValueError, match="only supported for deterministic"):
         next(evaluate_model_on_dataset(
             gaussian, dataset, times=["2015-01-01"],
             config_data={"legacy_model": True, "num_workers": 0},
         ))
+
+
+@pytest.mark.parametrize("checkpoint,legacy_model,expected", [
+    ("uncertainty", None, False),
+    ("inverted-attention-mask", None, True),
+    ("localized-attention-mask", None, True),
+    ("no-attention-mask", None, True),
+    ("no-attention-mask", False, False),
+    ("uncertainty", True, True),
+])
+def test_legacy_correction_defaults_by_checkpoint_name(model, monkeypatch, checkpoint, legacy_model, expected):
+    monkeypatch.setattr("forecasting.inference.load_model_from_config", lambda config: model)
+    monkeypatch.setattr("helio_foxes.api._resolve_checkpoint", lambda checkpoint: "model.ckpt")
+    options = {} if legacy_model is None else {"legacy_model": legacy_model}
+    assert helio_foxes.FOXESModel(checkpoint, device="cpu", **options).legacy_model is expected
+
+
+def test_checkpoint_files_default_to_no_legacy_correction(model, monkeypatch, tmp_path):
+    native, _ = predictors(model, monkeypatch, tmp_path)
+    assert native.legacy_model is False

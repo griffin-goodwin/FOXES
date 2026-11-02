@@ -1,8 +1,25 @@
 """Fetch AIA, HARP, and GOES SXR observations and predict solar X-ray flux.
 
-The public functions operate on channel-first arrays. Loading a checkpoint and
-fetching data are separate so an application can reuse a model across requests.
+The API is a short pipeline, and this module is laid out in the same order:
+
+1. Get data. :class:`ObservationFetcher` downloads and processes AIA, HARP,
+   and GOES data and returns an :class:`Observation`. Saved observations come
+   back with :func:`load_observations`, and your own arrays go in through
+   :meth:`Observation.from_array`.
+2. Load a model. Create a :class:`FOXESModel` from a checkpoint. Do this
+   once and reuse it.
+3. Predict. :meth:`FOXESModel.predict` turns an :class:`Observation` into a
+   :class:`Prediction`, and :meth:`FOXESModel.predict_time_series` turns
+   many into a :class:`PredictionTimeSeries`.
+4. Look at the results. :class:`Prediction` holds the flux, flux map, and
+   HARP fluxes and plots them; :class:`PredictionTimeSeries` gives light
+   curves and plots those.
+
+:class:`AIAProcessor`, :class:`HARPProcessor`, and :class:`SXRProcessor` are
+the lower-level pieces the fetcher is built from.
 """
+
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -24,188 +41,312 @@ from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 
+_CHECKPOINT_URL = "https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/"
+# Names FOXESModel accepts in place of a path, mapped to their location under model_assets/.
+PRETRAINED_CHECKPOINTS = {
+    "uncertainty": "UncertaintyModel.ckpt",
+    "inverted-attention-mask": "LegacyModels/inverted-attention-mask.ckpt",
+    "localized-attention-mask": "LegacyModels/localized-attention-mask.ckpt",
+    "no-attention-mask": "LegacyModels/no-attention-mask.ckpt",
+}
 
-def parse_timestamp(value):
-    """Parse a complete date/time and return an aware UTC datetime.
 
-    Accept datetime/date, numpy.datetime64, ISO 8601, year-first slash/dot
-    dates (including ``2023.08.01_12:00:00_UTC``), and named-month dates.
-    Date-only values mean midnight; naive values mean UTC. Numeric dates
-    such as ``01/08/2023`` are rejected rather than guessing day/month order.
-    Unix numbers, partial dates, relative dates, and timezone abbreviations
-    other than UTC/GMT are not supported. Use an explicit offset for zones.
+class ObservationFetcher:
+    """Fetch everything you need for a prediction at a given time.
 
-    Parameters
-    ----------
-    value : datetime.datetime, datetime.date, numpy.datetime64, or str
-        A complete date, optionally with a time. Examples: "2023-08-01",
-        "2023-08-01T12:00:00Z", "2023/08/01 12:00",
-        "2023.08.01_12:00:00_UTC", "August 1, 2023 12:00 UTC", or
-        "2023-08-01T08:00:00-04:00". Date-only inputs mean midnight; naive
-        inputs mean UTC. Numeric Unix timestamps, NaT, incomplete dates such
-        as "August 2023", ambiguous "01/08/2023", and non-UTC/GMT timezone
-        abbreviations such as EST are rejected.
+    This is the usual starting point. :meth:`fetch` returns an
+    :class:`Observation` and :meth:`fetch_range` yields one per time; pass
+    them to :class:`FOXESModel` to predict. It wraps :class:`AIAProcessor`,
+    :class:`HARPProcessor`, and :class:`SXRProcessor` and bundles what they
+    return into an :class:`Observation`. All three sources are on by
+    default. Any of them can be turned off here or for a single call.
 
-    Returns
-    -------
-    datetime.datetime
-        Timezone-aware UTC time.
+    The sources fail differently. If the AIA download or processing fails,
+    you get an error, since there's nothing to predict on. HARP and GOES are
+    extras: if they fail you get an empty region list or ``sxr=None`` and
+    the observation still comes back. A source you turned off shows up as
+    ``None`` (``data=None`` for AIA, ``harp_regions=None`` for HARPs).
     """
-    original = value
-    if isinstance(value, np.datetime64):
-        if np.isnat(value):
-            raise ValueError("timestamp cannot be NaT")
-        value = np.datetime_as_string(value, unit="us")
-    if isinstance(value, date) and not isinstance(value, datetime):
-        value = datetime.combine(value, datetime.min.time())
-    if isinstance(value, str):
-        from dateutil.parser import parse, UnknownTimezoneWarning
 
-        value = value.strip()
+    def __init__(self, *, email=None,
+                 include_aia=True, include_harps=True, include_sxr=True,
+                 resolution=512, aia_tolerance=120, n_workers=4,
+                 harp_bbox_expansion=0.0,
+                 sxr_tolerance=120, sxr_satellite=None):
+        """Set up the data sources.
+
+        Parameters
+        ----------
+        email : str or None, optional
+            Your registered JSOC email, used for both AIA and HARP queries.
+            Defaults to the ``JSOC_EMAIL`` environment variable.
+        include_aia, include_harps, include_sxr : bool, default True
+            Which sources to fetch by default. Each fetch call can override
+            these.
+        resolution : int, default 512
+            Processed AIA image size in pixels. Should match the checkpoint.
+        aia_tolerance : int, default 120
+            How far, in seconds, each AIA frame can be from the requested time.
+        n_workers : int, default 4
+            Number of parallel AIA download threads.
+        harp_bbox_expansion : float, default 0.0
+            Fraction of each HARP box's width and height added on every side
+            (0.1 grows each side by 10%). HARP flux sums use the expanded boxes.
+        sxr_tolerance : float, default 120
+            How far, in seconds, a GOES sample can be from the requested time.
+        sxr_satellite : int or None, optional
+            Use only this GOES satellite (e.g. ``18``). ``None`` averages all
+            satellites with good data.
+        """
+        self.include_aia = include_aia
+        self.include_harps = include_harps
+        self.include_sxr = include_sxr
+        self.aia_processor = AIAProcessor(
+            email=email, resolution=resolution, tolerance=aia_tolerance,
+            n_workers=n_workers,
+        )
+        self.harp_processor = HARPProcessor(
+            email=email, resolution=self.aia_processor.resolution,
+            padding_factor=self.aia_processor.PADDING_FACTOR,
+            bbox_expansion=harp_bbox_expansion,
+        )
+        self.sxr_processor = SXRProcessor(tolerance=sxr_tolerance, satellite=sxr_satellite)
+
+    def fetch(self, time, *, include_aia=None, include_harps=None,
+              include_sxr=None) -> Observation:
+        """Fetch one observation.
+
+        Raw downloads are deleted before the method returns. The HARP and
+        GOES data stay attached to the observation, so they show up again
+        when you predict and plot.
+
+        Parameters
+        ----------
+        time : datetime.datetime, datetime.date, numpy.datetime64, or str
+            Any format :func:`parse_timestamp` accepts.
+        include_aia, include_harps, include_sxr : bool or None, optional
+            Turn a source on or off for this call only. ``None`` keeps the
+            fetcher's default. You need AIA to make a prediction.
+
+        Returns
+        -------
+        Observation
+        """
+        timestamp = _utc_datetime(time)
+        if include_aia is None:
+            include_aia = self.include_aia
+        if include_harps is None:
+            include_harps = self.include_harps
+        if include_sxr is None:
+            include_sxr = self.include_sxr
+        stack = self.aia_processor.fetch(timestamp) if include_aia else None
+        metadata = ObservationMetadata(
+            timestamp=timestamp,
+            image_shape=stack.shape if stack is not None else (
+                len(self.aia_processor.WAVELENGTHS),
+                self.aia_processor.resolution, self.aia_processor.resolution,
+            ),
+            wavelengths=self.aia_processor.WAVELENGTHS,
+            padding_factor=self.aia_processor.PADDING_FACTOR,
+            harp_bbox_expansion=self.harp_processor.bbox_expansion,
+        )
+        regions = self.harp_processor.fetch(timestamp) if include_harps else None
+        sxr = self.sxr_processor.fetch(timestamp) if include_sxr else None
+        return Observation(
+            metadata=metadata, data=stack, harp_regions=regions, sxr=sxr,
+        )
+
+    def fetch_range(self, start, end, *, cadence="1h", on_error="raise",
+                    save_dir=None, overwrite=False, progress=False,
+                    include_aia=None, include_harps=None, include_sxr=None):
+        """Fetch observations over a time range, one at a time.
+
+        This is a generator, so nothing gets downloaded until you start
+        looping over it (or hand it to :meth:`FOXESModel.predict_time_series`).
+        Only one AIA stack is held in memory at a time, which keeps long
+        ranges manageable.
+
+        **Which times.** The range starts at ``start`` and steps forward by
+        ``cadence``. ``end`` is included only if it falls exactly on one of
+        those steps. There's no interpolation, so two requested times close
+        together can end up using the same AIA exposure.
+
+        **How it downloads.** AIA frames for the whole range are found with
+        a single JSOC query, then downloaded. HARP and GOES are still queried
+        separately for each time. Very long ranges can produce large JSOC
+        responses, so it's worth splitting them into chunks.
+
+        **Saving and reusing.** With ``save_dir`` set, each observation is
+        saved with :meth:`Observation.save` before it's yielded. On a later
+        run, any time that already has a file is loaded from disk, with no
+        downloads or queries, and only the missing times are fetched. Saved
+        files are reused exactly as they are, so if you change preprocessing
+        or source settings, pass ``overwrite=True`` to fetch everything again.
+        Reload a saved folder without the fetcher using
+        :func:`load_observations`.
+
+        **Errors.** By default an AIA failure stops the iterator. With
+        ``on_error="skip"``, the failure is logged with its time and the
+        iterator carries on. HARP and GOES failures never stop it (see
+        :meth:`fetch`). Problems with the initial JSOC query, or
+        with reading or writing saved files, always raise.
+
+        Parameters
+        ----------
+        start, end : datetime.datetime, datetime.date, numpy.datetime64, or str
+            First and last times, in any format :func:`parse_timestamp`
+            accepts. ``end`` can't be before ``start``.
+        cadence : str, datetime.timedelta, pandas.Timedelta, int, or float, default "1h"
+            Time between observations, as a whole number of seconds. Use a
+            pandas-style string like ``"12min"``, a timedelta, or a plain
+            number of seconds (so ``720`` is 12 minutes).
+        on_error : {"raise", "skip"}, default "raise"
+            What to do when a single time fails to download or process.
+        save_dir : str or pathlib.Path or None, optional
+            Folder to save observations in and reuse them from.
+        overwrite : bool, default False
+            Fetch every time again and replace any saved files.
+        progress : bool, default False
+            Show a tqdm progress bar for the JSOC query and downloads, or for
+            loading files if everything is already saved. If AIA is turned
+            off, it tracks the HARP and GOES fetches instead.
+        include_aia, include_harps, include_sxr : bool or None, optional
+            Turn a source on or off for this range only, as in :meth:`fetch`.
+            ``None`` keeps the fetcher's default.
+
+        Yields
+        ------
+        Observation
+            One per successful time, in time order.
+
+        Examples
+        --------
+        >>> observations = fetcher.fetch_range(
+        ...     "2023-08-01 00:00", "2023-08-01 01:00", cadence="12min",
+        ...     save_dir="saved_observations", progress=True,
+        ... )
+        >>> series = model.predict_time_series(observations)
+        """
+        start, end = _utc_datetime(start), _utc_datetime(end)
+        if end < start:
+            raise ValueError("end must be at or after start")
+        if on_error not in {"raise", "skip"}:
+            raise ValueError("on_error must be 'raise' or 'skip'")
         try:
-            if re.match(r"^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}", value):
-                raise ValueError("ambiguous numeric date; use year-month-day")
-            if value.endswith("_UTC"):
-                value = value[:-4] + "+00:00"
-            value = re.sub(r"^(\d{4})[/.](\d{2})[/.](\d{2})", r"\1-\2-\3", value)
-            value = value.replace("_", "T")
-            try:
-                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                def resolve_zone(name, offset):
-                    if name not in (None, "UTC", "GMT"):
-                        raise ValueError(f"timezone abbreviation {name!r} is ambiguous; use a numeric offset")
-                    return timezone(timedelta(seconds=offset)) if offset is not None else None
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", UnknownTimezoneWarning)
-                    first = parse(value, default=datetime(2000, 1, 1), tzinfos=resolve_zone)
-                    second = parse(value, default=datetime(2004, 2, 2), tzinfos=resolve_zone)
-                if first != second:
-                    raise ValueError("a complete year, month, and day are required")
-                value = first
-        except (ValueError, OverflowError, UnknownTimezoneWarning) as exc:
-            raise ValueError(
-                f"Invalid timestamp {original!r}: {exc}. Use a complete date such as "
-                "'2023-08-01 12:00:00', '2023/08/01', or 'August 1, 2023'; "
-                "use Z or a numeric UTC offset for timezone information."
-            ) from exc
-    if not isinstance(value, datetime):
-        raise TypeError("timestamp must be a datetime, date, numpy.datetime64, or date string")
-    if pd.isna(value):
-        raise ValueError("timestamp cannot be NaT")
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-_utc_datetime = parse_timestamp
-
-
-def _encode_observation_metadata(value):
-    """Keep metadata JSON-safe without pickling arrays or datetime objects."""
-    if isinstance(value, np.generic):
-        return _encode_observation_metadata(value.item())
-    if isinstance(value, datetime):
-        return {"__foxes_datetime__": _utc_datetime(value).isoformat()}
-    if isinstance(value, float) and not np.isfinite(value):
-        return {"__foxes_float__": str(value)}
-    if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            raise TypeError("Observation metadata dictionary keys must be strings")
-        return {key: _encode_observation_metadata(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, np.ndarray)):
-        return [_encode_observation_metadata(item) for item in value]
-    if value is pd.NA:
-        return None
-    return value
-
-
-def _decode_observation_metadata(value):
-    if set(value) == {"__foxes_datetime__"}:
-        return _utc_datetime(value["__foxes_datetime__"])
-    if set(value) == {"__foxes_float__"}:
-        return float(value["__foxes_float__"])
-    return value
-
-
-@dataclass(frozen=True)
-class ObservationMetadata:
-    """Requested UTC time, channel order, and processed AIA crop geometry.
-
-    ``timestamp`` is the requested time, not the actual exposure time of every
-    channel. ``image_shape`` is the channel-first crop shape before model
-    patching. If AIA fetching is disabled, it is the configured target shape.
-    ``padding_factor`` describes the crop's padding beyond the solar radius.
-    ``harp_bbox_expansion`` records the per-side HARP box expansion, including
-    for HARP queries deferred until plotting.
-
-    Parameters
-    ----------
-    timestamp : datetime.datetime, datetime.date, numpy.datetime64, or str
-        Complete observation date/time accepted by parse_timestamp, e.g.
-        "2023/08/01 12:00" or "2023-08-01T12:00:00Z". Naive inputs mean UTC.
-    image_shape : sequence of three positive int
-        Channel-first (C, H, W), e.g. (7, 512, 512); never (H, W, C).
-    wavelengths : sequence of int, optional
-        Channel wavelengths in Angstroms, one per channel, in array order.
-        FOXES prediction requires (94, 131, 171, 193, 211, 304, 335).
-    padding_factor : float, default 0.1
-        Nonnegative crop padding beyond the solar radius; not a pixel count.
-    harp_bbox_expansion : float, default 0.0
-        Nonnegative fraction of box width/height added on each side; 0.1 means
-        10 percent per side, not 0.1 pixels.
-    """
-
-    timestamp: datetime | str
-    image_shape: tuple[int, int, int]
-    wavelengths: tuple[int, ...] = (94, 131, 171, 193, 211, 304, 335)
-    padding_factor: float = 0.1
-    harp_bbox_expansion: float = 0.0
-
-    def __post_init__(self):
-        object.__setattr__(self, "timestamp", _utc_datetime(self.timestamp))
-        object.__setattr__(self, "image_shape", tuple(self.image_shape))
-        object.__setattr__(self, "wavelengths", tuple(self.wavelengths))
-        if len(self.image_shape) != 3 or any(
-            not isinstance(n, (int, np.integer)) or n <= 0 for n in self.image_shape
-        ):
-            raise ValueError("image_shape must contain three positive integer dimensions")
-        if len(self.wavelengths) != self.image_shape[0]:
-            raise ValueError("wavelengths must match the image's channel count")
-        if not np.isfinite(self.padding_factor) or self.padding_factor < 0:
-            raise ValueError("padding_factor must be finite and nonnegative")
-        if not np.isfinite(self.harp_bbox_expansion) or self.harp_bbox_expansion < 0:
-            raise ValueError("harp_bbox_expansion must be finite and nonnegative")
+            if isinstance(cadence, bool):
+                raise ValueError("boolean cadence")
+            step = pd.to_timedelta(cadence, unit="s") if isinstance(cadence, (int, float)) else pd.Timedelta(cadence)
+            if pd.isna(step) or step < pd.Timedelta(seconds=1) or step.value % 1_000_000_000:
+                raise ValueError("invalid duration")
+            step = step.to_pytimedelta()
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("cadence must be a positive finite duration in whole seconds, e.g. '12min'") from exc
+        timestamps = []
+        timestamp = start
+        while timestamp <= end:
+            timestamps.append(timestamp)
+            if end - timestamp < step:
+                break
+            timestamp += step
+        include_aia = self.include_aia if include_aia is None else include_aia
+        include_harps = self.include_harps if include_harps is None else include_harps
+        include_sxr = self.include_sxr if include_sxr is None else include_sxr
+        paths = {} if save_dir is None else {
+            stamp: Path(save_dir).expanduser() / f"observation_{stamp.strftime('%Y%m%dT%H%M%S.%fZ')}.npz"
+            for stamp in timestamps
+        }
+        cached = {stamp for stamp, path in paths.items() if path.exists()} if not overwrite else set()
+        missing = [stamp for stamp in timestamps if stamp not in cached]
+        if not missing:
+            samples = (sample for sample in ())
+        elif include_aia:
+            samples = self.aia_processor._iter_range(missing, on_error=on_error, progress=progress)
+        else:
+            samples = (
+                (stamp, None) for stamp in tqdm(
+                    missing, desc="Fetching observations", unit="observation", disable=not progress,
+                )
+            )
+        grid = tqdm(timestamps, desc="Loading saved observations", unit="observation", disable=not progress) if not missing else timestamps
+        pending = None
+        try:
+            for timestamp in grid:
+                #First yield any cached observation, then fetch/preprocess the next missing one.
+                if timestamp in cached:
+                    observation = Observation.load(paths[timestamp])
+                    if observation.metadata.timestamp != timestamp:
+                        raise ValueError(f"Cached observation timestamp does not match {paths[timestamp]}; use overwrite=True")
+                    if include_aia and observation.data is None:
+                        raise ValueError(f"Cached observation has no AIA data: {paths[timestamp]}; use overwrite=True")
+                    yield Observation(
+                        metadata=observation.metadata,
+                        data=observation.data if include_aia else None,
+                        harp_regions=observation.harp_regions if include_harps else None,
+                        sxr=observation.sxr if include_sxr else None,
+                    )
+                    continue
+                #Set pending to the next sample if it is not already set, then check if it matches the current timestamp.
+                if pending is None:
+                    pending = next(samples, None)
+                if pending is None or pending[0] != timestamp:
+                    continue  # A missing AIA sample was skipped; retain lookahead.
+                #Extract the preprocessed stack and fetch the supplemental observations for this timestamp.
+                _, stack = pending
+                pending = None
+                #Create observation from the preprocessed stack and supplemental sources. If any of those fail, skip this timestamp if on_error='skip'.
+                try:
+                    auxiliary = self.fetch(
+                        timestamp, include_aia=False,
+                        include_harps=include_harps, include_sxr=include_sxr,
+                    )
+                    observation = Observation(
+                        metadata=auxiliary.metadata, data=stack,
+                        harp_regions=auxiliary.harp_regions, sxr=auxiliary.sxr,
+                    )
+                except Exception as exc:
+                    if on_error == "raise":
+                        raise
+                    logger.warning("Skipping observation at %s: %s", timestamp.isoformat(), exc)
+                    continue
+                if save_dir is not None:
+                    observation.save(paths[timestamp], overwrite=overwrite)
+                yield observation
+        finally:
+            samples.close()
+            if not missing:
+                grid.close()
 
 
 @dataclass(frozen=True)
 class Observation:
-    """A processed observation, its metadata, and optional HARP/SXR data.
+    """One processed AIA stack, with its metadata and any HARP or GOES data.
 
-    ``data=None`` means AIA fetching was disabled.
-    ``harp_regions=None`` means no HARP query was requested. An empty list
-    means a query returned no usable regions, including query failures.
-    ``sxr`` is the measured GOES result from :class:`SXRProcessor`, or
-    ``None`` when disabled or unavailable.
+    You'll usually get these from :class:`ObservationFetcher`, or build
+    one from your own array with :meth:`from_array`. Pass it to
+    :meth:`FOXESModel.predict` to get a :class:`Prediction`.
 
     Parameters
     ----------
     metadata : ObservationMetadata
-        Timestamp, channel order, and geometry describing this exact array.
+        Time, channel order, and crop geometry for ``data``.
     data : array-like or None
-        Channel-first (C, H, W) data matching metadata.image_shape, or None
-        when AIA is disabled. Use from_array for finite float32 validation.
+        Channel-first ``(C, H, W)`` array matching ``metadata.image_shape``.
+        ``None`` if AIA fetching was turned off. :meth:`from_array` checks
+        the values and converts them to float32; this constructor doesn't.
     harp_regions : list of dict or None, optional
-        Each region needs HARPNUM or harpnum (integer-like) and numeric
-        top_pct, left_pct, width_pct, height_pct, in percent of the exact crop.
-        Origin is the top-left display corner; dimensions must be positive.
-        For example: {"HARPNUM": 1234, "top_pct": 10, "left_pct": 20,
-        "width_pct": 15, "height_pct": 12}. None means unqueried; [] means
-        explicitly no usable regions. Prediction does not query HARPs itself.
+        Active-region boxes. Each dict needs a ``HARPNUM`` (or ``harpnum``)
+        and ``top_pct``, ``left_pct``, ``width_pct``, and ``height_pct``,
+        given as percentages of this crop measured from its top-left corner.
+        For example ``{"HARPNUM": 1234, "top_pct": 10, "left_pct": 20,
+        "width_pct": 15, "height_pct": 12}``. ``None`` means HARPs were never
+        requested. An empty list means they were requested but nothing usable
+        came back, which includes failed queries. Prediction won't query
+        HARPs for you.
     sxr : dict or None, optional
-        Measured flux/provenance from SXRProcessor.fetch_date; xrsb_flux and
-        xrsa_flux are in W/m². This is comparison data, not a model input.
+        Measured GOES flux from :meth:`SXRProcessor.fetch`, with
+        ``xrsa_flux`` and ``xrsb_flux`` in W/m². It's only there for
+        comparison; the model never sees it. ``None`` if SXR was turned off
+        or no data was available.
     """
 
     metadata: ObservationMetadata
@@ -223,38 +364,33 @@ class Observation:
     @classmethod
     def from_array(cls, data, *, timestamp, wavelengths=(94, 131, 171, 193, 211, 304, 335),
                    padding_factor=0.1, harp_regions=None, sxr=None):
-        """Wrap an already preprocessed channel-first AIA stack, without downloading.
+        """Wrap an AIA stack you've already preprocessed.
 
-        This does not calibrate, crop, resize, or normalize the input. Match
-        training preprocessing and apply the checkpoint's normalization once.
-        Optional HARP boxes use percentages of this exact crop, measured from
-        its top-left display corner. ``None`` leaves HARPs unqueried; ``[]``
-        explicitly supplies no regions. The predictor validates model shape
-        and channel order. The returned observation owns a float32 copy.
+        The array is used as is. Nothing is downloaded, and there's no
+        calibration, cropping, resizing, or normalization, so the stack needs
+        to match the training preprocessing already. The model checks shape and channel order when you run it.
 
         Parameters
         ----------
         data : array-like
-            Finite real numeric (C, H, W) stack, usually (7, 512, 512), in channel
-            order. Nested numeric lists or a NumPy array work. Channels-last arrays
-            are not transposed automatically. The returned array is a float32 copy.
+            Finite numeric ``(C, H, W)`` stack, usually ``(7, 512, 512)``.
+            A NumPy array or nested lists both work. Channels-last arrays
+            aren't transposed for you. The observation stores a float32 copy.
         timestamp : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Required keyword. Formats accepted by parse_timestamp, e.g.
-            "2023/08/01 12:00" or "2023-08-01T12:00:00Z". Naive values mean UTC.
+            Required. Any format :func:`parse_timestamp` accepts.
         wavelengths : sequence of int, optional
-            One Angstrom wavelength per channel. Prediction requires the default
-            (94, 131, 171, 193, 211, 304, 335); one-channel snapshots cannot be predicted.
+            Wavelength of each channel in Ångströms. Prediction needs the
+            default ``(94, 131, 171, 193, 211, 304, 335)``.
         padding_factor : float, default 0.1
-            Nonnegative padding fraction matching the preprocessing crop.
+            Padding past the solar limb used when the stack was cropped.
         harp_regions : list of dict or None, optional
-            HARP identifiers and top/left/width/height percentages; see Observation.
+            Active-region boxes in percent of this crop; see :class:`Observation`.
         sxr : dict or None, optional
-            Optional measured SXR flux/provenance; see Observation.
+            Measured GOES flux; see :class:`Observation`.
 
         Returns
         -------
         Observation
-            Validated input container, ready for a shape-compatible predictor.
         """
         array = np.asarray(data)
         if array.ndim != 3 or array.dtype.kind not in "iuf" or not np.isfinite(array).all():
@@ -268,54 +404,32 @@ class Observation:
             data=array, harp_regions=harp_regions, sxr=sxr,
         )
 
-    @classmethod
-    def from_npy(cls, path, *, timestamp, **kwargs):
-        """Load one processed ``.npy`` stack; see :meth:`from_array`.
-
-        Parameters
-        ----------
-        path : str or pathlib.Path
-            Local .npy file containing exactly one numeric (C, H, W) stack, e.g.
-            "processed_aia.npy". Pickled/object arrays are disabled. Complete
-            .npz observation archives must instead use Observation.load.
-        timestamp : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Required keyword; e.g. "2023-08-01 12:00". Naive values mean UTC.
-        **kwargs
-            wavelengths, padding_factor, harp_regions, and sxr, with the same
-            types and meanings as from_array. Timestamp is not read from filename.
-
-        Returns
-        -------
-        Observation
-            Processed array plus the explicitly supplied metadata.
-        """
-        return cls.from_array(np.load(path, allow_pickle=False), timestamp=timestamp, **kwargs)
-
     def save(self, path, *, overwrite=False):
-        """Save a complete observation as a compressed NumPy ``.npz`` archive.
+        """Save the whole observation to a compressed ``.npz`` file.
 
-        Stores ``data`` (if present) and scalar JSON ``metadata``, including
-        the UTC time, crop geometry, channel order, HARP rows, and SXR data.
-        No pickle is used. Arrays retain their dtype and values. A temporary
-        file in the destination directory is published only after a complete
-        write. Existing files raise FileExistsError unless overwrite=True.
-        Returns the saved Path; load with :meth:`load`, without preprocessing
-        or normalizing again. ``from_npy`` remains for plain array-only files.
+        The file holds the array (if there is one) and the metadata: time,
+        crop geometry, channel order, HARP regions, and SXR data. Reload it
+        with :meth:`load` and it's ready to predict on, with no need to
+        preprocess or normalize it again. The data is saved exactly as is,
+        and pickle isn't used.
+
+        The file is written to a temporary name first and only moved into
+        place once it's complete, so an interrupted save won't leave a
+        half-written archive behind.
 
         Parameters
         ----------
         path : str or pathlib.Path
-            Destination ending in .npz, e.g. "saved/observation.npz". Parent
-            directories are created and a leading ~ is expanded. This is a complete
-            archive, unlike a plain .npy array.
+            Destination ending in ``.npz``. Missing parent folders are created
+            and ``~`` is expanded.
         overwrite : bool, default False
-            True atomically replaces the file; False raises FileExistsError if it
-            exists. Range iterators separately reuse existing saved observations.
+            Replace an existing file. If False and the file already exists,
+            raises ``FileExistsError``.
 
         Returns
         -------
         pathlib.Path
-            Destination of the completed archive.
+            Where the archive was written.
         """
         path = Path(path).expanduser()
         if path.suffix != ".npz":
@@ -354,19 +468,18 @@ class Observation:
 
     @classmethod
     def load(cls, path):
-        """Reload a complete archive made by :meth:`save`, with pickle disabled.
+        """Reload an observation written by :meth:`save`.
 
         Parameters
         ----------
         path : str or pathlib.Path
-            Existing complete .npz archive produced by Observation.save, e.g.
-            "saved/observation.npz". Not a raw FITS file or array-only .npy file.
+            A ``.npz`` archive from :meth:`save`. For a plain ``.npy`` array,
+            use ``Observation.from_array(np.load(path), timestamp=...)``.
 
         Returns
         -------
         Observation
-            Restored numeric array, datetime metadata, and optional HARP/SXR data.
-            No preprocessing, normalization, network access, or pickle execution.
+            The saved array and metadata, along with any HARP and SXR data.
         """
         with np.load(path, allow_pickle=False) as archive:
             payload = json.loads(archive["metadata"].item(), object_hook=_decode_observation_metadata)
@@ -382,29 +495,81 @@ class Observation:
         return cls(metadata=metadata, data=data, harp_regions=payload["harp_regions"], sxr=payload["sxr"])
 
 
-def load_observations(directory, *, progress=False):
-    """Yield saved ``.npz`` observations in filename order, without network access.
+@dataclass(frozen=True)
+class ObservationMetadata:
+    """Time, channel order, and crop geometry for one processed AIA stack.
 
-    Iterator-generated filenames sort by requested UTC time. Reads one file
-    at a time so it can be passed directly to ``model.predict_series``.
-    A missing directory or one with no .npz files raises FileNotFoundError.
-    Invalid archives raise instead of silently dropping observations.
+    The metadata travels with an observation through prediction and
+    plotting, so HARP boxes can be drawn in the right place later on.
+
+    Parameters
+    ----------
+    timestamp : datetime.datetime, datetime.date, numpy.datetime64, or str
+        The time you asked for, in any format :func:`~helio_foxes.parse_timestamp`
+        accepts. Each channel's actual exposure time can differ slightly.
+    image_shape : sequence of three positive int
+        Array shape in channel-first order, e.g. ``(7, 512, 512)``. If AIA
+        fetching was turned off, this is the shape the crop would have had.
+    wavelengths : sequence of int, optional
+        Wavelength of each channel in Ångströms, in array order. Prediction
+        needs the default ``(94, 131, 171, 193, 211, 304, 335)``.
+    padding_factor : float, default 0.1
+        How far the crop extends past the solar limb, as a fraction of the
+        solar radius. Please keep it consistent with the crop used to train the model (0.1).
+    harp_bbox_expansion : float, default 0.0
+        Fraction of each HARP box's width and height added on every side, so
+        0.1 grows each side by 10%. Stored here so HARPs fetched later, at
+        plotting time, get the same expansion.
+    """
+
+    timestamp: datetime | str
+    image_shape: tuple[int, int, int]
+    wavelengths: tuple[int, ...] = (94, 131, 171, 193, 211, 304, 335)
+    padding_factor: float = 0.1
+    harp_bbox_expansion: float = 0.0
+
+    def __post_init__(self):
+        object.__setattr__(self, "timestamp", _utc_datetime(self.timestamp))
+        object.__setattr__(self, "image_shape", tuple(self.image_shape))
+        object.__setattr__(self, "wavelengths", tuple(self.wavelengths))
+        if len(self.image_shape) != 3 or any(
+            not isinstance(n, (int, np.integer)) or n <= 0 for n in self.image_shape
+        ):
+            raise ValueError("image_shape must contain three positive integer dimensions")
+        if len(self.wavelengths) != self.image_shape[0]:
+            raise ValueError("wavelengths must match the image's channel count")
+        if not np.isfinite(self.padding_factor) or self.padding_factor < 0:
+            raise ValueError("padding_factor must be finite and nonnegative")
+        if not np.isfinite(self.harp_bbox_expansion) or self.harp_bbox_expansion < 0:
+            raise ValueError("harp_bbox_expansion must be finite and nonnegative")
+
+
+def load_observations(directory, *, progress=False):
+    """Load a folder of saved observations, one at a time.
+
+    Files are read in filename order. The names that
+    :meth:`ObservationFetcher.fetch_range` writes are timestamps,
+    so that's chronological order. Only one file is in memory at a time,
+    so you can pass the result straight to :meth:`FOXESModel.predict_time_series`::
+
+        series = model.predict_time_series(load_observations("saved_observations"))
+
+    Raises ``FileNotFoundError`` if the folder is missing or has no
+    ``.npz`` files. A broken archive raises an error rather than being
+    skipped.
 
     Parameters
     ----------
     directory : str or pathlib.Path
-        Directory of complete observation .npz archives, e.g. "saved_observations".
-        A leading ~ is expanded. Files are sorted lexicographically; the range
-        iterator's timestamp filenames therefore yield chronological order.
-        Do not mix normalization artifacts or other .npz files in this directory.
+        Folder of ``.npz`` files written by :meth:`Observation.save`. ``~``
+        is expanded. Every ``.npz`` file in the folder is loaded, so keep
+        normalization files and other archives somewhere else.
     progress : bool, default False
-        Enable a tqdm loading bar in a terminal or notebook.
+        Show a tqdm progress bar.
 
     Yields
     ------
     Observation
-        One restored observation at a time; accepts direct use as input to
-        model.predict_series(load_observations("saved_observations")).
     """
     directory = Path(directory).expanduser()
     if not directory.is_dir():
@@ -416,11 +581,1049 @@ def load_observations(directory, *, progress=False):
         yield Observation.load(path)
 
 
-class HARPProcessor:
-    """Query HARP regions and project their boxes onto an AIA image crop.
+class FOXESModel:
+    """A FOXES model loaded from a checkpoint, ready to make predictions.
 
-    ``bbox_expansion`` adds this fraction of each projected box's width and
-    height on each side, before clipping to the image. It defaults to zero.
+    Loading takes a while, so do it once and reuse the model::
+
+        model = FOXESModel()  # the current uncertainty model
+        result = model.predict(observation)
+
+    Give :meth:`predict` an :class:`Observation` to get a :class:`Prediction`,
+    or give :meth:`predict_time_series` many of them to get a
+    :class:`PredictionTimeSeries`.
+
+    Parameters
+    ----------
+    checkpoint : str or pathlib.Path, default "uncertainty"
+        A released checkpoint name or a path to a checkpoint file. The names
+        are ``"uncertainty"`` (the current model) and the legacy
+        ``"inverted-attention-mask"``, ``"localized-attention-mask"``, and
+        ``"no-attention-mask"``. A named checkpoint is downloaded the first
+        time you use it and cached in ``~/.cache/helio_foxes`` (set the
+        ``HELIO_FOXES_CACHE`` environment variable to use another folder).
+        If a file with that name exists, the file wins. ``~`` is expanded in
+        paths.
+    device : {"auto", "cpu", "cuda", "mps"}, default "auto"
+        Where to run the model. ``"auto"`` uses a GPU if one is available.
+    legacy_model : bool or None, default None
+        Turn on the approximate correction for the old deterministic
+        checkpoints: flux (full-disk and per patch) is multiplied by 0.7 for
+        times before ``legacy_cutoff``. ``None`` turns it on for the legacy
+        checkpoint names and off for everything else, including file paths,
+        so pass ``True`` if you load a legacy checkpoint from a file. Keep it
+        off for ``UncertaintyModel.ckpt`` and any model trained on the
+        corrected targets. The weights and normalization themselves aren't
+        changed.
+    legacy_cutoff : datetime.datetime or str, default "2016-11-19"
+        Predictions before this UTC time get the 0.7 factor. It's a rough
+        stand-in for the change in GOES satellites, not a fitted calibration.
+    """
+
+    def __init__(self, checkpoint="uncertainty", *, device="auto",
+                 legacy_model=None, legacy_cutoff="2016-11-19"):
+        """Load the checkpoint; see the class docstring."""
+        from forecasting.inference import load_model_from_config
+        from forecasting.calibration import LegacyCalibration
+
+        if legacy_model is None:
+            legacy_model = PRETRAINED_CHECKPOINTS.get(str(checkpoint), "").startswith("LegacyModels/")
+        self.legacy_calibration = LegacyCalibration(legacy_model, legacy_cutoff)
+        self.legacy_model = self.legacy_calibration.enabled
+        self.legacy_cutoff = self.legacy_calibration.cutoff
+        path = _resolve_checkpoint(checkpoint)
+        self.model = load_model_from_config({
+            "data": {"checkpoint_path": str(path)}, "device": device,
+            "legacy_model": legacy_model, "legacy_cutoff": self.legacy_cutoff,
+        })
+        self.device = next(self.model.parameters()).device
+        self.model_kwargs = dict(self.model.hparams["model_kwargs"])
+
+    def predict_time_series(self, observations, *, snapshot_time=None, snapshot_wavelength=193):
+        """Run the model over a sequence of observations.
+
+        Observations are processed one at a time as the iterable is consumed,
+        so this works well with generators like
+        :meth:`ObservationFetcher.fetch_range` and
+        :func:`load_observations`. The input stacks aren't kept. If any
+        prediction fails, the error is raised.
+
+        Those generators can only be looped over once. If you pass one that
+        has already been used, you get an empty series and a warning. Call
+        :meth:`ObservationFetcher.fetch_range` again, or turn it into a list
+        first if you need the observations more than once.
+
+        If you pass ``snapshot_time``, one AIA channel from the observation
+        closest to that time is kept (the earlier one wins a tie), so
+        :meth:`PredictionTimeSeries.plot_light_curves` can show it with ``show_snapshot=True``.
+
+        Parameters
+        ----------
+        observations : iterable of Observation
+            A list, tuple, or generator of observations. Wrap plain arrays
+            with :meth:`Observation.from_array` first.
+        snapshot_time : datetime.datetime, datetime.date, numpy.datetime64, str, or None
+            Time to keep a snapshot image for, in any format
+            :func:`parse_timestamp` accepts. ``None`` keeps no image.
+        snapshot_wavelength : int, default 193
+            Which AIA channel to keep, given as a wavelength in Ångströms
+            (e.g. ``171``), not as an index.
+
+        Returns
+        -------
+        PredictionTimeSeries
+        """
+        target = _utc_datetime(snapshot_time) if snapshot_time is not None else None
+        predictions = []
+        snapshot = None
+        best_distance = timedelta.max
+
+        for observation in observations:
+            if not isinstance(observation, Observation):
+                raise TypeError("predict_time_series expects Observation instances")
+            if target is not None and snapshot_wavelength not in observation.metadata.wavelengths:
+                raise ValueError(f"Snapshot wavelength {snapshot_wavelength} Å is absent from the observation")
+            prediction = self.predict(observation)
+            predictions.append(prediction)
+            if target is None:
+                continue
+
+            # Keep this image only if it is closer, or earlier on an equal distance.
+            timestamp = _utc_datetime(observation.metadata.timestamp)
+            distance = abs(timestamp - target)
+            if (snapshot is None or distance < best_distance
+                    or (distance == best_distance and timestamp < _utc_datetime(snapshot.metadata.timestamp))):
+                if observation.data is None:
+                    raise ValueError("AIA data is required to retain a snapshot")
+                channel = observation.metadata.wavelengths.index(snapshot_wavelength)
+                snapshot = _make_aia_snapshot(observation.data[channel], prediction, snapshot_wavelength)
+                best_distance = distance
+
+        if not predictions:
+            warnings.warn(
+                "predict_time_series got no observations. Generators from fetch_range "
+                "and load_observations can only be used once; call them again for a "
+                "new pass.", stacklevel=2,
+            )
+        return PredictionTimeSeries(tuple(predictions), snapshot=snapshot)
+
+    def predict(self, observation):
+        """Predict the full-disk flux and per-patch flux map for one observation.
+
+        Parameters
+        ----------
+        observation : Observation
+            From :class:`ObservationFetcher`, :func:`load_observations`, or
+            :meth:`Observation.from_array` (for your own preprocessed arrays).
+            Its AIA stack has to be ``(7, H, W)`` with channels in the order
+            94, 131, 171, 193, 211, 304, 335 Å, and ``H`` and ``W`` have to
+            match the checkpoint (512 × 512 for the current one). Its
+            metadata, HARPs, and GOES data are carried over to the result.
+
+        Returns
+        -------
+        Prediction
+
+        Raises
+        ------
+        TypeError
+            If ``observation`` isn't an :class:`Observation`.
+        ValueError
+            If the observation has no AIA data, the shape or channel order
+            doesn't match the checkpoint, or the array has non-finite values.
+        """
+        import torch
+        from forecasting.inference import uncertainty_from_prediction
+
+        if not isinstance(observation, Observation):
+            raise TypeError(
+                "predict expects an Observation; wrap a plain array with "
+                "Observation.from_array(array, timestamp=...)"
+            )
+        if observation.data is None:
+            raise ValueError("Observation has no AIA data; fetch with include_aia=True before prediction")
+        metadata = observation.metadata
+        array = np.asarray(observation.data)
+        patch_size = int(self.model_kwargs["patch_size"])
+        patch_count = int(self.model_kwargs["num_patches"])
+        grid = int(np.sqrt(patch_count))
+        channels = int(self.model_kwargs["num_channels"])
+        expected = (channels, grid * patch_size, grid * patch_size)
+        if array.shape != expected:
+            raise ValueError(f"Expected processed AIA shape {expected}, got {array.shape}")
+        if not np.isfinite(array).all():
+            raise ValueError("AIA image contains non-finite values")
+        if metadata.wavelengths != AIAProcessor.WAVELENGTHS:
+            raise ValueError("Observation wavelengths must be in FOXES AIA channel order")
+        scale = self.legacy_calibration.factor(metadata.timestamp)
+        tensor = torch.as_tensor(np.array(array, dtype=np.float32, copy=True))
+        tensor = tensor.permute(1, 2, 0).unsqueeze(0).to(self.device)
+        with torch.inference_mode():
+            outputs = self.model(tensor, return_attention=False)
+            if getattr(self.model, "predicts_uncertainty", False):
+                flux, variance, patches, patch_variance = outputs
+                intervals_raw = uncertainty_from_prediction(
+                    flux, variance, self.model.sxr_norm,
+                )
+                intervals = {
+                    level: (
+                        float(intervals_raw[f"lower_{level}"].item()),
+                        float(intervals_raw[f"upper_{level}"].item()),
+                    ) for level in ("68", "95")
+                }
+                patch_uncertainty = torch.sqrt(
+                    patch_variance.clamp_min(0)
+                ).reshape(grid, grid).detach().cpu().numpy()
+            else:
+                flux, patches = outputs
+                intervals = None
+                patch_uncertainty = None
+        flux_map = patches.reshape(grid, grid).detach().cpu().numpy()
+        if scale != 1.0:
+            flux_map = flux_map * scale
+        return Prediction(
+            metadata=metadata,
+            flux=float(flux.item()) * scale, flux_map=flux_map,
+            intervals=intervals, patch_uncertainty_map=patch_uncertainty,
+            harp_regions=observation.harp_regions, sxr=observation.sxr,
+            legacy_model=self.legacy_model, flux_scale_factor=scale,
+        )
+
+
+@dataclass(frozen=True)
+class Prediction:
+    """What the model predicts for one AIA stack.
+
+    Returned by :meth:`FOXESModel.predict`. Read the numbers from the
+    attributes below, or draw them with :meth:`plot_flux_map` and
+    :meth:`plot_uncertainty_map`. ``flux`` is the prediction and
+    ``observed_flux`` is the measured GOES value at the same time. All fluxes
+    are in W/m².
+
+    A note on the uncertainties: the Gaussian checkpoint predicts a variance
+    for the full-disk flux and splits it across the patches.
+    ``patch_uncertainty_map`` and each HARP's ``flux_sum_uncertainty`` show
+    that split. There are no X-ray measurements of individual regions to
+    check them against, so read them as "where the model's uncertainty comes
+    from" rather than as tested error bars for each region.
+
+    Attributes
+    ----------
+    metadata : ObservationMetadata or None
+        Metadata from the input observation, kept so HARP boxes can be drawn
+        later. The input array itself isn't kept.
+    flux : float
+        Predicted full-disk soft X-ray flux.
+    flux_map : numpy.ndarray
+        2D map of each patch's contribution to ``flux``. It's on the
+        model's patch grid (64 × 64 for the current checkpoint), not at
+        image resolution.
+    intervals : dict or None
+        ``{"68": (low, high), "95": (low, high)}`` prediction intervals.
+        ``None`` for deterministic checkpoints.
+    patch_uncertainty_map : numpy.ndarray or None
+        Each patch's share of the full-disk uncertainty, as a standard
+        deviation (see the note above). ``None`` for deterministic
+        checkpoints.
+    harp_regions : list of dict or None
+        One dict per active region. Each has ``harpnum``, the box position
+        (``top_pct``, ``left_pct``, ``width_pct``, ``height_pct``), and
+        ``flux_sum``, the total of the positive patch contributions whose
+        centers fall inside the box. Boxes can overlap, so a patch can count
+        toward more than one region. ``flux_sum_uncertainty`` is
+        ``sqrt(sum(patch_uncertainty_map**2))`` over the same patches, or
+        ``None`` for deterministic checkpoints. The original JSOC columns,
+        including the heliographic longitude and latitude bounds, are kept
+        too. ``None`` means HARPs weren't fetched; an empty list means none
+        were usable.
+    observed_flux : float or None
+        Measured GOES XRS-B flux, for comparison with ``flux``. ``None`` if
+        there's no GOES data for this time.
+    sxr : dict or None
+        All the GOES data carried over from the observation, including
+        ``xrsa_flux`` and the satellite used.
+    legacy_model : bool
+        Whether the legacy correction was turned on (see :class:`FOXESModel`).
+    flux_scale_factor : float
+        Factor that was applied to ``flux`` and ``flux_map``: 0.7 for legacy
+        predictions before the cutoff date, otherwise 1.0. The measured
+        ``sxr`` values are never scaled.
+    """
+
+    metadata: ObservationMetadata | None = field(default=None, kw_only=True)
+    flux: float
+    flux_map: np.ndarray
+    intervals: dict[str, tuple[float, float]] | None = None
+    patch_uncertainty_map: np.ndarray | None = None
+    harp_regions: list[dict] | None = None
+    sxr: dict | None = None
+    legacy_model: bool = field(default=False, kw_only=True)
+    flux_scale_factor: float = field(default=1.0, kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "harp_regions", _harp_region_fluxes(
+                self.flux_map, self.harp_regions, self.patch_uncertainty_map,
+            ),
+        )
+
+    @property
+    def observed_flux(self):
+        """Measured GOES XRS-B flux in W/m², or ``None`` without GOES data."""
+        return self.sxr.get("xrsb_flux") if self.sxr else None
+
+    def plot_flux_map(self, *, ax=None, cmap="inferno", vmin=None, vmax=None,
+                      show_harp_boxes=True, harp_regions=None,
+                      min_harp_flux=1e-7, harp_label_fontsize=6,
+                      show_harp_uncertainty=True, harp_label_offsets=None,
+                      harp_label_max_shift=80, aia_image=None, harp_colors=None):
+        """Plot the per-patch flux map on a log color scale.
+
+        The title shows the predicted full-disk flux (with its uncertainty, for
+        Gaussian checkpoints) and the measured GOES XRS-B flux if it's
+        available. A plot with ``aia_image`` set gets no title. Patches with
+        zero or negative flux are left blank.
+
+        **HARP boxes.** If the prediction has HARP regions, each one is
+        outlined and labeled with its HARP number and summed flux (and, if
+        available, ``±`` its uncertainty). Colors go by flux rank, brightest
+        first. Labels start just outside a box corner, on the side facing the
+        image center. If labels overlap, the other corners are tried and then
+        small nudges, up to ``harp_label_max_shift``. Any label that moves
+        gets a connector line back to its box. Placement is worked out once
+        when you plot, so replot if you resize the figure a lot. On a crowded
+        map, raise ``min_harp_flux`` or set ``harp_label_offsets`` by hand.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes to draw on. A new figure is created if omitted.
+        cmap : str or matplotlib.colors.Colormap, default "inferno"
+            Colormap name or instance.
+        vmin, vmax : float or None, optional
+            Color-scale limits in W/m² (must be positive). Default to the
+            smallest and largest positive values in the map.
+        show_harp_boxes : bool, default True
+            Draw and label the HARP boxes, as described above. Nothing is
+            drawn if there are no regions; plotting never queries JSOC.
+        harp_regions : list of dict or None, optional
+            Regions to draw instead of the prediction's own, for example from
+            :meth:`HARPProcessor.fetch`. Hand-made boxes need ``HARPNUM``
+            (or ``harpnum``) and ``top_pct``, ``left_pct``, ``width_pct``,
+            ``height_pct`` in percent of the crop, from its top-left corner.
+        min_harp_flux : float, default 1e-7
+            Hide regions whose summed flux is below this, in W/m². The
+            prediction itself is unchanged.
+        harp_label_fontsize : float, default 6
+            Label font size in points.
+        show_harp_uncertainty : bool, default True
+            Add the ``±`` uncertainty line to labels when the prediction has
+            patch uncertainties.
+        harp_label_offsets : dict or None, optional
+            ``{harpnum: (dx, dy)}`` starting offsets in points from the chosen
+            box corner; positive ``dx`` moves right and positive ``dy`` moves up.
+            Labels placed this way always get a connector.
+        harp_label_max_shift : float, default 80
+            How far, in points, a label can be nudged automatically. Set it to
+            0 to keep every label at its starting corner. Nudged labels stay
+            outside their box and inside the map. A label that can't find a
+            clear spot within this distance stays where it started.
+        aia_image : array-like or None, optional
+            A processed 2D AIA channel to show instead of the flux map, with
+            the same HARP boxes and labels. It has to cover exactly the same
+            crop the prediction used. The labels still show predicted flux, not
+            AIA intensity. The image is shown with a linear 1–99 percentile
+            stretch (or ``vmin``/``vmax``), pixel axes, and no colorbar.
+            ``cmap="gray"`` usually looks best.
+        harp_colors : dict or None, optional
+            ``{harpnum: color}`` to set specific region colors, e.g. to match
+            another plot. Any matplotlib color works: ``"tab:blue"``,
+            ``"#56B4E9"``, or ``(0.2, 0.5, 0.8)``. Other regions keep their
+            rank colors.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The map axes. Flux maps also get a colorbar.
+
+        Raises
+        ------
+        ValueError
+            If the map isn't a finite 2D array, has no positive values, or the
+            color limits are invalid.
+        """
+        from matplotlib import pyplot as plt
+        from matplotlib import patheffects
+        from matplotlib.colors import LogNorm
+        from matplotlib.patches import Rectangle
+
+        flux_map = np.asarray(self.flux_map)
+        if flux_map.ndim != 2 or not np.isfinite(flux_map).all():
+            raise ValueError("flux_map must be a finite 2D array")
+        positive = flux_map[flux_map > 0]
+        if positive.size == 0:
+            raise ValueError("flux_map must contain positive contributions")
+        if aia_image is None:
+            low, high = _log_limits(positive, vmin, vmax)
+        else:
+            aia_image = np.asarray(aia_image)
+            if aia_image.ndim != 2 or not np.isfinite(aia_image).all() or aia_image.size == 0:
+                raise ValueError("aia_image must be a finite nonempty 2D array of the prediction crop")
+            percentiles = np.percentile(aia_image, [1, 99])
+            low = float(percentiles[0]) if vmin is None else float(vmin)
+            high = float(percentiles[1]) if vmax is None else float(vmax)
+            if low == high and vmin is None and vmax is None:
+                low, high = low - 0.5, high + 0.5
+            if not np.isfinite([low, high]).all() or low >= high:
+                raise ValueError("AIA color limits must be finite with vmin < vmax")
+        if not np.isfinite(min_harp_flux) or min_harp_flux < 0:
+            raise ValueError("min_harp_flux must be finite and nonnegative (W/m²)")
+        if not np.isfinite(harp_label_fontsize) or harp_label_fontsize <= 0:
+            raise ValueError("harp_label_fontsize must be finite and positive")
+        if not np.isfinite(harp_label_max_shift) or harp_label_max_shift < 0:
+            raise ValueError("harp_label_max_shift must be finite and nonnegative")
+        if harp_regions is None:
+            harp_regions = self.harp_regions
+        regions = sorted(
+            (region for region in _harp_region_fluxes(
+                flux_map, harp_regions,
+                self.patch_uncertainty_map,
+            )
+             if region["flux_sum"] >= min_harp_flux),
+            key=lambda region: (-region["flux_sum"], region["harpnum"]),
+        ) if show_harp_boxes and harp_regions else []
+        if ax is None:
+            _, ax = plt.subplots()
+        if aia_image is None:
+            artist = ax.imshow(
+                np.ma.masked_less_equal(flux_map, 0), origin="lower", cmap=cmap,
+                norm=LogNorm(vmin=low, vmax=high),
+            )
+            ax.set(xlabel="X (Patches)", ylabel="Y (Patches)")
+            ax.figure.colorbar(artist, ax=ax, label="Flux contribution (W m$^{-2}$)")
+        else:
+            ax.imshow(aia_image, origin="lower", cmap=cmap, vmin=low, vmax=high)
+            ax.set(xlabel="X (AIA pixels)", ylabel="Y (AIA pixels)")
+        if aia_image is None:
+            title = []
+            observed = self.observed_flux
+            if observed is not None and np.isfinite(observed):
+                title.append(f"Observed SXR-B: {observed:.2e} W/m²")
+            if self.flux is not None and np.isfinite(self.flux):
+                predicted = f"Predicted FOXES: {self.flux:.2e}"
+                if self.patch_uncertainty_map is not None:
+                    uncertainty = np.sqrt(np.sum(np.square(self.patch_uncertainty_map)))
+                    if np.isfinite(uncertainty):
+                        predicted += f" ± {uncertainty:.2e}"
+                title.append(f"{predicted} W/m²")
+            ax.set_title("\n".join(title))
+        if regions:
+            rows, cols = flux_map.shape if aia_image is None else aia_image.shape
+            colors = [(harp_colors or {}).get(region["harpnum"], _harp_rank_color(rank))
+                      for rank, region in enumerate(regions)]
+            offsets = harp_label_offsets or {}
+            # Render once so label sizes can be measured in screen pixels.
+            ax.figure.canvas.draw()
+            renderer = ax.figure._get_renderer()
+            map_bounds = ax.get_window_extent(renderer)
+            occupied = []
+            occupied_regions = []
+            for rank, (region, color) in enumerate(zip(regions, colors)):
+                top, left, width, height = (
+                    float(region[key]) for key in
+                    ("top_pct", "left_pct", "width_pct", "height_pct")
+                )
+                x = -0.5 + left / 100 * cols
+                y = -0.5 + (100 - top - height) / 100 * rows
+                box_width = width / 100 * cols
+                box_height = height / 100 * rows
+                outline = Rectangle(
+                    (x, y), box_width, box_height,
+                    fill=False, edgecolor=color, linewidth=1.8,
+                )
+                outline.set_path_effects([
+                    patheffects.Stroke(linewidth=3.5, foreground="black"),
+                    patheffects.Normal(),
+                ])
+                ax.add_patch(outline)
+                region_bounds = outline.get_window_extent(renderer)
+                occupied_regions.append(region_bounds)
+                text = f'#{region["harpnum"]}\n{region["flux_sum"]:.2e}'
+                if show_harp_uncertainty and region["flux_sum_uncertainty"] is not None:
+                    text += f'\n± {region["flux_sum_uncertainty"]:.2e}'
+                # Text extends diagonally outward from each corner.
+                horizontal = [(x, "right", -3), (x + box_width, "left", 3)]
+                vertical = [(y, "top", -3), (y + box_height, "bottom", 3)]
+                if left + width / 2 < 50:
+                    horizontal.reverse()
+                if top + height / 2 > 50:
+                    vertical.reverse()
+                placements = [((cx, cy), (dx, dy), ha, va)
+                              for cy, va, dy in vertical for cx, ha, dx in horizontal]
+                harpnum = region["harpnum"]
+                corner, inset, ha, va = placements[0]
+                if harpnum in offsets:
+                    placements = [(corner, offsets[harpnum], ha, va)]
+                elif harp_label_max_shift == 0:
+                    placements = placements[:1]
+                label = ax.annotate(
+                    text, xy=corner, xytext=offsets.get(harpnum, inset), textcoords="offset points",
+                    ha=ha, va=va,
+                    color=color, fontsize=harp_label_fontsize, fontweight="bold",
+                    zorder=3 + len(regions) - rank,  # Stronger labels draw above later connectors.
+                    bbox={"facecolor": "black", "alpha": .5, "edgecolor": "none", "pad": 1},
+                    arrowprops={"arrowstyle": "-", "color": color},
+                )
+                # Try the four corners first, then small nudges from the preferred corner.
+                dx, dy = placements[0][1]
+                for step in range(4, int(harp_label_max_shift) + 1, 4):
+                    placements.extend((corner, position, ha, va) for position in
+                                      [(dx, dy + step), (dx, dy - step),
+                                       (dx + step, dy), (dx - step, dy)])
+                chosen = placements[0]  # Retain the start if no nearby space is free.
+                for anchor, position, horizontal_align, vertical_align in placements:
+                    label.xy = anchor
+                    label.set(position=position, ha=horizontal_align, va=vertical_align)
+                    label.update_positions(renderer)
+                    label.update_bbox_position_size(renderer)
+                    bounds = label.get_bbox_patch().get_window_extent(renderer).padded(2)
+                    within_map = (map_bounds.contains(*bounds.p0) and map_bounds.contains(*bounds.p1))
+                    if not within_map and harpnum not in offsets:
+                        continue
+                    outside_x = bounds.x1 < region_bounds.x0 or bounds.x0 > region_bounds.x1
+                    outside_y = bounds.y1 < region_bounds.y0 or bounds.y0 > region_bounds.y1
+                    if not (outside_x and outside_y) and harpnum not in offsets:
+                        continue
+                    if harpnum not in offsets and any(bounds.overlaps(box) for box in occupied_regions):
+                        continue
+                    if not any(bounds.overlaps(other) for other in occupied):
+                        chosen = (anchor, position, horizontal_align, vertical_align)
+                        break
+                label.xy = chosen[0]
+                label.set(position=chosen[1], ha=chosen[2], va=chosen[3])
+                label.update_positions(renderer)
+                label.update_bbox_position_size(renderer)
+                bounds = label.get_bbox_patch().get_window_extent(renderer).padded(2)
+                occupied.append(bounds)
+                shifted = chosen != placements[0]
+                label.arrow_patch.set_visible(shifted or harpnum in offsets)
+        return ax
+
+    def plot_uncertainty_map(self, *, ax=None, cmap="magma", vmin=None, vmax=None):
+        """Plot patch uncertainty contributions with a logarithmic color scale.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes to draw on. A new figure and axes are created if omitted.
+        cmap : str or matplotlib.colors.Colormap, default "magma"
+            Colormap name such as "magma", or a Colormap instance.
+        vmin, vmax : float or None, optional
+            Positive limits for the logarithmic color scale in W/m². By default,
+            use the smallest and largest positive values in the map.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            Axes containing the map. Its figure also has an uncertainty colorbar.
+
+        Raises
+        ------
+        ValueError
+            If the prediction has no uncertainty map (deterministic
+            checkpoints), the map has no positive values, or the color limits
+            are invalid. Nonpositive cells are masked.
+        """
+        from matplotlib import pyplot as plt
+        from matplotlib.colors import LogNorm
+
+        if self.patch_uncertainty_map is None:
+            raise ValueError("This prediction has no patch uncertainty map (deterministic checkpoint)")
+        uncertainty_map = np.asarray(self.patch_uncertainty_map)
+        if uncertainty_map.ndim != 2 or not np.isfinite(uncertainty_map).all():
+            raise ValueError("uncertainty_map must be a finite 2D array")
+        positive = uncertainty_map[uncertainty_map > 0]
+        if positive.size == 0:
+            raise ValueError("uncertainty_map must contain positive contributions")
+        low, high = _log_limits(positive, vmin, vmax)
+        if ax is None:
+            _, ax = plt.subplots()
+        artist = ax.imshow(
+            np.ma.masked_less_equal(uncertainty_map, 0),
+            origin="lower", cmap=cmap,
+            norm=LogNorm(vmin=low, vmax=high)
+        )
+        ax.set(xlabel="X (Patches)", ylabel="Y (Patches)")
+        ax.figure.colorbar(artist, ax=ax, label="Patch uncertainty contribution (W m$^{-2}$)")
+        return ax
+
+
+@dataclass(frozen=True)
+class PredictionTimeSeries:
+    """A set of predictions over time, for light curves.
+
+    You'll normally get one from :meth:`FOXESModel.predict_time_series`. Times are
+    the requested UTC times. Any time that was skipped during download just
+    won't appear. When a HARP isn't present at some time, its light curve
+    has a NaN there rather than a zero. Regional fluxes are computed as in
+    :class:`Prediction`.
+
+    Parameters
+    ----------
+    predictions : iterable of Prediction
+        Predictions with metadata and no two sharing a timestamp. They're
+        sorted by time and stored as a tuple.
+    snapshot : Observation or None, optional
+        A single AIA channel, shape ``(1, H, W)``, at one of the prediction
+        times. It's only used for the image panel in :meth:`plot_light_curves`.
+    """
+
+    predictions: tuple[Prediction, ...]
+    snapshot: Observation | None = field(default=None, kw_only=True)
+
+    @staticmethod
+    def _timestamp(prediction):
+        if prediction.metadata is None:
+            raise ValueError("Every series prediction needs timestamp metadata")
+        return prediction.metadata.timestamp
+
+    def __post_init__(self):
+        #Initialize and validate the series.
+        predictions = tuple(self.predictions)
+        predictions = tuple(sorted(predictions, key=self._timestamp))
+        times = [self._timestamp(p) for p in predictions]
+        if len(set(times)) != len(times):
+            raise ValueError("Series predictions must have unique timestamps")
+        if self.snapshot is not None:
+            snapshot = self.snapshot
+            if snapshot.data is None or snapshot.data.shape[0] != 1:
+                raise ValueError("Series snapshot must contain one processed AIA channel")
+            if snapshot.metadata.timestamp not in times:
+                raise ValueError("Snapshot timestamp must match a series prediction")
+        object.__setattr__(self, "predictions", predictions)
+
+    def full_disk_light_curve(self):
+        """Return the full-disk light curve as a DataFrame indexed by UTC time.
+
+        Columns are ``flux`` (predicted) and ``observed_flux`` (measured
+        GOES XRS-B, if available), both in W/m². Legacy series also get
+        ``legacy_model`` and ``flux_scale_factor`` columns.
+        """
+        rows = [{
+            "timestamp": self._timestamp(p), "flux": p.flux,
+            "observed_flux": p.observed_flux,
+        } for p in self.predictions]
+        frame = pd.DataFrame(rows, columns=["timestamp", "flux", "observed_flux"])
+        if any(p.legacy_model for p in self.predictions):
+            frame["legacy_model"] = [p.legacy_model for p in self.predictions]
+            frame["flux_scale_factor"] = [p.flux_scale_factor for p in self.predictions]
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        return frame.set_index("timestamp")
+
+    def harp_light_curves(self):
+        """Return one light curve per active region, as ``{harpnum: DataFrame}``.
+
+        Each DataFrame is indexed by UTC time and covers every prediction in
+        the series, with ``flux_sum`` and ``flux_sum_uncertainty`` columns in
+        W/m². If a region isn't present at a time, or there's no uncertainty,
+        that value is NaN. Nothing is interpolated or filled with zeros.
+        """
+        #Get the index of the predictions (based on their timestamps)
+        index = self.full_disk_light_curve().index
+        #For each prediction, get the harpnum from its harp_regions (if any), and collect all unique harpnums across the series.
+        ids = sorted({r["harpnum"] for p in self.predictions for r in p.harp_regions or []})
+
+        #For the available harps, loop through each num and collect the flux_sum and flux_sum_uncertainty for each prediction, creating a DataFrame for each harpnum.
+        curves = {}
+        for harpnum in ids:
+            rows = []
+            for prediction in self.predictions:
+                region = next((r for r in prediction.harp_regions or [] if r["harpnum"] == harpnum), {})
+                rows.append([region.get("flux_sum", np.nan), region.get("flux_sum_uncertainty", np.nan)])
+            curves[harpnum] = pd.DataFrame(
+                rows, index=index, columns=["flux_sum", "flux_sum_uncertainty"], dtype=float,
+            )
+        return curves
+
+    @staticmethod
+    def _select_harps(curves, harpnums, min_peak_flux):
+        """Validate requested IDs and keep only curves reaching the peak threshold."""
+        try:
+            if not np.isscalar(min_peak_flux):
+                raise ValueError("not scalar")
+            threshold = float(min_peak_flux)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("min_peak_flux must be finite and nonnegative (W/m²)") from exc
+        if not np.isfinite(threshold) or threshold < 0:
+            raise ValueError("min_peak_flux must be finite and nonnegative (W/m²)")
+        requested = list(curves) if harpnums is None else list(harpnums)
+        unknown = set(requested) - curves.keys()
+        if unknown:
+            raise ValueError(f"No predictions for HARP numbers {sorted(unknown)}")
+        selected = []
+        for harpnum in requested:
+            flux = _positive_flux(curves[harpnum]["flux_sum"])
+            if np.isfinite(flux).any() and np.nanmax(flux) >= threshold:
+                selected.append(harpnum)
+        return selected
+
+    @staticmethod
+    def _plot_axes(ax, snapshot_ax, aia_ax, show_snapshot):
+        """Create a curve-only or three-panel layout, or validate supplied axes."""
+        import matplotlib.pyplot as plt
+
+        if not show_snapshot:
+            if ax is None:
+                _, ax = plt.subplots(layout="constrained")
+            return ax, snapshot_ax, aia_ax
+        if ax is not None and (snapshot_ax is None or aia_ax is None):
+            raise ValueError("Supply snapshot_ax and aia_ax with ax, or omit ax to create all three panels")
+        if snapshot_ax is not None or aia_ax is not None:
+            if (ax is None or snapshot_ax is None or aia_ax is None
+                    or len({id(ax), id(snapshot_ax), id(aia_ax)}) != 3
+                    or snapshot_ax.figure is not ax.figure or aia_ax.figure is not ax.figure):
+                raise ValueError("ax, snapshot_ax, and aia_ax must be different Axes in the same figure")
+        if ax is None:
+            _, (ax, snapshot_ax, aia_ax) = plt.subplots(
+                1, 3, figsize=(24, 8), gridspec_kw={"width_ratios": [1.5, 1, 1]},
+                layout="constrained",
+            )
+        return ax, snapshot_ax, aia_ax
+
+    def plot_light_curves(self, *, harpnums=None, ax=None, show_full_disk=False, show_observed=False,
+             show_snapshot=False, snapshot_ax=None, aia_ax=None,
+             show_uncertainty=True, min_peak_flux=0.0, legend="auto"):
+        """Plot HARP light curves, optionally with the full-disk total and GOES.
+
+        Every region in the series is plotted by default. The flux axis is
+        logarithmic, so missing, zero, or negative values leave a gap in the
+        line rather than being clipped to the bottom of the plot. Each HARP
+        keeps the same color even when you filter regions out.
+
+        **Uncertainty.** For Gaussian checkpoints, each region gets a shaded
+        band of ± one ``flux_sum_uncertainty``. A band whose lower edge would
+        fall at or below zero is left out. Deterministic checkpoints get no
+        bands. As in :class:`Prediction`, these are the model's uncertainty
+        split across regions, not tested regional error bars.
+
+        **Snapshot panels.** With ``show_snapshot=True``, two panels are added
+        to the right of the curves: the flux map at the snapshot time (from
+        :meth:`Prediction.plot_flux_map`, with HARP boxes in the same colors
+        as the curves) and the plain AIA image. A dashed line marks the
+        snapshot time on the curves. You need to have called
+        ``predict_time_series(..., snapshot_time=...)`` first. The snapshot is
+        the observation closest to that time, with the earlier one winning a
+        tie.
+        Only regions that are selected and present at that time get boxes.
+
+        Parameters
+        ----------
+        harpnums : iterable of int or None, optional
+            Which HARPs to plot, e.g. ``[1234, 5678]``. ``None`` plots all of
+            them, and ``[]`` plots none (useful if you only want the totals).
+            Wrap a single number in a list. Unknown numbers raise
+            ``ValueError``.
+        ax : matplotlib.axes.Axes or None, optional
+            Axes for the light curves. If you're also showing the snapshot
+            and want to supply your own axes, pass all three (``ax``,
+            ``snapshot_ax``, ``aia_ax``), all different and in the same
+            figure. Otherwise leave them out and the layout is made for you.
+        show_full_disk, show_observed : bool, default False
+            Add the predicted full-disk flux and the measured GOES XRS-B flux
+            for comparison. ``min_peak_flux`` doesn't hide these.
+        show_snapshot : bool, default False
+            Add the flux map and AIA image panels described above.
+        snapshot_ax, aia_ax : matplotlib.axes.Axes or None, optional
+            Axes for the flux map and AIA image. See ``ax``.
+        show_uncertainty : bool, default True
+            Draw the uncertainty bands, and the ± lines on the snapshot's HARP
+            labels, where the checkpoint provides them.
+        min_peak_flux : float, default 0.0
+            Hide HARPs whose highest flux over the whole series (not just at
+            the snapshot) is below this value in W/m², e.g. ``1e-7``. Regions
+            that never have a positive flux are always hidden. This applies to
+            the snapshot labels as well, but it only affects the plot; the
+            data in the series is unchanged.
+        legend : {"auto", "full", "compact", "none"}, default "auto"
+            Legend placed below the curves. ``"full"`` lists every region.
+            ``"compact"`` shows a region count plus the comparison-line and
+            marker keys, which is handy when the snapshot already labels the
+            HARPs. ``"auto"`` picks compact when the snapshot is shown and full
+            otherwise.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The light-curve axes. The snapshot panels, if any, are in the
+            same figure.
+
+        Examples
+        --------
+        >>> ax = series.plot_light_curves(show_snapshot=True,
+        ...                  min_peak_flux=1e-7, legend="compact")
+        """
+        if legend not in {"auto", "full", "compact", "none"}:
+            raise ValueError("legend must be 'auto', 'full', 'compact', or 'none'")
+        curves = self.harp_light_curves()
+        selected = self._select_harps(curves, harpnums, min_peak_flux)
+        snapshot = self.snapshot if show_snapshot else None
+        if show_snapshot and snapshot is None:
+            raise ValueError("No AIA snapshot retained; use predict_time_series(..., snapshot_time=...)")
+        #Creates subplots for the curves, flux map, and AIA image if show_snapshot is True. If ax is supplied, snapshot_ax and aia_ax must also be supplied and distinct. 
+        ax, snapshot_ax, aia_ax = self._plot_axes(ax, snapshot_ax, aia_ax, show_snapshot)
+
+        # Assign colors before filtering so each HARP keeps its identity.
+        colors = {harpnum: _harp_rank_color(rank) for rank, harpnum in enumerate(curves)}
+        self._plot_curves(ax, curves, selected, colors, show_full_disk, show_observed, show_uncertainty)
+        if snapshot is not None:
+            self._plot_snapshot_panels(ax, snapshot_ax, aia_ax, snapshot, selected, colors, show_uncertainty)
+        self._plot_legend(ax, selected, legend, show_snapshot)
+        return ax
+
+    def _plot_curves(self, ax, curves, selected, colors, show_full_disk, show_observed, show_uncertainty):
+        """Draw log-safe regional/comparison curves, uncertainty, and UTC axes."""
+        has_uncertainty = False
+        ax.set_yscale("log")
+        for harpnum in selected:
+            curve = curves[harpnum]
+            flux = _positive_flux(curve["flux_sum"])
+            ax.plot(curve.index, flux, color=colors[harpnum], marker=".", markersize=2.5, label=f"HARP {harpnum}")
+            if show_uncertainty:
+                sigma = curve["flux_sum_uncertainty"].to_numpy(dtype=float)
+                lower, upper = flux - sigma, flux + sigma
+                valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & (lower > 0) & np.isfinite(upper)
+                if valid.any():
+                    ax.fill_between(
+                        curve.index, np.where(valid, lower, np.nan), np.where(valid, upper, np.nan),
+                        where=valid, color=colors[harpnum], alpha=0.18, linewidth=0,
+                    )
+                    has_uncertainty = True
+        totals = self.full_disk_light_curve()
+        if show_full_disk:
+            ax.plot(totals.index, _positive_flux(totals["flux"]), color="black", marker=".", markersize=2.5, label="FOXES full disk")
+        if show_observed:
+            ax.plot(totals.index, _positive_flux(totals["observed_flux"]), color="0.5", linestyle="--", marker=".", markersize=2.5, label="Observed GOES XRS-B")
+        ax.set(xlabel="Requested time (UTC)", ylabel="SXR flux (W/m²)")
+        from matplotlib.dates import AutoDateLocator, ConciseDateFormatter, date2num
+        locator = AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(ConciseDateFormatter(locator, tz=timezone.utc))
+        #Setting limits for the x-axis based on the first and last timestamps in the totals DataFrame. If the start and end are the same, it expands the range by 30 seconds on each side to avoid a zero-width axis.
+        if len(totals.index):
+            start, end = (float(date2num(stamp.to_pydatetime())) for stamp in (totals.index[0], totals.index[-1]))
+            if start == end:
+                start, end = start - 30 / 86400, end + 30 / 86400
+            ax.set_xlim(start, end)
+        if has_uncertainty:
+            ax.set_title(r"HARP light curves (shading: $\pm1\sigma$ variance attribution)")
+
+    def _plot_snapshot_panels(self, ax, snapshot_ax, aia_ax, snapshot, selected, colors, show_uncertainty):
+        """Reuse the standard flux map beside its matching plain AIA image."""
+        from matplotlib.dates import date2num
+
+        assert snapshot is not None and snapshot.data is not None
+        assert snapshot_ax is not None and aia_ax is not None
+        prediction = next(p for p in self.predictions if self._timestamp(p) == snapshot.metadata.timestamp)
+        regions = [r for r in prediction.harp_regions or []
+                   if r["harpnum"] in selected and np.isfinite(r["flux_sum"]) and r["flux_sum"] > 0]
+        aia_ax.set_title(
+            f"AIA {snapshot.metadata.wavelengths[0]} Å\n"
+            f"{snapshot.metadata.timestamp:%Y-%m-%d %H:%M:%S} UTC"
+        )
+        ax.axvline(float(date2num(_utc_datetime(snapshot.metadata.timestamp))), color="0.5", linestyle=":", label="AIA snapshot")
+        prediction.plot_flux_map(
+            ax=snapshot_ax,
+            show_harp_boxes=True, harp_regions=regions, harp_colors=colors,
+            min_harp_flux=0, show_harp_uncertainty=show_uncertainty, harp_label_fontsize=8,
+        )
+        image = snapshot.data[0]
+        low, high = np.percentile(image, [1, 99])
+        if low == high:
+            low, high = low - 0.5, high + 0.5
+        aia_ax.imshow(image, origin="lower", cmap="gray", vmin=low, vmax=high)
+        aia_ax.set(xlabel="X (AIA pixels)", ylabel="Y (AIA pixels)")
+
+    @staticmethod
+    def _plot_legend(ax, selected, legend, show_snapshot):
+        """Put the full/compact legend below the curve axes, or omit it."""
+        mode = ("compact" if show_snapshot else "full") if legend == "auto" else legend
+        if mode != "none":
+            handles, labels = ax.get_legend_handles_labels()
+            if mode == "compact":
+                from matplotlib.lines import Line2D
+                entries = [(handle, label) for handle, label in zip(handles, labels) if not label.startswith("HARP ")]
+                if selected:
+                    caption = f"HARP regions ({len(selected)})" + ("; IDs on flux map" if show_snapshot else "")
+                    entries.insert(0, (Line2D([], [], color="0.4"), caption))
+                handles, labels = ([entry[0] for entry in entries], [entry[1] for entry in entries])
+            if handles:
+                ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.18),
+                          ncol=min(3, len(handles)), frameon=False, fontsize=8)
+
+
+class AIAProcessor:
+    """Download AIA images and turn them into a stack the model can use.
+
+    Each stack has seven channels in the order 94, 131, 171, 193, 211, 304,
+    and 335 Å. Processing uses the same ITI pipeline as training and gives
+    you a channel-first ``float32`` array. Most of the time you'll want
+    :class:`ObservationFetcher`, which wraps this class and also fetches
+    HARP and GOES data.
+
+    Parameters
+    ----------
+    email : str or None, optional
+        Your registered JSOC email address. Defaults to the ``JSOC_EMAIL``
+        environment variable.
+    resolution : int, default 512
+        Height and width of each processed channel, in pixels.
+    tolerance : int, default 120
+        How far, in seconds, each AIA frame can be from the requested time.
+    n_workers : int, default 4
+        Number of parallel download threads.
+    """
+
+    #: AIA channels in Å, in the order the model expects them.
+    WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335)
+    # AIAStackDataset uses ITI's NormalizeRadiusEditor default crop padding.
+    PADDING_FACTOR = 0.1
+
+    def __init__(self, *, email=None, resolution=512, tolerance=120,
+                 n_workers=4):
+        """Set up JSOC downloading; see the class docstring."""
+        if resolution <= 0:
+            raise ValueError("resolution must be positive")
+
+        self.email = _jsoc_email(email)
+        self.resolution = int(resolution)
+        self.tolerance = int(tolerance)
+        self.n_workers = int(n_workers)
+
+    def fetch(self, time):
+        """Download and process all seven channels for one time.
+
+        The raw FITS files go into a temporary folder that's deleted when
+        the method returns, even if something fails along the way.
+
+        Parameters
+        ----------
+        time : datetime.datetime, datetime.date, numpy.datetime64, or str
+            Any format :func:`parse_timestamp` accepts.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``float32`` array of shape ``(7, resolution, resolution)`` in
+            :attr:`WAVELENGTHS` order.
+
+        Raises
+        ------
+        TypeError
+            If ``time`` isn't a type :func:`parse_timestamp` understands.
+        FileNotFoundError
+            If any channel has no frame within ``tolerance`` seconds.
+        ValueError
+            If processing returns the wrong shape or non-finite values.
+        """
+        from download.download_sdo import SDODownloader
+
+        time = _utc_datetime(time).replace(tzinfo=None)
+
+        with TemporaryDirectory(prefix="foxes-aia-") as temporary_path:
+            #Download the seven AIA FITS files in parallel into a temporary directory
+            downloader = SDODownloader(
+                base_path=temporary_path, email=self.email,
+                wavelengths=[str(w) for w in self.WAVELENGTHS],
+                n_workers=self.n_workers, tolerance=self.tolerance,
+            )
+            downloader.downloadDate(time)
+            stamp = time.isoformat("T", timespec="seconds")
+            paths = [
+                Path(temporary_path) / str(w) / f"{stamp}.fits"
+                for w in self.WAVELENGTHS
+            ]
+            missing = [w for w, path in zip(self.WAVELENGTHS, paths)
+                       if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    f"AIA frames missing within {self.tolerance}s of {stamp} UTC "
+                    f"for wavelengths {missing}"
+                )
+            return self.process_files(paths)
+
+    def process_files(self, paths):
+        """Process AIA FITS files you already have on disk.
+
+        This runs the same pipeline as :meth:`fetch`, just without the
+        download, and your files are left untouched. Wrap the result with
+        :meth:`Observation.from_array` to predict on it::
+
+            paths = [Path("fits") / f"{w}.fits" for w in AIAProcessor.WAVELENGTHS]
+            stack = processor.process_files(paths)
+            observation = Observation.from_array(stack, timestamp="2023-08-01 12:00")
+
+        Parameters
+        ----------
+        paths : iterable of str or pathlib.Path
+            A list of exactly seven FITS files, one per channel, in
+            :attr:`WAVELENGTHS` order. A folder name won't work here.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``float32`` array of shape ``(7, resolution, resolution)``.
+        """
+        from data.convert_aia import AIAStackDataset
+
+        paths = [Path(path) for path in paths]
+        if len(paths) != len(self.WAVELENGTHS):
+            raise ValueError(f"Provide seven FITS files in wavelength order {self.WAVELENGTHS}")
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+        dataset = AIAStackDataset(
+            data=[[str(path)] for path in paths], wavelengths=self.WAVELENGTHS,
+            resolution=self.resolution, ext=".fits", allow_errors=False,
+        )
+        stack = np.asarray(dataset[0], dtype=np.float32)
+        expected = (len(self.WAVELENGTHS), self.resolution, self.resolution)
+        if stack.shape != expected or not np.isfinite(stack).all():
+            raise ValueError(f"Processed AIA stack must be finite with shape {expected}; got {stack.shape}")
+        return stack
+
+    def _iter_range(self, timestamps, *, on_error, progress=False):
+        """Preprocess selected frames from one bulk JSOC metadata query."""
+        from download.download_sdo import SDODownloader
+
+        with TemporaryDirectory(prefix="foxes-aia-range-") as directory:
+            #Download bulk AIA FITS files in parallel into a temporary directory, then process them.
+            downloader = SDODownloader(
+                base_path=directory, email=self.email,
+                wavelengths=[str(w) for w in self.WAVELENGTHS],
+                n_workers=self.n_workers, tolerance=self.tolerance,
+            )
+            for timestamp, paths in downloader.iter_download_range(
+                [stamp.replace(tzinfo=None) for stamp in timestamps], on_error=on_error, progress=progress,
+            ):
+                try:
+                    stack = self.process_files(paths)
+                except Exception as exc:
+                    if on_error == "raise":
+                        raise
+                    logger.warning("Skipping AIA preprocessing at %s: %s", timestamp, exc)
+                else:
+                    yield timestamp.replace(tzinfo=timezone.utc), stack
+                finally:
+                    for path in paths:
+                        Path(path).unlink(missing_ok=True)
+
+
+class HARPProcessor:
+    """Look up HMI active regions (HARPs) and place their boxes on an AIA crop.
+
+    Boxes come from the ``hmi.sharp_720s`` series on JSOC and are converted
+    to percentages of the processed AIA image, so they line up with the
+    flux map.
     """
 
     _LIMB_BBOX_EDGE_SAMPLES = 25
@@ -432,19 +1635,23 @@ class HARPProcessor:
         Parameters
         ----------
         email : str or None, optional
-            Registered JSOC email; e.g. "you@example.com".
+            Your registered JSOC email address. Defaults to the
+            ``JSOC_EMAIL`` environment variable.
         resolution : int, default 512
-            Positive image side length in pixels, matching the processed AIA crop.
+            Side length of the processed AIA image in pixels.
         padding_factor : float, default 0.1
-            Crop padding fraction beyond the solar radius, not pixels.
+            How far the AIA crop extends past the solar limb, as a fraction
+            of the solar radius.
         bbox_expansion : float, default 0.0
-            Finite nonnegative fractional expansion per box side; 0.1 means 10%.
+            Fraction of each box's width and height added on every side
+            (0.1 grows each side by 10%). Expanded boxes are clipped to the
+            image.
         """
         if resolution <= 0:
             raise ValueError("resolution must be positive")
         if not np.isfinite(bbox_expansion) or bbox_expansion < 0:
             raise ValueError("bbox_expansion must be finite and nonnegative")
-        self.email = email
+        self.email = _jsoc_email(email)
         self.resolution = int(resolution)
         self.padding_factor = float(padding_factor)
         self.bbox_expansion = float(bbox_expansion)
@@ -453,38 +1660,31 @@ class HARPProcessor:
         self._QUERY_KEYS = "HARPNUM,NOAA_ARS,T_REC,LON_MIN,LON_MAX,LAT_MIN,LAT_MAX,RSUN_OBS,QUALITY"
         self._T_REC_FORMAT = "%Y.%m.%d_%H:%M:%S"
 
-    def fetch_date(self, timestamp: datetime | str, jsoc_email: str | None = None) -> list[dict]:
-        """Return raw JSOC rows from the nearest good-quality HARP sweep.
+    def fetch(self, time: datetime | str) -> list[dict]:
+        """Get the HARP regions closest in time to ``time``.
 
-        ``timestamp`` accepts all parse_timestamp formats, as in
-        :meth:`AIAProcessor.fetch_date`. A timezone-free value is treated as
-        UTC; an aware value is converted to UTC. For example,
-        ``"2023-08-01T00:00:00Z"`` is accepted.
+        Uses the nearest HARP record with good-quality regions. Each row
+        keeps the original JSOC columns, including ``HARPNUM`` and the raw
+        ``NOAA_ARS`` string. Regions visible in the crop also get
+        ``top_pct``, ``left_pct``, ``width_pct``, and ``height_pct``.
 
-        Rows retain JSOC column names and values, including raw ``NOAA_ARS``.
-        Visible regions also include ``top_pct``, ``left_pct``, ``width_pct``,
-        and ``height_pct`` for the AIA crop. Query failures and absent usable
-        regions return an empty list.
+        HARPs are a nice-to-have, so if the query fails or nothing usable
+        turns up, you get an empty list instead of an error. An invalid
+        timestamp still raises.
 
         Parameters
         ----------
-        timestamp : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Complete time accepted by parse_timestamp, e.g. "2023/08/01 12:00",
-            "August 1, 2023 12:00 UTC", or "2023-08-01T08:00:00-04:00".
-            Date-only values mean midnight; naive values mean UTC. JSOC's internal
-            TAI record syntax is not a supported public timestamp format.
-        jsoc_email : str or None, optional
-            Per-call registered JSOC email; None uses the processor's email.
+        time : datetime.datetime, datetime.date, numpy.datetime64, or str
+            Any format :func:`parse_timestamp` accepts. JSOC's own TAI
+            record times aren't supported.
 
         Returns
         -------
         list of dict
-            Good-quality HARP rows and projected crop percentages; [] on absent
-            usable regions or query failure. Invalid input timestamps still raise.
         """
-        timestamp = _utc_datetime(timestamp).replace(tzinfo=None)
+        timestamp = _utc_datetime(time).replace(tzinfo=None)
         try:
-            df = self._query_sharp(timestamp, jsoc_email or self.email)
+            df = self._query_sharp(timestamp, self.email)
             if df.empty:
                 return []
             nearest = self._nearest_good_t_rec(df, timestamp)
@@ -636,213 +1836,26 @@ class HARPProcessor:
             "height_pct": round((disp_bottom - disp_top) / self.resolution * 100, 2),
         }
 
-class AIAProcessor:
-    """Download AIA frames and assemble one stack for FOXES inference.
-
-    The seven channels are ordered 94, 131, 171, 193, 211, 304, and 335 Å.
-    Raw FITS downloads are kept only for the duration of :meth:`fetch_date`.
-    ITI processing produces a channel-first ``float32`` array.
-
-    Parameters
-    ----------
-    email : str or None, optional
-        Registered JSOC email address used by the SDO downloader.
-    resolution : int, default 512
-        Height and width in pixels of each processed channel.
-    tolerance : int, default 120
-        Maximum time difference in seconds between the requested time and
-        each selected AIA frame.
-    n_workers : int, default 4
-        Number of download threads for the seven wavelengths.
-    aia_norm_path : str or pathlib.Path or None, optional
-        AIA normalization artifact for the checkpoint. If supplied here,
-        do not also supply it to :func:`load_model`.
-    """
-
-    WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335)
-    # AIAStackDataset uses ITI's NormalizeRadiusEditor default crop padding.
-    PADDING_FACTOR = 0.1
-
-    def __init__(self, *, email=None, resolution=512, tolerance=120,
-                 n_workers=4, aia_norm_path=None):
-        """Configure JSOC downloading and optional AIA normalization.
-
-        Parameters
-        ----------
-        email : str or None, optional
-            Registered JSOC email, e.g. "you@example.com".
-        resolution : int, default 512
-            Positive processed height and width in pixels.
-        tolerance : int, default 120
-            Search half-width in seconds around the requested timestamp.
-        n_workers : int, default 4
-            Number of concurrent download threads.
-        aia_norm_path : str or pathlib.Path or None, optional
-            Checkpoint-matched .npz or .csv AIA normalization artifact. Apply it
-            here or in Predictor, never both; None leaves this transform disabled.
-        """
-        if resolution <= 0:
-            raise ValueError("resolution must be positive")
-        from forecasting.dataset import AIANormTransform
-
-        self.email = email
-        self.resolution = int(resolution)
-        self.tolerance = int(tolerance)
-        self.n_workers = int(n_workers)
-        self.transform = (
-            AIANormTransform.from_file(aia_norm_path, self.WAVELENGTHS)
-            if aia_norm_path is not None else None
-        )
-
-    def fetch_date(self, date):
-        """Download and process all seven channels near a requested UTC time.
-
-        Parameters
-        ----------
-        date : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Complete date/time accepted by parse_timestamp, e.g.
-            "2023-08-01T12:00:00Z", "2023/08/01 12:00",
-            "2023.08.01_12:00:00_UTC", or "August 1, 2023".
-            Date-only values mean midnight; timezone-free values mean UTC.
-            Numeric Unix timestamps and ambiguous dates are not accepted.
-
-        Returns
-        -------
-        numpy.ndarray
-            Finite ``float32`` AIA stack with shape
-            ``(7, resolution, resolution)`` in :attr:`WAVELENGTHS` order.
-            Optional AIA normalization is applied before returning.
-
-        Raises
-        ------
-        TypeError
-            If ``date`` is not a supported datetime/date/string value.
-        FileNotFoundError
-            If any wavelength has no downloaded frame in the search window.
-        ValueError
-            If ITI returns an unexpected shape or nonfinite values.
-
-        Notes
-        -----
-        The raw FITS directory is deleted before the method returns, including
-        when downloading or processing fails. The returned array is in memory.
-        """
-        from download.download_sdo import SDODownloader
-
-        date = _utc_datetime(date).replace(tzinfo=None)
-
-        with TemporaryDirectory(prefix="foxes-aia-") as temporary_path:
-            #Download the seven AIA FITS files in parallel into a temporary directory
-            downloader = SDODownloader(
-                base_path=temporary_path, email=self.email,
-                wavelengths=[str(w) for w in self.WAVELENGTHS],
-                n_workers=self.n_workers, tolerance=self.tolerance,
-            )
-            downloader.downloadDate(date)
-            stamp = date.isoformat("T", timespec="seconds")
-            paths = [
-                Path(temporary_path) / str(w) / f"{stamp}.fits"
-                for w in self.WAVELENGTHS
-            ]
-            missing = [w for w, path in zip(self.WAVELENGTHS, paths)
-                       if not path.is_file()]
-            if missing:
-                raise FileNotFoundError(
-                    f"AIA frames missing within {self.tolerance}s of {stamp} UTC "
-                    f"for wavelengths {missing}"
-                )
-            return self.process_files(paths)
-
-    def process_files(self, paths):
-        """Preprocess seven local FITS files in :attr:`WAVELENGTHS` order.
-
-        Uses the same ITI calibration/crop/resize pipeline as downloads.
-        Caller-owned files are never removed. Returns a processed array;
-        wrap it with ``Observation.from_array(stack, timestamp=...)``.
-
-        Parameters
-        ----------
-        paths : iterable of str or pathlib.Path
-            Exactly seven existing local FITS file paths in wavelength order
-            (94, 131, 171, 193, 211, 304, 335). Supply a list/tuple of paths, not a
-            directory name or a single string. Example:
-            [Path("fits") / f"{w}.fits" for w in AIAProcessor.WAVELENGTHS].
-
-        Returns
-        -------
-        numpy.ndarray
-            Finite float32 array shaped (7, resolution, resolution). Optional
-            processor normalization is applied once; local FITS files are preserved.
-        """
-        from data.convert_aia import AIAStackDataset
-
-        paths = [Path(path) for path in paths]
-        if len(paths) != len(self.WAVELENGTHS):
-            raise ValueError(f"Provide seven FITS files in wavelength order {self.WAVELENGTHS}")
-        for path in paths:
-            if not path.is_file():
-                raise FileNotFoundError(path)
-        dataset = AIAStackDataset(
-            data=[[str(path)] for path in paths], wavelengths=self.WAVELENGTHS,
-            resolution=self.resolution, ext=".fits", allow_errors=False,
-        )
-        stack = np.asarray(dataset[0], dtype=np.float32)
-        expected = (len(self.WAVELENGTHS), self.resolution, self.resolution)
-        if stack.shape != expected or not np.isfinite(stack).all():
-            raise ValueError(f"Processed AIA stack must be finite with shape {expected}; got {stack.shape}")
-        if self.transform is not None:
-            import torch
-            stack = self.transform(torch.from_numpy(stack)).numpy()
-        return stack
-
-    def _iter_range(self, timestamps, *, on_error, progress=False):
-        """Preprocess selected frames from one bulk JSOC metadata query."""
-        from download.download_sdo import SDODownloader
-
-        with TemporaryDirectory(prefix="foxes-aia-range-") as directory:
-            #Download bulk AIA FITS files in parallel into a temporary directory, then process them.
-            downloader = SDODownloader(
-                base_path=directory, email=self.email,
-                wavelengths=[str(w) for w in self.WAVELENGTHS],
-                n_workers=self.n_workers, tolerance=self.tolerance,
-            )
-            for timestamp, paths in downloader.iter_download_range(
-                [stamp.replace(tzinfo=None) for stamp in timestamps], on_error=on_error, progress=progress,
-            ):
-                try:
-                    stack = self.process_files(paths)
-                except Exception as exc:
-                    if on_error == "raise":
-                        raise
-                    logger.warning("Skipping AIA preprocessing at %s: %s", timestamp, exc)
-                else:
-                    yield timestamp.replace(tzinfo=timezone.utc), stack
-                finally:
-                    for path in paths:
-                        Path(path).unlink(missing_ok=True)
-
 
 class SXRProcessor:
-    """Fetch GOES XRS and average satellites as in the training targets.
+    """Fetch measured GOES X-ray flux to compare against predictions.
 
-    ``tolerance`` is the maximum distance from the requested time, in seconds
-    (default 120). ``satellite`` optionally restricts the GOES satellite
-    number. Otherwise average all available satellites at the nearest usable
-    sample timestamp, with equidistant timestamps favoring the earlier one.
-    The arithmetic mean is taken in physical flux space, before any model
-    log normalization, as in ``data.align_aia_sxr``.
+    By default the fluxes from every GOES satellite with good data are
+    averaged, the same way the training targets were built
+    (see ``data.align_aia_sxr``). The average is a plain mean of the
+    physical fluxes, taken before any log scaling.
     """
 
     def __init__(self, *, tolerance=120, satellite=None):
-        """Configure the GOES XRS lookup.
+        """Set up the GOES lookup.
 
         Parameters
         ----------
         tolerance : float, default 120
-            Finite positive search half-width in seconds.
-        satellite : positive int or None, optional
-            GOES satellite number, e.g. 18 (not "GOES-18"). None combines valid
-            satellites at the nearest usable timestamp as described by the class.
+            How far, in seconds, a GOES sample can be from the requested time.
+        satellite : int or None, optional
+            Use only this GOES satellite, given as a number (``18``, not
+            ``"GOES-18"``). ``None`` averages all satellites with good data.
         """
         if not np.isfinite(tolerance) or tolerance <= 0:
             raise ValueError("tolerance must be finite and positive")
@@ -854,37 +1867,35 @@ class SXRProcessor:
         self.tolerance = float(tolerance)
         self.satellite = int(satellite) if satellite is not None else None
 
-    def fetch_date(self, date) -> dict | None:
-        """Return measured XRS-A (0.5–4 Å) and XRS-B (1–8 Å) flux in W/m².
+    def fetch(self, time) -> dict | None:
+        """Get the measured XRS-A (0.5–4 Å) and XRS-B (1–8 Å) flux near a time.
 
-        Accepts all date/time formats described by :func:`parse_timestamp`.
-        XRS-B must have a zero quality flag and finite positive flux, matching
-        the training target's band selection. At the nearest valid timestamp,
-        return the arithmetic mean ``xrsb_flux`` and the mean of available
-        good-quality ``xrsa_flux`` values (or None if none are usable).
-        ``timestamp`` is the actual UTC sample time; ``time_offset_seconds``
-        is sample minus requested time. ``satellites`` lists the contributors
-        and ``measurements`` retains their individual fluxes. Samples from
-        different timestamps are never averaged together. Fluxes retain the
-        science product's calibration; no interpolation or additional legacy
-        scaling is applied. Missing data or query/processing failures
-        return ``None``. Temporary downloads are removed before returning.
+        Finds the GOES sample closest to ``time`` that has good XRS-B data
+        (quality flag zero and a positive flux), the same selection used for
+        the training targets. If two samples are equally close, the earlier
+        one wins. Only satellites reporting at that exact sample time are
+        averaged. Values are used as the science product reports them, with
+        no interpolation or extra scaling.
+
+        Like HARPs, GOES data is optional, so a missing sample or failed
+        query returns ``None`` instead of raising. An invalid timestamp still
+        raises.
 
         Parameters
         ----------
-        date : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Complete date/time accepted by parse_timestamp. For example,
-            "2023-08-01T12:00:00Z", "2023/08/01 12:00", or "August 1, 2023".
-            Date-only values mean midnight; naive inputs mean UTC.
+        time : datetime.datetime, datetime.date, numpy.datetime64, or str
+            Any format :func:`parse_timestamp` accepts.
 
         Returns
         -------
         dict or None
-            Physical xrsa_flux/xrsb_flux in W/m², an actual UTC sample timestamp,
-            offset in seconds, satellites, and individual measurements; None on
-            unavailable data/query failure. Invalid input timestamps still raise.
+            ``xrsb_flux`` and ``xrsa_flux`` in W/m² (``xrsa_flux`` is
+            ``None`` if no satellite had good XRS-A data), ``timestamp`` (the
+            actual UTC sample time), ``time_offset_seconds`` (sample time minus
+            requested time), ``satellites`` (which ones were averaged), and
+            ``measurements`` (each satellite's own values).
         """
-        timestamp = _utc_datetime(date)
+        timestamp = _utc_datetime(time)
         try:
             from sunpy.net import Fido
             from sunpy.timeseries import TimeSeries
@@ -984,337 +1995,154 @@ class SXRProcessor:
         ]
 
 
-class ObservationProcessor:
-    """Fetch AIA, HARP, and measured GOES SXR data for one UTC time.
+def parse_timestamp(value):
+    """Parse a date/time and return it as a timezone-aware UTC datetime.
 
-    All sources are enabled by default. ``include_aia``, ``include_harps``, and
-    ``include_sxr`` can be set here or overridden on :meth:`fetch_observation`. Disabled AIA
-    fetching produces ``Observation.data=None``; disabled HARP fetching
-    produces ``Observation.harp_regions=None``.
+    Every function in FOXES that takes a time runs it through this parser,
+    so the rules here apply everywhere:
 
-    ``email``, ``resolution``, ``tolerance``, ``n_workers``, and ``aia_norm_path``
-    configure the component processors. AIA and HARP share the same crop
-    geometry and email. HARP failures return an empty region list; AIA
-    downloading or processing failures raise as in :class:`AIAProcessor`.
-    ``harp_bbox_expansion`` adds that fraction on each side of projected HARP
-    boxes, clipped to the image. Prediction sums use the expanded boxes.
-    ``sxr_tolerance`` (seconds) and ``sxr_satellite`` configure the independent
-    :class:`SXRProcessor`. Disabled or unavailable SXR produces ``sxr=None``.
-    """
+    - A date with no time means midnight.
+    - A time with no timezone is treated as UTC.
+    - For other timezones, give an explicit offset such as ``-04:00``.
+      Abbreviations other than UTC and GMT (``EST``, for example) aren't
+      recognized.
 
-    def __init__(self, *, email=None, resolution=512, tolerance=120,
-                 n_workers=4, aia_norm_path=None, include_aia=True,
-                 include_harps=True, harp_bbox_expansion=0.0,
-                 include_sxr=True, sxr_tolerance=120, sxr_satellite=None):
-        """Configure observation sources and shared crop geometry.
+    Year-first formats work, and so do written-out month names. All-numeric
+    dates like ``01/08/2023`` are rejected because the day/month order is
+    ambiguous. Unix timestamps, partial dates ("August 2023"), relative
+    dates, and NaT are rejected too.
 
-        Parameters
-        ----------
-        email : str or None, optional
-            Registered JSOC email shared by AIA and HARP queries.
-        resolution : int, default 512
-            Positive processed AIA height/width in pixels; match the checkpoint.
-        tolerance : int, default 120
-            AIA search half-width in seconds; independent of sxr_tolerance.
-        n_workers : int, default 4
-            AIA download thread count.
-        aia_norm_path : str or pathlib.Path or None, optional
-            Matching .npz/.csv AIA normalization artifact. Do not also normalize
-            in the predictor when this is supplied.
-        include_aia, include_harps, include_sxr : bool, default True
-            Default source toggles, overridable per fetch/range call.
-        harp_bbox_expansion : float, default 0.0
-            Nonnegative box expansion fraction per side; 0.1 means 10% per side.
-        sxr_tolerance : float, default 120
-            Finite positive GOES lookup half-width in seconds.
-        sxr_satellite : positive int or None, optional
-            Restrict GOES to a number such as 18, or use all valid satellites.
-        """
-        self.include_aia = include_aia
-        self.include_harps = include_harps
-        self.include_sxr = include_sxr
-        self.aia_processor = AIAProcessor(
-            email=email, resolution=resolution, tolerance=tolerance,
-            n_workers=n_workers, aia_norm_path=aia_norm_path,
-        )
-        self.harp_processor = HARPProcessor(
-            email=email, resolution=self.aia_processor.resolution,
-            padding_factor=self.aia_processor.PADDING_FACTOR,
-            bbox_expansion=harp_bbox_expansion,
-        )
-        self.sxr_processor = SXRProcessor(tolerance=sxr_tolerance, satellite=sxr_satellite)
-
-    def fetch_observation(self, date, *, include_aia=None, include_harps=None,
-                          include_sxr=None) -> Observation:
-        """Fetch enabled sources for any supported complete date/time format.
-
-        Per-call toggles override the processor's defaults for this call only.
-        Metadata and any fetched HARP/SXR data travel with the returned
-        observation through prediction and plotting. AIA data is required
-        for prediction. Raw downloads are removed before returning.
-
-        Parameters
-        ----------
-        date : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Complete time accepted by parse_timestamp, e.g. "2023/08/01 12:00",
-            "2023-08-01T12:00:00Z", or "August 1, 2023". Date-only values mean
-            midnight and naive values mean UTC; numeric epoch times are not accepted.
-        include_aia, include_harps, include_sxr : bool or None, optional
-            True enables the source, False disables it, and None uses the constructor
-            default. The constructor settings are not modified.
-
-        Returns
-        -------
-        Observation
-            Requested UTC time and processed array, plus enabled HARP/SXR data.
-        """
-        timestamp = _utc_datetime(date)
-        if include_aia is None:
-            include_aia = self.include_aia
-        if include_harps is None:
-            include_harps = self.include_harps
-        if include_sxr is None:
-            include_sxr = self.include_sxr
-        stack = self.aia_processor.fetch_date(timestamp) if include_aia else None
-        metadata = ObservationMetadata(
-            timestamp=timestamp,
-            image_shape=stack.shape if stack is not None else (
-                len(self.aia_processor.WAVELENGTHS),
-                self.aia_processor.resolution, self.aia_processor.resolution,
-            ),
-            wavelengths=self.aia_processor.WAVELENGTHS,
-            padding_factor=self.aia_processor.PADDING_FACTOR,
-            harp_bbox_expansion=self.harp_processor.bbox_expansion,
-        )
-        regions = self.harp_processor.fetch_date(timestamp) if include_harps else None
-        sxr = self.sxr_processor.fetch_date(timestamp) if include_sxr else None
-        return Observation(
-            metadata=metadata, data=stack, harp_regions=regions, sxr=sxr,
-        )
-
-    def iter_observations(self, start, end, *, cadence="1h", on_error="raise",
-                          save_dir=None, overwrite=False, progress=False, **kwargs):
-        """Download/preprocess a UTC range one observation at a time.
-
-        Includes start and any cadence-aligned time <= end. Cadence accepts
-        a pandas duration string (``'12min'``), timedelta, or seconds as a
-        number. Source toggles are passed to :meth:`fetch_observation`.
-        AIA uses one bulk JSOC record/segment query across the padded range,
-        followed by downloads of the selected frames. HARP and SXR queries
-        currently run separately for each timestamp. Large spans can have
-        large metadata responses; split long jobs into smaller ranges.
-        Defaults to raising AIA errors. ``on_error='skip'`` logs failures
-        with their requested timestamps and continues. HARP/SXR retain
-        their single-observation best-effort behavior. No interpolation is
-        performed; nearby requests can select the same exposure. Raw files
-        are temporary. Use this iterator to avoid retaining all AIA arrays.
-        ``save_dir`` writes each successful observation as a complete .npz
-        archive before yielding it; see ``Observation.save`` and
-        ``load_observations``. Saving is opt-in and never changes the data.
-        Existing archives are loaded and yielded without downloading,
-        preprocessing, or HARP/SXR queries. Only missing times enter the
-        bulk AIA request. ``overwrite=True`` explicitly refreshes all times.
-        Cache load/save errors raise even with ``on_error='skip'``. Cached
-        metadata and enabled-source contents are reused as saved; use
-        overwrite=True after changing preprocessing or query settings.
-        ``progress=True`` shows tqdm during the bulk query and subsequent
-        AIA downloading/preprocessing (including skipped attempts). Without
-        AIA it tracks fetching the supplemental observations instead.
-
-        Parameters
-        ----------
-        start, end : datetime.datetime, datetime.date, numpy.datetime64, or str
-            Inclusive range bounds accepted by parse_timestamp, e.g.
-            start="2023/08/01 00:00", end="2023-08-01T06:00:00Z". Both use UTC
-            when timezone-free. End must be at or after start. End is only yielded
-            when it lands on the cadence grid anchored at start.
-        cadence : str, datetime.timedelta, pandas.Timedelta, int, or float, default "1h"
-            Positive duration in whole seconds. Examples: "12min", "1h",
-            timedelta(minutes=12), or 720 (numeric values mean seconds, not minutes).
-        on_error : {"raise", "skip"}, default "raise"
-            Raise individual download/preprocessing failures or log and skip them.
-            Initial bulk-query errors and archive load/save failures always raise.
-        save_dir : str or pathlib.Path or None, optional
-            Directory for complete timestamped .npz observations, e.g. "saved_aia".
-            Existing files are reused without data queries or preprocessing unless
-            overwrite=True. None disables persistent saving/reuse.
-        overwrite : bool, default False
-            True downloads/processes again and atomically replaces saved observations.
-        progress : bool, default False
-            Show tqdm for remaining work or for loading a completely saved range.
-        **kwargs
-            include_aia, include_harps, include_sxr: bool or None, each with the
-            same source-toggle rules as fetch_observation.
-
-        Yields
-        ------
-        Observation
-            Successful saved/new observations in requested timestamp order. Merely
-            creating this generator does no work: consume it with a for loop, list,
-            or model.predict_series to start downloading/saving.
-
-        Examples
-        --------
-        >>> observations = processor.iter_observations(
-        ...     "2023/08/01", "2023-08-01 01:00", cadence="12min",
-        ...     save_dir="saved_aia", progress=True,
-        ... )
-        >>> # Consume observations with model.predict_series(observations).
-        """
-        start, end = _utc_datetime(start), _utc_datetime(end)
-        if end < start:
-            raise ValueError("end must be at or after start")
-        if on_error not in {"raise", "skip"}:
-            raise ValueError("on_error must be 'raise' or 'skip'")
-        try:
-            if isinstance(cadence, bool):
-                raise ValueError("boolean cadence")
-            step = pd.to_timedelta(cadence, unit="s") if isinstance(cadence, (int, float)) else pd.Timedelta(cadence)
-            if pd.isna(step) or step < pd.Timedelta(seconds=1) or step.value % 1_000_000_000:
-                raise ValueError("invalid duration")
-            step = step.to_pytimedelta()
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("cadence must be a positive finite duration in whole seconds, e.g. '12min'") from exc
-        timestamps = []
-        timestamp = start
-        while timestamp <= end:
-            timestamps.append(timestamp)
-            if end - timestamp < step:
-                break
-            timestamp += step
-        include_aia = kwargs.pop("include_aia", self.include_aia)
-        if include_aia is None:
-            include_aia = self.include_aia
-        paths = {} if save_dir is None else {
-            stamp: Path(save_dir).expanduser() / f"observation_{stamp.strftime('%Y%m%dT%H%M%S.%fZ')}.npz"
-            for stamp in timestamps
-        }
-        cached = {stamp for stamp, path in paths.items() if path.exists()} if not overwrite else set()
-        missing = [stamp for stamp in timestamps if stamp not in cached]
-        if not missing:
-            samples = (sample for sample in ())
-        elif include_aia:
-            samples = self.aia_processor._iter_range(missing, on_error=on_error, progress=progress)
-        else:
-            samples = (
-                (stamp, None) for stamp in tqdm(
-                    missing, desc="Fetching observations", unit="observation", disable=not progress,
-                )
-            )
-        grid = tqdm(timestamps, desc="Loading saved observations", unit="observation", disable=not progress) if not missing else timestamps
-        pending = None
-        try:
-            for timestamp in grid:
-                #First yield any cached observation, then fetch/preprocess the next missing one.
-                if timestamp in cached:
-                    observation = Observation.load(paths[timestamp])
-                    if observation.metadata.timestamp != timestamp:
-                        raise ValueError(f"Cached observation timestamp does not match {paths[timestamp]}; use overwrite=True")
-                    if include_aia and observation.data is None:
-                        raise ValueError(f"Cached observation has no AIA data: {paths[timestamp]}; use overwrite=True")
-                    include_harps = kwargs.get("include_harps")
-                    include_sxr = kwargs.get("include_sxr")
-                    yield Observation(
-                        metadata=observation.metadata,
-                        data=observation.data if include_aia else None,
-                        harp_regions=observation.harp_regions if (
-                            self.include_harps if include_harps is None else include_harps
-                        ) else None,
-                        sxr=observation.sxr if (
-                            self.include_sxr if include_sxr is None else include_sxr
-                        ) else None,
-                    )
-                    continue
-                #Set pending to the next sample if it is not already set, then check if it matches the current timestamp.
-                if pending is None:
-                    pending = next(samples, None)
-                if pending is None or pending[0] != timestamp:
-                    continue  # A missing AIA sample was skipped; retain lookahead.
-                #Extract the preprocessed stack and fetch the supplemental observations for this timestamp.
-                _, stack = pending
-                pending = None
-                #Create observation from the preprocessed stack and supplemental sources. If any of those fail, skip this timestamp if on_error='skip'.
-                try:
-                    auxiliary = self.fetch_observation(timestamp, include_aia=False, **kwargs)
-                    observation = Observation(
-                        metadata=auxiliary.metadata, data=stack,
-                        harp_regions=auxiliary.harp_regions, sxr=auxiliary.sxr,
-                    )
-                except Exception as exc:
-                    if on_error == "raise":
-                        raise
-                    logger.warning("Skipping observation at %s: %s", timestamp.isoformat(), exc)
-                    continue
-                if save_dir is not None:
-                    observation.save(paths[timestamp], overwrite=overwrite)
-                yield observation
-        finally:
-            samples.close()
-            if not missing:
-                grid.close()
-
-
-@dataclass(frozen=True)
-class Prediction:
-    """FOXES output for one AIA stack.
-
-    Attributes
+    Parameters
     ----------
-    metadata : ObservationMetadata or None
-        Input observation metadata, preserved for automatic HARP overlays.
-        The original input array is not retained.
-    flux : float
-        Predicted full-disk soft X-ray flux in W/m².
-    flux_map : numpy.ndarray
-        Two-dimensional patch contributions in W/m². Its dimensions are the
-        checkpoint's patch grid, which is smaller than the input image.
-    intervals : dict or None
-        For Gaussian checkpoints, ``"68"`` and ``"95"`` map to lower and
-        upper flux bounds in W/m². ``None`` for deterministic checkpoints.
-    patch_uncertainty_map : numpy.ndarray or None
-        For Gaussian checkpoints, the square root of each patch's contribution
-        to global flux variance, in W/m². These are variance attributions,
-        not calibrated patch-level error bars.
-    harp_regions : list[dict] or None
-        Per-HARP prediction results. Each dict contains ``harpnum``,
-        ``flux_sum`` in W/m², and ``top_pct``, ``left_pct``, ``width_pct``,
-        ``height_pct`` locations. Original JSOC fields, including heliographic
-        longitude/latitude bounds, are preserved. Flux sums include positive
-        patch contributions whose centers fall inside each box. Overlapping
-        boxes can count the same patch. ``None`` means HARPs were not fetched;
-        an empty list means no usable regions were returned.
-        ``flux_sum_uncertainty`` is sqrt(sum(patch_uncertainty_map**2))
-        inside the same box, in W/m², or None for deterministic predictions.
-        This follows the model's additive variance attribution; regional
-        uncertainty calibration is not established.
-    sxr : dict or None
-        Measured GOES fluxes and sample provenance, preserved from Observation.
-        Compare ``sxr["xrsb_flux"]`` with the predicted ``flux``. This measured
-        value is not an input to the model. None when disabled or unavailable.
-    legacy_model : bool
-        Whether the predictor opted into the approximate legacy SXR correction.
-    flux_scale_factor : float
-        Physical output factor applied to this prediction: 0.7 before the
-        legacy cutoff, otherwise 1.0. Flux-map sums use
-        the same factor. Measured SXR is preserved.
+    value : datetime.datetime, datetime.date, numpy.datetime64, or str
+        For example ``"2023-08-01"``, ``"2023-08-01T12:00:00Z"``,
+        ``"2023/08/01 12:00"``, ``"2023.08.01_12:00:00_UTC"``,
+        ``"August 1, 2023 12:00 UTC"``, or ``"2023-08-01T08:00:00-04:00"``.
+
+    Returns
+    -------
+    datetime.datetime
+        Timezone-aware UTC time.
     """
+    original = value
+    if isinstance(value, np.datetime64):
+        if np.isnat(value):
+            raise ValueError("timestamp cannot be NaT")
+        value = np.datetime_as_string(value, unit="us")
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime.combine(value, datetime.min.time())
+    if isinstance(value, str):
+        from dateutil.parser import parse, UnknownTimezoneWarning
 
-    metadata: ObservationMetadata | None = field(default=None, kw_only=True)
-    flux: float
-    flux_map: np.ndarray
-    intervals: dict[str, tuple[float, float]] | None = None
-    patch_uncertainty_map: np.ndarray | None = None
-    harp_regions: list[dict] | None = None
-    sxr: dict | None = None
-    legacy_model: bool = field(default=False, kw_only=True)
-    flux_scale_factor: float = field(default=1.0, kw_only=True)
+        value = value.strip()
+        try:
+            if re.match(r"^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}", value):
+                raise ValueError("ambiguous numeric date; use year-month-day")
+            if value.endswith("_UTC"):
+                value = value[:-4] + "+00:00"
+            value = re.sub(r"^(\d{4})[/.](\d{2})[/.](\d{2})", r"\1-\2-\3", value)
+            value = value.replace("_", "T")
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                def resolve_zone(name, offset):
+                    if name not in (None, "UTC", "GMT"):
+                        raise ValueError(f"timezone abbreviation {name!r} is ambiguous; use a numeric offset")
+                    return timezone(timedelta(seconds=offset)) if offset is not None else None
 
-    def __post_init__(self):
-        object.__setattr__(
-            self, "harp_regions", _harp_region_fluxes(
-                self.flux_map, self.harp_regions, self.patch_uncertainty_map,
-            ),
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", UnknownTimezoneWarning)
+                    first = parse(value, default=datetime(2000, 1, 1), tzinfos=resolve_zone)
+                    second = parse(value, default=datetime(2004, 2, 2), tzinfos=resolve_zone)
+                if first != second:
+                    raise ValueError("a complete year, month, and day are required")
+                value = first
+        except (ValueError, OverflowError, UnknownTimezoneWarning) as exc:
+            raise ValueError(
+                f"Invalid timestamp {original!r}: {exc}. Use a complete date such as "
+                "'2023-08-01 12:00:00', '2023/08/01', or 'August 1, 2023'; "
+                "use Z or a numeric UTC offset for timezone information."
+            ) from exc
+    if not isinstance(value, datetime):
+        raise TypeError("timestamp must be a datetime, date, numpy.datetime64, or date string")
+    if pd.isna(value):
+        raise ValueError("timestamp cannot be NaT")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+_utc_datetime = parse_timestamp
+
+
+def _resolve_checkpoint(checkpoint):
+    """Return a checkpoint file path, downloading a released checkpoint by name."""
+    path = Path(checkpoint).expanduser()
+    if path.is_file():
+        return path.resolve()
+    relative = PRETRAINED_CHECKPOINTS.get(str(checkpoint))
+    if relative is None:
+        raise FileNotFoundError(
+            f"{checkpoint} is not a file or a released checkpoint name "
+            f"({', '.join(PRETRAINED_CHECKPOINTS)})"
         )
+    cache = Path(os.environ.get("HELIO_FOXES_CACHE", "~/.cache/helio_foxes")).expanduser()
+    target = cache / relative
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _download(_CHECKPOINT_URL + relative, target)
+    return target
+
+
+def _download(url, target):
+    """Download ``url`` to ``target`` with a progress bar, leaving nothing behind on failure."""
+    from urllib.request import urlopen
+
+    partial = target.with_name(target.name + ".part")
+    try:
+        with urlopen(url) as response, open(partial, "wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0) or None
+            with tqdm(total=total, unit="B", unit_scale=True, desc=f"Downloading {target.name}") as bar:
+                while chunk := response.read(1 << 20):
+                    handle.write(chunk)
+                    bar.update(len(chunk))
+        with open(partial, "rb") as handle:
+            if handle.read(64).startswith(b"version https://git-lfs"):
+                raise RuntimeError(f"{url} returned a Git LFS pointer instead of the checkpoint")
+        os.replace(partial, target)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def _jsoc_email(email):
+    """Use the given JSOC email, falling back to the ``JSOC_EMAIL`` environment variable."""
+    return email if email is not None else os.environ.get("JSOC_EMAIL")
+
+
+def _encode_observation_metadata(value):
+    """Keep metadata JSON-safe without pickling arrays or datetime objects."""
+    if isinstance(value, np.generic):
+        return _encode_observation_metadata(value.item())
+    if isinstance(value, datetime):
+        return {"__foxes_datetime__": _utc_datetime(value).isoformat()}
+    if isinstance(value, float) and not np.isfinite(value):
+        return {"__foxes_float__": str(value)}
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("Observation metadata dictionary keys must be strings")
+        return {key: _encode_observation_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_encode_observation_metadata(item) for item in value]
+    if value is pd.NA:
+        return None
+    return value
+
+
+def _decode_observation_metadata(value):
+    if set(value) == {"__foxes_datetime__"}:
+        return _utc_datetime(value["__foxes_datetime__"])
+    if set(value) == {"__foxes_float__"}:
+        return float(value["__foxes_float__"])
+    return value
 
 
 def _make_aia_snapshot(image, prediction, wavelength):
@@ -1337,579 +2165,6 @@ def _positive_flux(values):
     """Return log-plottable values, leaving nonpositive/unknown samples as gaps."""
     values = np.asarray(values, dtype=float)
     return np.where(np.isfinite(values) & (values > 0), values, np.nan)
-
-
-@dataclass(frozen=True)
-class PredictionSeries:
-    """Timestamped predictions with full-disk and per-HARP light curves.
-
-    Times are requested UTC times, not individual channel exposure times.
-    Duplicate requested timestamps are rejected. Missing HARP detections
-    become NaN, never zero; skipped AIA samples are absent from the series.
-    Regional fluxes follow Prediction's positive patch-center box sums,
-    including overlapping boxes and additive variance attribution.
-
-    Parameters
-    ----------
-    predictions : iterable of Prediction
-        Outputs with non-None ObservationMetadata and unique timestamps.
-        Stored as a tuple sorted by UTC time.
-    snapshot : Observation or None, optional
-        Default one-channel snapshot shaped (1, H, W), with timestamp matching
-        a prediction. This visualization container is not a seven-channel model
-        input. Usually populated by Predictor.predict_series.
-    """
-
-    predictions: tuple[Prediction, ...]
-    snapshot: Observation | None = field(default=None, kw_only=True)
-
-    @staticmethod
-    def _timestamp(prediction):
-        if prediction.metadata is None:
-            raise ValueError("Every series prediction needs timestamp metadata")
-        return prediction.metadata.timestamp
-
-    def __post_init__(self):
-        #Initialize and validate the series.
-        predictions = tuple(self.predictions)
-        predictions = tuple(sorted(predictions, key=self._timestamp))
-        times = [self._timestamp(p) for p in predictions]
-        if len(set(times)) != len(times):
-            raise ValueError("Series predictions must have unique timestamps")
-        if self.snapshot is not None:
-            snapshot = self.snapshot
-            if snapshot.data is None or snapshot.data.shape[0] != 1:
-                raise ValueError("Series snapshot must contain one processed AIA channel")
-            if snapshot.metadata.timestamp not in times:
-                raise ValueError("Snapshot timestamp must match a series prediction")
-        object.__setattr__(self, "predictions", predictions)
-
-    def to_dataframe(self):
-        """Return full-disk flux (W/m²), with scale for legacy series."""
-        rows = [{
-            "timestamp": self._timestamp(p), "flux": p.flux,
-            "observed_xrsb_flux": p.sxr.get("xrsb_flux") if p.sxr else None,
-        } for p in self.predictions]
-        frame = pd.DataFrame(rows, columns=["timestamp", "flux", "observed_xrsb_flux"])
-        if any(p.legacy_model for p in self.predictions):
-            frame["legacy_model"] = [p.legacy_model for p in self.predictions]
-            frame["flux_scale_factor"] = [p.flux_scale_factor for p in self.predictions]
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-        return frame.set_index("timestamp")
-
-    def harp_light_curves(self):
-        """Return ``{harpnum: DataFrame}`` indexed by UTC requested time.
-
-        Columns ``flux_sum`` and ``flux_sum_uncertainty`` use W/m². Each
-        frame covers every successful prediction; an absent HARP or unknown
-        uncertainty is NaN. No query, interpolation, or zero filling occurs.
-        """
-        #Get the index of the predictions (based on their timestamps)
-        index = self.to_dataframe().index
-        #For each prediction, get the harpnum from its harp_regions (if any), and collect all unique harpnums across the series.
-        ids = sorted({r["harpnum"] for p in self.predictions for r in p.harp_regions or []})
-
-        #For the available harps, loop through each num and collect the flux_sum and flux_sum_uncertainty for each prediction, creating a DataFrame for each harpnum.
-        curves = {}
-        for harpnum in ids:
-            rows = []
-            for prediction in self.predictions:
-                region = next((r for r in prediction.harp_regions or [] if r["harpnum"] == harpnum), {})
-                rows.append([region.get("flux_sum", np.nan), region.get("flux_sum_uncertainty", np.nan)])
-            curves[harpnum] = pd.DataFrame(
-                rows, index=index, columns=["flux_sum", "flux_sum_uncertainty"], dtype=float,
-            )
-        return curves
-
-    @staticmethod
-    def _select_harps(curves, harpnums, min_peak_flux):
-        """Validate requested IDs and keep only curves reaching the peak threshold."""
-        try:
-            if not np.isscalar(min_peak_flux):
-                raise ValueError("not scalar")
-            threshold = float(min_peak_flux)
-        except (ValueError, TypeError) as exc:
-            raise ValueError("min_peak_flux must be finite and nonnegative (W/m²)") from exc
-        if not np.isfinite(threshold) or threshold < 0:
-            raise ValueError("min_peak_flux must be finite and nonnegative (W/m²)")
-        requested = list(curves) if harpnums is None else list(harpnums)
-        unknown = set(requested) - curves.keys()
-        if unknown:
-            raise ValueError(f"No predictions for HARP numbers {sorted(unknown)}")
-        selected = []
-        for harpnum in requested:
-            flux = _positive_flux(curves[harpnum]["flux_sum"])
-            if np.isfinite(flux).any() and np.nanmax(flux) >= threshold:
-                selected.append(harpnum)
-        return selected
-
-    @staticmethod
-    def _plot_axes(ax, snapshot_ax, aia_ax, show_snapshot):
-        """Create a curve-only or three-panel layout, or validate supplied axes."""
-        import matplotlib.pyplot as plt
-
-        if not show_snapshot:
-            if ax is None:
-                _, ax = plt.subplots(layout="constrained")
-            return ax, snapshot_ax, aia_ax
-        if ax is not None and (snapshot_ax is None or aia_ax is None):
-            raise ValueError("Supply snapshot_ax and aia_ax with ax, or omit ax to create all three panels")
-        if snapshot_ax is not None or aia_ax is not None:
-            if (ax is None or snapshot_ax is None or aia_ax is None
-                    or len({id(ax), id(snapshot_ax), id(aia_ax)}) != 3
-                    or snapshot_ax.figure is not ax.figure or aia_ax.figure is not ax.figure):
-                raise ValueError("ax, snapshot_ax, and aia_ax must be different Axes in the same figure")
-        if ax is None:
-            _, (ax, snapshot_ax, aia_ax) = plt.subplots(
-                1, 3, figsize=(24, 8), gridspec_kw={"width_ratios": [1.5, 1, 1]},
-                layout="constrained",
-            )
-        return ax, snapshot_ax, aia_ax
-
-    def plot(self, *, harpnums=None, ax=None, include_full_disk=False, include_sxr=False,
-             show_snapshot=False, snapshot_ax=None, aia_ax=None,
-             show_uncertainty=True, min_peak_flux=0.0, legend="auto"):
-        """Plot selected HARP curves (all by default), with optional totals.
-
-        Missing HARP rows break lines. ``show_uncertainty=True`` shades
-        regional flux +/- one flux_sum_uncertainty and enables snapshot
-        uncertainty labels, only where available. Deterministic predictions
-        have no bands or +/- labels. These Gaussian variance attributions
-        are not calibrated regional errors. The flux axis is logarithmic:
-        nonpositive/nonfinite flux samples break lines, and bands whose lower
-        bound is nonpositive are omitted rather than clipped onto the axis.
-        ``min_peak_flux`` selects HARPs whose maximum finite positive flux
-        over the entire series is at least this threshold, in W/m². Regions
-        with no positive samples are hidden. It filters snapshot HARP labels
-        too, without changing the returned tables or predictions.
-        ``legend='auto'`` shows a compact legend below the curves when a
-        snapshot is visible (HARP IDs remain on the flux map), otherwise a
-        full legend below the curves. Use 'full', 'compact', or 'none' to
-        override. HARP colors remain stable when filtering.
-        Returns a matplotlib Axes. Use ``harpnums=[]`` for totals only.
-        ``show_snapshot=True`` adds the selected prediction's standard
-        ``plot_flux_map`` panel, then its retained AIA image on the far right.
-        Flux-map HARP overlays share the curve colors; AIA has no overlays.
-        Create it with ``predict_series(..., snapshot_time=...)`` first.
-        Only selected HARPs present at the snapshot time are outlined. A
-        dashed line marks that requested UTC time in the curves. If ax is
-        supplied, snapshot_ax (flux map) and aia_ax must be distinct Axes in
-        the same figure; otherwise all three are created automatically.
-        The returned Axes
-        is always the light-curve panel. Disabling shows only the curves.
-        The snapshot is the observation nearest the target supplied to predict_series,
-        with earlier observations winning ties.
-
-        Parameters
-        ----------
-        harpnums : iterable of int or None, optional
-            HARP identifiers to display, e.g. [1234, 5678]. None considers all
-            regions; [] displays only any enabled comparison curves. A single
-            integer must be wrapped in a list. Unknown IDs raise ValueError.
-        ax : matplotlib.axes.Axes or None, optional
-            Curve axes. None creates a figure; with snapshots, custom axes require
-            all three of ax, snapshot_ax, and aia_ax in the same figure.
-        include_full_disk, include_sxr : bool, default False
-            Add the full-disk prediction and measured GOES XRS-B comparison,
-            respectively. Neither comparison is affected by min_peak_flux.
-        show_snapshot : bool, default False
-            Add the selected flux map and matching plain AIA image panels.
-        snapshot_ax, aia_ax : matplotlib.axes.Axes or None, optional
-            Flux-map and AIA axes, distinct from ax and each other. Omit all three
-            axes for automatic layout.
-        show_uncertainty : bool, default True
-            Show available regional uncertainty shading and flux-map +/- labels.
-            Deterministic outputs never receive artificial uncertainty values.
-        min_peak_flux : float, default 0.0
-            Finite nonnegative HARP peak threshold in W/m², e.g. 1e-7. Tests the
-            maximum positive predicted regional flux across the whole series,
-            not just the snapshot. Filters visuals only; returned tables stay complete.
-        legend : {"auto", "full", "compact", "none"}, default "auto"
-            Legend below the curve axes. Auto uses compact with snapshots, full
-            otherwise. Compact shows a region count and comparison/marker keys.
-
-        Returns
-        -------
-        matplotlib.axes.Axes
-            Light-curve axes. Its figure contains the optional snapshot panels.
-
-        Examples
-        --------
-        >>> ax = series.plot(show_snapshot=True,
-        ...                  min_peak_flux=1e-7, legend="compact")
-        """
-        if legend not in {"auto", "full", "compact", "none"}:
-            raise ValueError("legend must be 'auto', 'full', 'compact', or 'none'")
-        curves = self.harp_light_curves()
-        selected = self._select_harps(curves, harpnums, min_peak_flux)
-        snapshot = self.snapshot if show_snapshot else None
-        if show_snapshot and snapshot is None:
-            raise ValueError("No AIA snapshot retained; use predict_series(..., snapshot_time=...)")
-        #Creates subplots for the curves, flux map, and AIA image if show_snapshot is True. If ax is supplied, snapshot_ax and aia_ax must also be supplied and distinct. 
-        ax, snapshot_ax, aia_ax = self._plot_axes(ax, snapshot_ax, aia_ax, show_snapshot)
-
-        # Assign colors before filtering so each HARP keeps its identity.
-        colors = {harpnum: _harp_rank_color(rank) for rank, harpnum in enumerate(curves)}
-        self._plot_curves(ax, curves, selected, colors, include_full_disk, include_sxr, show_uncertainty)
-        if snapshot is not None:
-            self._plot_snapshot_panels(ax, snapshot_ax, aia_ax, snapshot, selected, colors, show_uncertainty)
-        self._plot_legend(ax, selected, legend, show_snapshot)
-        return ax
-
-    def _plot_curves(self, ax, curves, selected, colors, include_full_disk, include_sxr, show_uncertainty):
-        """Draw log-safe regional/comparison curves, uncertainty, and UTC axes."""
-        has_uncertainty = False
-        ax.set_yscale("log")
-        for harpnum in selected:
-            curve = curves[harpnum]
-            flux = _positive_flux(curve["flux_sum"])
-            ax.plot(curve.index, flux, color=colors[harpnum], marker=".", markersize=2.5, label=f"HARP {harpnum}")
-            if show_uncertainty:
-                sigma = curve["flux_sum_uncertainty"].to_numpy(dtype=float)
-                lower, upper = flux - sigma, flux + sigma
-                valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & (lower > 0) & np.isfinite(upper)
-                if valid.any():
-                    ax.fill_between(
-                        curve.index, np.where(valid, lower, np.nan), np.where(valid, upper, np.nan),
-                        where=valid, color=colors[harpnum], alpha=0.18, linewidth=0,
-                    )
-                    has_uncertainty = True
-        totals = self.to_dataframe()
-        if include_full_disk:
-            ax.plot(totals.index, _positive_flux(totals["flux"]), color="black", marker=".", markersize=2.5, label="FOXES full disk")
-        if include_sxr:
-            ax.plot(totals.index, _positive_flux(totals["observed_xrsb_flux"]), color="0.5", linestyle="--", marker=".", markersize=2.5, label="Observed GOES XRS-B")
-        ax.set(xlabel="Requested time (UTC)", ylabel="SXR flux (W/m²)")
-        from matplotlib.dates import AutoDateLocator, ConciseDateFormatter, date2num
-        locator = AutoDateLocator()
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(ConciseDateFormatter(locator, tz=timezone.utc))
-        #Setting limits for the x-axis based on the first and last timestamps in the totals DataFrame. If the start and end are the same, it expands the range by 30 seconds on each side to avoid a zero-width axis.
-        if len(totals.index):
-            start, end = (float(date2num(stamp.to_pydatetime())) for stamp in (totals.index[0], totals.index[-1]))
-            if start == end:
-                start, end = start - 30 / 86400, end + 30 / 86400
-            ax.set_xlim(start, end)
-        if has_uncertainty:
-            ax.set_title(r"HARP light curves (shading: $\pm1\sigma$ variance attribution)")
-
-    def _plot_snapshot_panels(self, ax, snapshot_ax, aia_ax, snapshot, selected, colors, show_uncertainty):
-        """Reuse the standard flux map beside its matching plain AIA image."""
-        from matplotlib.dates import date2num
-
-        assert snapshot is not None and snapshot.data is not None
-        assert snapshot_ax is not None and aia_ax is not None
-        prediction = next(p for p in self.predictions if self._timestamp(p) == snapshot.metadata.timestamp)
-        regions = [r for r in prediction.harp_regions or []
-                   if r["harpnum"] in selected and np.isfinite(r["flux_sum"]) and r["flux_sum"] > 0]
-        aia_ax.set_title(
-            f"AIA {snapshot.metadata.wavelengths[0]} Å\n"
-            f"{snapshot.metadata.timestamp:%Y-%m-%d %H:%M:%S} UTC"
-        )
-        ax.axvline(float(date2num(_utc_datetime(snapshot.metadata.timestamp))), color="0.5", linestyle=":", label="AIA snapshot")
-        plot_flux_map(
-            prediction, ax=snapshot_ax,
-            show_harp_boxes=True, harp_regions=regions, harp_colors=colors,
-            min_harp_flux=0, show_harp_uncertainty=show_uncertainty, harp_label_fontsize=8,
-        )
-        image = snapshot.data[0]
-        low, high = np.percentile(image, [1, 99])
-        if low == high:
-            low, high = low - 0.5, high + 0.5
-        aia_ax.imshow(image, origin="lower", cmap="gray", vmin=low, vmax=high)
-        aia_ax.set(xlabel="X (AIA pixels)", ylabel="Y (AIA pixels)")
-
-    @staticmethod
-    def _plot_legend(ax, selected, legend, show_snapshot):
-        """Put the full/compact legend below the curve axes, or omit it."""
-        mode = ("compact" if show_snapshot else "full") if legend == "auto" else legend
-        if mode != "none":
-            handles, labels = ax.get_legend_handles_labels()
-            if mode == "compact":
-                from matplotlib.lines import Line2D
-                entries = [(handle, label) for handle, label in zip(handles, labels) if not label.startswith("HARP ")]
-                if selected:
-                    caption = f"HARP regions ({len(selected)})" + ("; IDs on flux map" if show_snapshot else "")
-                    entries.insert(0, (Line2D([], [], color="0.4"), caption))
-                handles, labels = ([entry[0] for entry in entries], [entry[1] for entry in entries])
-            if handles:
-                ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.18),
-                          ncol=min(3, len(handles)), frameon=False, fontsize=8)
-
-
-
-class Predictor:
-    """Keep a FOXES checkpoint loaded for repeated predictions.
-
-    Parameters
-    ----------
-    checkpoint_path : str or pathlib.Path
-        Path to a compatible Lightning ``.ckpt`` or serialized model file.
-    device : {"auto", "cpu", "cuda", "mps"}, default "auto"
-        Inference device. ``"auto"`` selects an available accelerator.
-    aia_norm_path : str or pathlib.Path or None, optional
-        Matching AIA normalization artifact, if the checkpoint was trained
-        with one. Do not apply that artifact in :class:`AIAProcessor` too.
-    legacy_model : bool, default False
-        Opt into the approximate 0.7 correction for old SXR-trained checkpoints.
-        Applies before legacy_cutoff to total and patch flux. Only deterministic
-        legacy checkpoints support this correction. Timestamps are required.
-    legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
-        Exclusive UTC cutoff for the legacy correction. Naive times mean UTC.
-        This configurable date rule approximates mixed-satellite training data.
-
-    Notes
-    -----
-    Create the predictor once when the UI starts and reuse it for requests.
-    """
-
-    def __init__(self, checkpoint_path, *, device="auto", aia_norm_path=None,
-                 legacy_model=False, legacy_cutoff="2016-11-19"):
-        """Load the checkpoint and its optional input normalization.
-
-        Parameters
-        ----------
-        checkpoint_path : str or pathlib.Path
-            Existing full .ckpt/model file, not a Git LFS pointer; ~ is expanded.
-        device : {"auto", "cpu", "cuda", "mps"}, default "auto"
-            Compute device; auto selects an available accelerator.
-        aia_norm_path : str or pathlib.Path or None, optional
-            Matching .npz/.csv AIA normalization artifact. Supply only if input
-            arrays have not already received that normalization.
-        legacy_model : bool, default False
-            Approximate legacy output correction; enable for the bundled old
-            checkpoints. Leave False for models retrained on corrected targets.
-        legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
-            Exclusive UTC cutoff. Outputs before it are multiplied by 0.7.
-        """
-        from forecasting.inference import load_model_from_config
-        from forecasting.dataset import AIANormTransform
-        from forecasting.calibration import LegacyCalibration
-
-        self.legacy_calibration = LegacyCalibration(legacy_model, legacy_cutoff)
-        self.legacy_model = self.legacy_calibration.enabled
-        self.legacy_cutoff = self.legacy_calibration.cutoff
-        path = Path(checkpoint_path).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        self.model = load_model_from_config({
-            "data": {"checkpoint_path": str(path)}, "device": device,
-            "legacy_model": legacy_model, "legacy_cutoff": self.legacy_cutoff,
-        })
-        self.device = next(self.model.parameters()).device
-        self.transform = (
-            AIANormTransform.from_file(aia_norm_path)
-            if aia_norm_path is not None else None
-        )
-        self.model_kwargs = dict(self.model.hparams["model_kwargs"])
-
-    def predict_series(self, observations, *, snapshot_time=None, snapshot_wavelength=193):
-        """Predict observations, optionally keeping the AIA image nearest a target time.
-
-        The iterable is consumed once, reusing this model. With a snapshot target,
-        each observation replaces the retained image only if it is closer to that
-        time (earlier wins ties). Only one channel image is kept in memory.
-        No temporary image files are written. Prediction failures raise.
-
-        Parameters
-        ----------
-        observations : iterable of Observation
-            List, tuple, or generator such as processor.iter_observations(...) or
-            load_observations("saved_aia"). Each item needs a finite seven-channel
-            processed array matching the checkpoint. Wrap plain arrays in an
-            Observation first.
-        snapshot_time : datetime.datetime, datetime.date, numpy.datetime64, str, or None
-            Target time for the optional snapshot, e.g. "2024-03-23 01:40".
-            Accepts all parse_timestamp formats; naive values mean UTC.
-            None retains no image. To display the query midpoint, pass
-            start + (end - start) / 2 using parsed datetime values.
-        snapshot_wavelength : int, default 193
-            Angstrom channel to retain, e.g. 171 or 193, not a channel index.
-            Must occur in each observation's metadata.wavelengths when a
-            snapshot_time is supplied.
-
-        Returns
-        -------
-        PredictionSeries
-            Timestamped predictions and an optional one-channel snapshot for
-            series.plot(show_snapshot=True). Full input stacks are not retained.
-        """
-        target = _utc_datetime(snapshot_time) if snapshot_time is not None else None
-        predictions = []
-        snapshot = None
-        best_distance = timedelta.max
-
-        for observation in observations:
-            if not isinstance(observation, Observation):
-                raise TypeError("predict_series expects Observation instances")
-            if target is not None and snapshot_wavelength not in observation.metadata.wavelengths:
-                raise ValueError(f"Snapshot wavelength {snapshot_wavelength} Å is absent from the observation")
-            prediction = self.predict(observation)
-            predictions.append(prediction)
-            if target is None:
-                continue
-
-            # Keep this image only if it is closer, or earlier on an equal distance.
-            timestamp = _utc_datetime(observation.metadata.timestamp)
-            distance = abs(timestamp - target)
-            if (snapshot is None or distance < best_distance
-                    or (distance == best_distance and timestamp < _utc_datetime(snapshot.metadata.timestamp))):
-                if observation.data is None:
-                    raise ValueError("AIA data is required to retain a snapshot")
-                channel = observation.metadata.wavelengths.index(snapshot_wavelength)
-                snapshot = _make_aia_snapshot(observation.data[channel], prediction, snapshot_wavelength)
-                best_distance = distance
-
-        return PredictionSeries(tuple(predictions), snapshot=snapshot)
-
-    def predict(self, image, *, timestamp=None):
-        """Predict global SXR flux and patch contributions from one AIA stack.
-
-        Parameters
-        ----------
-        image : Observation or array-like
-            Finite channel-first processed AIA stack in 94, 131, 171, 193,
-            211, 304, 335 Å order. Shape is ``(7, H, W)`` with ``H`` and
-            ``W`` determined by the checkpoint's patch size and grid.
-            Observation metadata is copied into the returned prediction.
-        timestamp : datetime.datetime, datetime.date, numpy.datetime64, str, or None
-            Time for a plain array; all parse_timestamp formats work, e.g.
-            "2023/08/01 12:00" or "2023-08-01T12:00:00Z". Naive values
-            mean UTC; None leaves an array prediction without time metadata. Its crop is assumed to use
-            the standard AIA channel order and 0.1 padding. For other crops,
-            supply an Observation with explicit ObservationMetadata.
-            Required for array inputs when legacy_model=True.
-
-        Returns
-        -------
-        Prediction
-            Full-disk flux, patch flux map, and optional Gaussian uncertainty.
-
-        Raises
-        ------
-        ValueError
-            If the image shape is incompatible or values are nonfinite.
-        """
-        import torch
-        from forecasting.inference import uncertainty_from_prediction
-
-        if isinstance(image, Observation) and image.data is None:
-            raise ValueError("Observation has no AIA data; fetch with include_aia=True before prediction")
-        metadata = image.metadata if isinstance(image, Observation) else None
-        array = np.asarray(image.data if isinstance(image, Observation) else image)
-        patch_size = int(self.model_kwargs["patch_size"])
-        patch_count = int(self.model_kwargs["num_patches"])
-        grid = int(np.sqrt(patch_count))
-        channels = int(self.model_kwargs["num_channels"])
-        expected = (channels, grid * patch_size, grid * patch_size)
-        if array.shape != expected:
-            raise ValueError(f"Expected processed AIA shape {expected}, got {array.shape}")
-        if not np.isfinite(array).all():
-            raise ValueError("AIA image contains non-finite values")
-        if metadata is not None:
-            if metadata.wavelengths != AIAProcessor.WAVELENGTHS:
-                raise ValueError("Observation wavelengths must be in FOXES AIA channel order")
-            if timestamp is not None and _utc_datetime(timestamp) != metadata.timestamp:
-                raise ValueError("timestamp conflicts with the observation metadata")
-        elif timestamp is not None:
-            metadata = ObservationMetadata(timestamp=timestamp, image_shape=array.shape)
-        scale = self.legacy_calibration.factor(metadata.timestamp if metadata else None)
-        tensor = torch.as_tensor(np.array(array, dtype=np.float32, copy=True))
-        if self.transform is not None:
-            tensor = self.transform(tensor)
-        tensor = tensor.permute(1, 2, 0).unsqueeze(0).to(self.device)
-        with torch.inference_mode():
-            outputs = self.model(tensor, return_attention=False)
-            if getattr(self.model, "predicts_uncertainty", False):
-                flux, variance, patches, patch_variance = outputs
-                intervals_raw = uncertainty_from_prediction(
-                    flux, variance, self.model.sxr_norm,
-                )
-                intervals = {
-                    level: (
-                        float(intervals_raw[f"lower_{level}"].item()),
-                        float(intervals_raw[f"upper_{level}"].item()),
-                    ) for level in ("68", "95")
-                }
-                patch_uncertainty = torch.sqrt(
-                    patch_variance.clamp_min(0)
-                ).reshape(grid, grid).detach().cpu().numpy()
-            else:
-                flux, patches = outputs
-                intervals = None
-                patch_uncertainty = None
-        flux_map = patches.reshape(grid, grid).detach().cpu().numpy()
-        if scale != 1.0:
-            flux_map = flux_map * scale
-        return Prediction(
-            metadata=metadata,
-            flux=float(flux.item()) * scale, flux_map=flux_map,
-            intervals=intervals, patch_uncertainty_map=patch_uncertainty,
-            harp_regions=image.harp_regions if isinstance(image, Observation) else None,
-            sxr=image.sxr if isinstance(image, Observation) else None,
-            legacy_model=self.legacy_model, flux_scale_factor=scale,
-        )
-
-
-def load_model(checkpoint_path, *, device="auto", aia_norm_path=None,
-               legacy_model=False, legacy_cutoff="2016-11-19"):
-    """Load a checkpoint for repeated calls to :func:`predict`.
-
-    Parameters
-    ----------
-    checkpoint_path : str or pathlib.Path
-        Existing full checkpoint/model file, e.g.
-        "model_assets/UncertaintyModel.ckpt". Checkpoints are distributed
-        separately from the Python package.
-        Git LFS pointer text files are not model checkpoints. ~ is expanded.
-    device : {"auto", "cpu", "cuda", "mps"}, default "auto"
-        Inference device; auto selects an available accelerator.
-    aia_norm_path : str or pathlib.Path or None, optional
-        Checkpoint-matched .npz/.csv AIA normalization artifact. Apply it once:
-        omit here if preprocessing already applied the same normalization.
-    legacy_model : bool, default False
-        Approximate correction for legacy checkpoints: multiply total/patch
-        flux by 0.7 before legacy_cutoff. Only deterministic legacy checkpoints
-        support this correction. Requires timestamps. Leave False for retrained
-        models using corrected SXR. Weights and checkpoint normalization stay
-        in their original training scale.
-    legacy_cutoff : datetime.datetime or ISO date/time str, default "2016-11-19"
-        Exclusive UTC cutoff; naive times mean UTC. The date rule is an
-        approximation during the mixed-satellite era, not a calibrated model.
-
-    Returns
-    -------
-    Predictor
-        Loaded model and optional AIA transform.
-    """
-    return Predictor(
-        checkpoint_path, device=device, aia_norm_path=aia_norm_path,
-        legacy_model=legacy_model, legacy_cutoff=legacy_cutoff,
-    )
-
-
-def predict(image, *, model, timestamp=None):
-    """Run one processed AIA stack through a loaded FOXES model.
-
-    Parameters
-    ----------
-    image : Observation or array-like
-        Channel-first AIA stack; see :meth:`Predictor.predict` for its shape
-        and channel order.
-    model : Predictor
-        Predictor returned by :func:`load_model`.
-    timestamp : datetime.datetime, datetime.date, numpy.datetime64, str, or None
-        Array input time accepted by parse_timestamp, e.g.
-        "2023/08/01 12:00"; naive values mean UTC. None omits array
-        time metadata. Observation inputs carry their own
-        timestamp and crop metadata. See :meth:`Predictor.predict`.
-
-    Returns
-    -------
-    Prediction
-        Full-disk flux, flux map, and optional uncertainty in W/m².
-    """
-    return model.predict(image, timestamp=timestamp)
 
 
 def _log_limits(positive, vmin, vmax):
@@ -1983,318 +2238,3 @@ def _harp_rank_color(rank):
     if rank < len(palette):
         return to_rgb(palette[rank])
     return tuple(hsv_to_rgb([(rank * 0.61803398875) % 1, 0.6, 0.85]))
-
-
-def plot_flux_map(prediction, *, ax=None, cmap="inferno", vmin=None, vmax=None,
-                  show_harp_boxes=False, harp_regions=None, timestamp=None,
-                  jsoc_email=None, min_harp_flux=1e-7, harp_label_fontsize=6,
-                  show_harp_uncertainty=True, harp_label_offsets=None,
-                  harp_label_max_shift=80, aia_image=None, harp_colors=None):
-    """Plot patch flux contributions with a logarithmic color scale.
-
-    For a Prediction without an AIA background, the title shows its predicted
-    FOXES flux with the model's full-disk uncertainty when available, and the measured SXR-B
-    satellite mean when available, all in W/m². The uncertainty is the
-    square root of summed patch variances, not a calibrated error bar.
-    Missing values are omitted. Plain map arrays do not add a flux title.
-
-    Parameters
-    ----------
-    prediction : Prediction or array-like
-        A FOXES result or a two-dimensional patch flux map in W/m².
-    ax : matplotlib.axes.Axes or None, optional
-        Axes to draw on. A new figure and axes are created if omitted.
-    cmap : str or matplotlib.colors.Colormap, default "inferno"
-        Colormap name such as "inferno" or "gray", or a Colormap instance.
-    vmin, vmax : float or None, optional
-        Positive limits for the logarithmic color scale in W/m². By default,
-        use the smallest and largest positive values in the map.
-    show_harp_boxes : bool, default False
-        Draw HARP outlines labeled with their numbers and flux sums, with
-        fixed labels anchored to box corners. Box and label colors are fixed
-        by descending flux rank, independent of the number of HARPs. Sums include
-        positive patch contributions whose centers fall inside each box.
-    harp_regions : list[dict] or None, optional
-        Pre-fetched regions from :meth:`HARPProcessor.fetch_date`.
-        For manually supplied boxes, each dict needs HARPNUM or harpnum,
-        plus top_pct, left_pct, width_pct, and height_pct, in percent of
-        the input crop measured from the top-left display corner.
-        Defaults to the prediction's regions. If neither has been fetched
-        and ``show_harp_boxes`` is true, regions are queried from JSOC. An
-        empty list suppresses the query, including one carried by a prediction.
-    timestamp : datetime.datetime, datetime.date, numpy.datetime64, str, or None
-        Complete AIA time, e.g. "2023/08/01 12:00" or an aware
-        datetime; naive values mean UTC. Accepts the same formats as
-        :meth:`AIAProcessor.fetch_date`. Defaults to the prediction's metadata.
-        Required for an automatic HARP query when metadata is absent.
-    jsoc_email : str or None, optional
-        JSOC email for the automatic HARP query.
-    min_harp_flux : float, default 1e-7
-        Minimum HARP flux sum in W/m² to show in the map. Regions
-        below this value are hidden; prediction results remain complete.
-    harp_label_fontsize : float, default 6
-        Fixed HARP label size in points, independent of box size.
-    show_harp_uncertainty : bool, default True
-        Add a third label line, ``± uncertainty``, when patch uncertainties
-        are available. This is sqrt(sum(sigma_patch**2)) within the HARP box,
-        in W/m², using the model's additive variance attribution. Disabling
-        this affects labels only; prediction results retain uncertainties.
-    harp_label_offsets : dict[int, tuple[float, float]] or None, optional
-        Manual (dx, dy) label offsets in points, keyed by HARP number. Positive
-        dx moves right; positive dy moves up, relative to the chosen box corner.
-        Custom offsets add a matching connector. Defaults to a three-point
-        diagonal gap outside a box corner, preferring the side toward the image center.
-        The overlap pass tries all four corners before small four-point nudges.
-        Offsets are starting positions; shifted labels get connectors.
-        Placement is calculated once; replot after substantial size changes.
-    harp_label_max_shift : float, default 80
-        Maximum automatic nudge from a corner, in points. Set to zero to fix
-        labels at their preferred corner. Automatic positions stay outside
-        their HARP box and inside the map, unless a manual offset was supplied.
-        If no clear position is found within this limit, retain the starting position; crowded maps
-        may still need manual offsets or a higher min_harp_flux.
-    aia_image : array-like or None, optional
-        Display a processed 2D AIA channel instead of the patch flux map,
-        reusing the same HARP box/label placement. The image must cover the
-        exact crop used for prediction. Flux labels still sum predicted
-        patch contributions, not AIA intensity. Uses a linear 1–99 percentile
-        stretch (or vmin/vmax), pixel axes, and no flux colorbar. Pass
-        ``cmap='gray'`` for a neutral background. No downloading occurs.
-    harp_colors : dict[int, color] or None, optional
-        Override outline/label colors by HARP number, for matching other
-        plots. Unspecified regions retain descending-flux-rank colors.
-        Examples: {1234: "tab:blue"}, {1234: "#56B4E9"}, or
-        {1234: (0.2, 0.5, 0.8)} with RGB components in [0, 1].
-
-    Returns
-    -------
-    matplotlib.axes.Axes
-        Axes containing the map. Flux maps also have a flux colorbar.
-
-    Raises
-    ------
-    ValueError
-        If the map is not finite and two-dimensional, has no positive values,
-        or the color limits are invalid. Nonpositive cells are masked.
-    """
-    from matplotlib import pyplot as plt
-    from matplotlib import patheffects
-    from matplotlib.colors import LogNorm
-    from matplotlib.patches import Rectangle
-
-    flux_map = np.asarray(
-        prediction.flux_map if isinstance(prediction, Prediction) else prediction
-    )
-    if flux_map.ndim != 2 or not np.isfinite(flux_map).all():
-        raise ValueError("flux_map must be a finite 2D array")
-    positive = flux_map[flux_map > 0]
-    if positive.size == 0:
-        raise ValueError("flux_map must contain positive contributions")
-    if aia_image is None:
-        low, high = _log_limits(positive, vmin, vmax)
-    else:
-        aia_image = np.asarray(aia_image)
-        if aia_image.ndim != 2 or not np.isfinite(aia_image).all() or aia_image.size == 0:
-            raise ValueError("aia_image must be a finite nonempty 2D array of the prediction crop")
-        percentiles = np.percentile(aia_image, [1, 99])
-        low = float(percentiles[0]) if vmin is None else float(vmin)
-        high = float(percentiles[1]) if vmax is None else float(vmax)
-        if low == high and vmin is None and vmax is None:
-            low, high = low - 0.5, high + 0.5
-        if not np.isfinite([low, high]).all() or low >= high:
-            raise ValueError("AIA color limits must be finite with vmin < vmax")
-    if not np.isfinite(min_harp_flux) or min_harp_flux < 0:
-        raise ValueError("min_harp_flux must be finite and nonnegative (W/m²)")
-    if not np.isfinite(harp_label_fontsize) or harp_label_fontsize <= 0:
-        raise ValueError("harp_label_fontsize must be finite and positive")
-    if not np.isfinite(harp_label_max_shift) or harp_label_max_shift < 0:
-        raise ValueError("harp_label_max_shift must be finite and nonnegative")
-    if show_harp_boxes and harp_regions is None and isinstance(prediction, Prediction):
-        harp_regions = prediction.harp_regions
-    if show_harp_boxes and harp_regions is None:
-        metadata = prediction.metadata if isinstance(prediction, Prediction) else None
-        if metadata is not None:
-            if timestamp is not None and _utc_datetime(timestamp) != metadata.timestamp:
-                raise ValueError("timestamp conflicts with the prediction metadata")
-            timestamp = metadata.timestamp
-        if timestamp is None:
-            raise ValueError("timestamp is required to query HARP regions")
-        crop = {} if metadata is None else {
-            "resolution": metadata.image_shape[-1],
-            "padding_factor": metadata.padding_factor,
-            "bbox_expansion": metadata.harp_bbox_expansion,
-        }
-        harp_regions = HARPProcessor(email=jsoc_email, **crop).fetch_date(timestamp)
-    regions = sorted(
-        (region for region in _harp_region_fluxes(
-            flux_map, harp_regions,
-            prediction.patch_uncertainty_map if isinstance(prediction, Prediction) else None,
-        )
-         if region["flux_sum"] >= min_harp_flux),
-        key=lambda region: (-region["flux_sum"], region["harpnum"]),
-    ) if show_harp_boxes else []
-    if ax is None:
-        _, ax = plt.subplots()
-    if aia_image is None:
-        artist = ax.imshow(
-            np.ma.masked_less_equal(flux_map, 0), origin="lower", cmap=cmap,
-            norm=LogNorm(vmin=low, vmax=high),
-        )
-        ax.set(xlabel="X (Patches)", ylabel="Y (Patches)")
-        ax.figure.colorbar(artist, ax=ax, label="Flux contribution (W m$^{-2}$)")
-    else:
-        ax.imshow(aia_image, origin="lower", cmap=cmap, vmin=low, vmax=high)
-        ax.set(xlabel="X (AIA pixels)", ylabel="Y (AIA pixels)")
-    if isinstance(prediction, Prediction) and aia_image is None:
-        title = []
-        sxr_b = prediction.sxr.get("xrsb_flux") if prediction.sxr is not None else None
-        if sxr_b is not None and np.isfinite(sxr_b):
-            title.append(f"Observed SXR-B: {sxr_b:.2e} W/m²")
-        if prediction.flux is not None and np.isfinite(prediction.flux):
-            predicted = f"Predicted FOXES: {prediction.flux:.2e}"
-            if prediction.patch_uncertainty_map is not None:
-                uncertainty = np.sqrt(np.sum(np.square(prediction.patch_uncertainty_map)))
-                if np.isfinite(uncertainty):
-                    predicted += f" ± {uncertainty:.2e}"
-            title.append(f"{predicted} W/m²")
-        ax.set_title("\n".join(title))
-    if regions:
-        rows, cols = flux_map.shape if aia_image is None else aia_image.shape
-        colors = [(harp_colors or {}).get(region["harpnum"], _harp_rank_color(rank))
-                  for rank, region in enumerate(regions)]
-        offsets = harp_label_offsets or {}
-        # Render once so label sizes can be measured in screen pixels.
-        ax.figure.canvas.draw()
-        renderer = ax.figure._get_renderer()
-        map_bounds = ax.get_window_extent(renderer)
-        occupied = []
-        occupied_regions = []
-        for rank, (region, color) in enumerate(zip(regions, colors)):
-            top, left, width, height = (
-                float(region[key]) for key in
-                ("top_pct", "left_pct", "width_pct", "height_pct")
-            )
-            x = -0.5 + left / 100 * cols
-            y = -0.5 + (100 - top - height) / 100 * rows
-            box_width = width / 100 * cols
-            box_height = height / 100 * rows
-            outline = Rectangle(
-                (x, y), box_width, box_height,
-                fill=False, edgecolor=color, linewidth=1.8,
-            )
-            outline.set_path_effects([
-                patheffects.Stroke(linewidth=3.5, foreground="black"),
-                patheffects.Normal(),
-            ])
-            ax.add_patch(outline)
-            region_bounds = outline.get_window_extent(renderer)
-            occupied_regions.append(region_bounds)
-            text = f'#{region["harpnum"]}\n{region["flux_sum"]:.2e}'
-            if show_harp_uncertainty and region["flux_sum_uncertainty"] is not None:
-                text += f'\n± {region["flux_sum_uncertainty"]:.2e}'
-            # Text extends diagonally outward from each corner.
-            horizontal = [(x, "right", -3), (x + box_width, "left", 3)]
-            vertical = [(y, "top", -3), (y + box_height, "bottom", 3)]
-            if left + width / 2 < 50:
-                horizontal.reverse()
-            if top + height / 2 > 50:
-                vertical.reverse()
-            placements = [((cx, cy), (dx, dy), ha, va)
-                          for cy, va, dy in vertical for cx, ha, dx in horizontal]
-            harpnum = region["harpnum"]
-            corner, inset, ha, va = placements[0]
-            if harpnum in offsets:
-                placements = [(corner, offsets[harpnum], ha, va)]
-            elif harp_label_max_shift == 0:
-                placements = placements[:1]
-            label = ax.annotate(
-                text, xy=corner, xytext=offsets.get(harpnum, inset), textcoords="offset points",
-                ha=ha, va=va,
-                color=color, fontsize=harp_label_fontsize, fontweight="bold",
-                zorder=3 + len(regions) - rank,  # Stronger labels draw above later connectors.
-                bbox={"facecolor": "black", "alpha": .5, "edgecolor": "none", "pad": 1},
-                arrowprops={"arrowstyle": "-", "color": color},
-            )
-            # Try the four corners first, then small nudges from the preferred corner.
-            dx, dy = placements[0][1]
-            for step in range(4, int(harp_label_max_shift) + 1, 4):
-                placements.extend((corner, position, ha, va) for position in
-                                  [(dx, dy + step), (dx, dy - step),
-                                   (dx + step, dy), (dx - step, dy)])
-            chosen = placements[0]  # Retain the start if no nearby space is free.
-            for anchor, position, horizontal_align, vertical_align in placements:
-                label.xy = anchor
-                label.set(position=position, ha=horizontal_align, va=vertical_align)
-                label.update_positions(renderer)
-                label.update_bbox_position_size(renderer)
-                bounds = label.get_bbox_patch().get_window_extent(renderer).padded(2)
-                within_map = (map_bounds.contains(*bounds.p0) and map_bounds.contains(*bounds.p1))
-                if not within_map and harpnum not in offsets:
-                    continue
-                outside_x = bounds.x1 < region_bounds.x0 or bounds.x0 > region_bounds.x1
-                outside_y = bounds.y1 < region_bounds.y0 or bounds.y0 > region_bounds.y1
-                if not (outside_x and outside_y) and harpnum not in offsets:
-                    continue
-                if harpnum not in offsets and any(bounds.overlaps(box) for box in occupied_regions):
-                    continue
-                if not any(bounds.overlaps(other) for other in occupied):
-                    chosen = (anchor, position, horizontal_align, vertical_align)
-                    break
-            label.xy = chosen[0]
-            label.set(position=chosen[1], ha=chosen[2], va=chosen[3])
-            label.update_positions(renderer)
-            label.update_bbox_position_size(renderer)
-            bounds = label.get_bbox_patch().get_window_extent(renderer).padded(2)
-            occupied.append(bounds)
-            shifted = chosen != placements[0]
-            label.arrow_patch.set_visible(shifted or harpnum in offsets)
-    return ax
-
-def plot_uncertainty_map(prediction, *, ax=None, cmap="magma", vmin=None, vmax=None):
-    """Plot patch uncertainty contributions with a logarithmic color scale.
-
-    Parameters
-    ----------
-    prediction : Prediction or array-like
-        A FOXES result or a two-dimensional patch uncertainty map in W/m².
-    ax : matplotlib.axes.Axes or None, optional
-        Axes to draw on. A new figure and axes are created if omitted.
-    cmap : str or matplotlib.colors.Colormap, default "magma"
-        Colormap name such as "magma", or a Colormap instance.
-    vmin, vmax : float or None, optional
-        Positive limits for the logarithmic color scale in W/m². By default,
-        use the smallest and largest positive values in the map.
-
-    Returns
-    -------
-    matplotlib.axes.Axes
-        Axes containing the map. Its figure also has an uncertainty colorbar.
-
-    Raises
-    ------
-    ValueError
-        If the map is not finite and two-dimensional, has no positive values,
-        or the color limits are invalid. Nonpositive cells are masked.
-    """
-    from matplotlib import pyplot as plt
-    from matplotlib.colors import LogNorm
-
-    uncertainty_map = np.asarray(
-        prediction.patch_uncertainty_map if isinstance(prediction, Prediction) else prediction
-    )
-    if uncertainty_map.ndim != 2 or not np.isfinite(uncertainty_map).all():
-        raise ValueError("uncertainty_map must be a finite 2D array")
-    positive = uncertainty_map[uncertainty_map > 0]
-    if positive.size == 0:
-        raise ValueError("uncertainty_map must contain positive contributions")
-    low, high = _log_limits(positive, vmin, vmax)
-    if ax is None:
-        _, ax = plt.subplots()
-    artist = ax.imshow(
-        np.ma.masked_less_equal(uncertainty_map, 0),
-        origin="lower", cmap=cmap,
-        norm=LogNorm(vmin=low, vmax=high)
-    )
-    ax.set(xlabel="X (Patches)", ylabel="Y (Patches)")
-    ax.figure.colorbar(artist, ax=ax, label="Patch uncertainty contribution (W m$^{-2}$)")
-    return ax

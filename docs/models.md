@@ -1,62 +1,45 @@
-# Models and checkpoints
+# Models and Checkpoints
 
-FOXES predicts a flux contribution for each image patch. These contributions
-sum to the full-disk soft X-ray flux. HARP regions summarize contributions
-inside active-region boxes; overlapping boxes can count the same patches.
+## Download a Checkpoint
 
-## Download a checkpoint
+Checkpoints are distributed separately from the Python package. Pass a name
+from the first column to `FOXESModel` and it's downloaded the first time and
+cached in `~/.cache/helio_foxes` (or `HELIO_FOXES_CACHE`). You can also
+download a file yourself, or run `git lfs pull` from a clone of the repository,
+and pass its path instead.
 
-Save weights under `model_assets/`, using the paths below. They are separate
-from the Python package; after cloning this repository, `git lfs pull` retrieves
-the checkpoint files.
+| Name | Repository path | Model | Download |
+| --- | --- | --- | --- |
+| `"uncertainty"` (default) | `model_assets/UncertaintyModel.ckpt` | Current model: local + global attention, with Gaussian uncertainty | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/UncertaintyModel.ckpt) |
+| `"inverted-attention-mask"` | `model_assets/LegacyModels/inverted-attention-mask.ckpt` | Legacy deterministic, distant-patch attention *(paper model)* | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/inverted-attention-mask.ckpt) |
+| `"localized-attention-mask"` | `model_assets/LegacyModels/localized-attention-mask.ckpt` | Legacy deterministic, local attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/localized-attention-mask.ckpt) |
+| `"no-attention-mask"` | `model_assets/LegacyModels/no-attention-mask.ckpt` | Legacy deterministic, full attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/no-attention-mask.ckpt) |
 
-| Checkpoint path | Model | Download |
-| --- | --- | --- |
-| `model_assets/UncertaintyModel.ckpt` | Current local + global model, with Gaussian uncertainty | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/UncertaintyModel.ckpt) |
-| `model_assets/LegacyModels/inverted-attention-mask.ckpt` | Legacy deterministic, distant-patch attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/inverted-attention-mask.ckpt) |
-| `model_assets/LegacyModels/localized-attention-mask.ckpt` | Legacy deterministic, local attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/localized-attention-mask.ckpt) |
-| `model_assets/LegacyModels/no-attention-mask.ckpt` | Legacy deterministic, full attention | [Weights](https://media.githubusercontent.com/media/griffin-goodwin/FOXES/main/model_assets/LegacyModels/no-attention-mask.ckpt) |
+## Current Uncertainty Model
 
-## Current uncertainty model
+`UncertaintyModel.ckpt` consists of a local transformer backbone (3 x 3 attention) + a global attention transformer with an uncertainty MLP head.
 
-`UncertaintyModel.ckpt` combines local patch features with shared global
-context. A seven-channel `(7, 512, 512)` AIA input produces a 64 × 64 flux map,
-full-disk flux, and Gaussian prediction intervals.
+No legacy correction is applied to it. The SXR normalization is stored
+inside the checkpoint, so you don't need a separate normalization file.
 
-Load it with the default `legacy_model=False`. Its SXR normalization is embedded
-in the checkpoint; no separate SXR normalization file is needed.
+## Legacy Models
 
-Patch variances add to the full-disk variance. The patch uncertainty map
-attributes that variance across the image; there are no local SXR labels to
-validate regional error bars. See [Results](results.md) for full-disk metrics,
-figures, and measured interval coverage.
-
-## Legacy models
-
-The three deterministic checkpoints use the older SXR targets and do not
-produce uncertainty estimates. Enable their approximate output correction
-when loading them:
+The three deterministic checkpoints were trained on an older version of the
+SXR targets and don't produce uncertainty estimates. Loading one by name turns
+on the legacy correction automatically:
 
 ```python
 import helio_foxes
 
-model = helio_foxes.load_model(
-    "model_assets/LegacyModels/inverted-attention-mask.ckpt",
-    legacy_model=True,
-)
+model = helio_foxes.FOXESModel("inverted-attention-mask")
 ```
 
-Predictions strictly before **2016-11-19 00:00 UTC** receive a **0.7** flux
-factor; later predictions use 1.0. The same factor applies to full-disk and
-patch flux, preserving their sum. Timestamps are required; an `Observation`
-supplies its time automatically.
+If you load a legacy checkpoint from a file path instead, pass
+`legacy_model=True` yourself, since FOXES can't tell from the path. Pass
+`legacy_model=False` to see the uncorrected output.
 
-This date rule approximates the older mixed-satellite targets and does not
-establish predictive calibration. Keep each checkpoint's original weights
-and embedded normalization. The original normalization artifact is
-`model_assets/LegacyModels/normalized_sxr_FOXES_paper.npy`.
-
-## Team
-
-Griffin Goodwin, Alison March, Jayant Biradar, Christopher Schirninger,
-Robert Jarolim, Angelos Vourlidas, Viacheslav Sadykov, and Lorien Pratt.
+With the correction on, any prediction before **2016-11-19 00:00 UTC** is
+multiplied by **0.7** (to remove a SWPC scaling bias), and anything after is left alone. The factor applies to
+both the full-disk flux and the patch map, so they still add up. Each
+prediction needs a timestamp for this to work; an `Observation` already
+carries one.
