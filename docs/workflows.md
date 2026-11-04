@@ -107,3 +107,9 @@ python training/train.py --config training/train_coupled_gaussian.yaml
 The Gaussian config matches the architecture and losses of the current
 checkpoint. For a deterministic model, use `training/train_deterministic.yaml`
 instead.
+
+To train the Gaussian model using only local flux predictions, set
+`vit_architecture.global_patch_adjustment: false` in the training YAML. This
+omits initialization and computation of the global correction branch while
+preserving optional uncertainty training. The setting is saved in the
+checkpoint and also applies at inference. It defaults to `true` when omitted.

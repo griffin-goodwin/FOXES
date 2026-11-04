@@ -127,7 +127,11 @@ def _auto_checkpoint_model_class(checkpoint):
         'patch_uncertainty_head' in key for key in state_keys
     )
     hyperparameters = checkpoint.get('hyper_parameters', {})
-    if ('model.global_query' in state_dict
+    local_only = (
+        hyperparameters.get('model_kwargs', {}).get('global_patch_adjustment')
+        is False
+    )
+    if (('model.global_query' in state_dict or local_only)
             and hyperparameters.get('uncertainty_parameterization')
             == CoupledGaussianViTLocal.uncertainty_parameterization
             and not any(k.startswith('model.patch_global_context.') for k in state_keys)):

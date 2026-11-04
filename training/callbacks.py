@@ -785,7 +785,8 @@ class SpatialUncertaintyMapCallback(Callback):
                         'Spatial uncertainty plots': wandb.Image(figure)
                     })
                     plt.close(figure)
-                    if global_adjustment is not None:
+                    if (global_adjustment is not None
+                            and network.global_patch_adjustment):
                         adjustment_figure = self._plot_global_patch_adjustment(
                             images[sample_index],
                             patch_flux_raw[sample_index],

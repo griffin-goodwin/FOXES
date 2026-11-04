@@ -35,6 +35,9 @@ uncertainty:
 vit_architecture:
   dropout: 0.25
   embed_dim: 512
+  # Set false to omit the global branch entirely and train only local flux means.
+  # The optional uncertainty head still trains; this flag is saved in checkpoints.
+  global_patch_adjustment: true
   global_attention_heads: 8
   global_head_hidden_dim: 2048
   global_attention_dropout: 0.25

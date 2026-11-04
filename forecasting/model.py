@@ -641,14 +641,17 @@ class SXRRegressionDynamicLoss:
 
 # Coupled single-query uncertainty model.
 class CoupledVisionTransformerLocal(VisionTransformerLocal):
-    """Predict additive patch flux with local attention and one global query.
+    """Predict additive patch flux with local attention and optional global context.
 
     Local logits scale a positive image-wide baseline spread over the patches.
-    A zero-initialized global head adjusts each patch using raw AIA tokens and
-    shared context. The uncertainty head consumes detached local logits.
+    An optional zero-initialized global head adjusts each patch using raw AIA
+    tokens and shared context. Set ``global_patch_adjustment=False`` to omit
+    that branch entirely during training and inference. The uncertainty head
+    consumes detached local logits.
     """
 
     def __init__(self, *args, uncertainty_enabled=True,
+                 global_patch_adjustment=True,
                  max_abs_log10_patch_multiplier=8.0,
                  max_abs_log10_global_adjustment=0.3,
                  global_attention_heads=None,
@@ -660,6 +663,9 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                  uncertainty_hidden_dim=16, **kwargs):
         super().__init__(*args, **kwargs)
 
+        if not isinstance(global_patch_adjustment, bool):
+            raise ValueError("global_patch_adjustment must be a boolean")
+        self.global_patch_adjustment = global_patch_adjustment
         self.uncertainty_enabled = bool(uncertainty_enabled)
         self.max_abs_log10_patch_multiplier = float(
             max_abs_log10_patch_multiplier
@@ -691,57 +697,58 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             raise ValueError("uncertainty_hidden_dim must be positive")
 
         self.last_log10_global_patch_adjustment = None
-        embed_dim = self.mlp_head[-1].in_features
-        local_heads = self.transformer_blocks[0].num_heads
-        self.global_attention_heads = (
-            local_heads if global_attention_heads is None
-            else global_attention_heads
-        )
-        self.global_head_hidden_dim = (
-            embed_dim // 2 if global_head_hidden_dim is None
-            else global_head_hidden_dim
-        )
-        self.global_attention_dropout = (
-            self.dropout.p if global_attention_dropout is None
-            else global_attention_dropout
-        )
-        if (isinstance(self.global_attention_heads, bool)
-                or not isinstance(self.global_attention_heads, int)
-                or self.global_attention_heads <= 0
-                or embed_dim % self.global_attention_heads != 0):
-            raise ValueError(
-                'global_attention_heads must be a positive divisor of embed_dim'
+        if self.global_patch_adjustment:
+            embed_dim = self.mlp_head[-1].in_features
+            local_heads = self.transformer_blocks[0].num_heads
+            self.global_attention_heads = (
+                local_heads if global_attention_heads is None
+                else global_attention_heads
             )
-        if (isinstance(self.global_head_hidden_dim, bool)
-                or not isinstance(self.global_head_hidden_dim, int)
-                or self.global_head_hidden_dim <= 0):
-            raise ValueError('global_head_hidden_dim must be a positive integer')
-        if (isinstance(self.global_attention_dropout, bool)
-                or not isinstance(self.global_attention_dropout, (int, float))
-                or not 0 <= self.global_attention_dropout < 1):
-            raise ValueError('global_attention_dropout must be in [0, 1)')
-        # A summary query sees every original AIA patch. The per-patch
-        # correction also receives that patch's raw AIA token and its
-        # locally encoded feature, so remote activity cannot directly
-        # replace the local evidence at a quiet patch.
-        self.global_raw_patch_projection = nn.Linear(
-            self.input_layer.in_features, embed_dim
-        )
-        self.global_query = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.global_attention = nn.MultiheadAttention(
-            embed_dim,
-            self.global_attention_heads,
-            dropout=self.global_attention_dropout,
-            batch_first=True,
-        )
-        self.global_patch_head = nn.Sequential(
-            nn.LayerNorm(3 * embed_dim),
-            nn.Linear(3 * embed_dim, self.global_head_hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.global_head_hidden_dim, 1),
-        )
-        nn.init.zeros_(self.global_patch_head[-1].weight)
-        nn.init.zeros_(self.global_patch_head[-1].bias)
+            self.global_head_hidden_dim = (
+                embed_dim // 2 if global_head_hidden_dim is None
+                else global_head_hidden_dim
+            )
+            self.global_attention_dropout = (
+                self.dropout.p if global_attention_dropout is None
+                else global_attention_dropout
+            )
+            if (isinstance(self.global_attention_heads, bool)
+                    or not isinstance(self.global_attention_heads, int)
+                    or self.global_attention_heads <= 0
+                    or embed_dim % self.global_attention_heads != 0):
+                raise ValueError(
+                    'global_attention_heads must be a positive divisor of embed_dim'
+                )
+            if (isinstance(self.global_head_hidden_dim, bool)
+                    or not isinstance(self.global_head_hidden_dim, int)
+                    or self.global_head_hidden_dim <= 0):
+                raise ValueError('global_head_hidden_dim must be a positive integer')
+            if (isinstance(self.global_attention_dropout, bool)
+                    or not isinstance(self.global_attention_dropout, (int, float))
+                    or not 0 <= self.global_attention_dropout < 1):
+                raise ValueError('global_attention_dropout must be in [0, 1)')
+            # A summary query sees every original AIA patch. The per-patch
+            # correction also receives that patch's raw AIA token and its
+            # locally encoded feature, so remote activity cannot directly
+            # replace the local evidence at a quiet patch.
+            self.global_raw_patch_projection = nn.Linear(
+                self.input_layer.in_features, embed_dim
+            )
+            self.global_query = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.global_attention = nn.MultiheadAttention(
+                embed_dim,
+                self.global_attention_heads,
+                dropout=self.global_attention_dropout,
+                batch_first=True,
+            )
+            self.global_patch_head = nn.Sequential(
+                nn.LayerNorm(3 * embed_dim),
+                nn.Linear(3 * embed_dim, self.global_head_hidden_dim),
+                nn.GELU(),
+                nn.Linear(self.global_head_hidden_dim, 1),
+            )
+            nn.init.zeros_(self.global_patch_head[-1].weight)
+            nn.init.zeros_(self.global_patch_head[-1].bias)
 
         self.patch_uncertainty_head = None
         self.initial_log10_relative_std = None
@@ -816,6 +823,11 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
         """Return logits and nonnegative additive patch means."""
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)
         patch_flux_raw = self._patch_flux_from_logits(patch_logits, sxr_norm)
+        if not self.global_patch_adjustment:
+            self.last_log10_global_patch_adjustment = torch.zeros_like(
+                patch_logits, requires_grad=False,
+            )
+            return patch_logits, patch_flux_raw
         raw_tokens = self.global_raw_patch_projection(
             img_to_patch(images, self.patch_size)
         )
@@ -932,6 +944,8 @@ class CoupledGaussianViTLocal(pl.LightningModule):
     prediction.
 
     The final corrected-flux Huber loss updates both local and global layers.
+    With ``model_kwargs['global_patch_adjustment']=False``, no global branch is
+    constructed, and the mean loss trains only the local layers.
 
     The predicted variance is in normalized log10-SXR units. Use
     :meth:`predict_interval` to obtain intervals in physical W/m^2 units.
@@ -960,9 +974,6 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         filtered_kwargs.pop('learning_rate', None)
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
-        # This fixed architecture flag is present in the distributed checkpoint.
-        if filtered_kwargs.pop('global_patch_adjustment', True) is not True:
-            raise ValueError('The coupled model always applies global patch adjustment')
         uncertainty_kwargs = dict(uncertainty_kwargs or {})
         self.uncertainty_enabled = bool(
             uncertainty_kwargs.pop('enabled', True)
