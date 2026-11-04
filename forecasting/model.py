@@ -641,9 +641,10 @@ class SXRRegressionDynamicLoss:
 
 # Coupled single-query uncertainty model.
 class CoupledVisionTransformerLocal(VisionTransformerLocal):
-    """Predict additive patch flux with local attention and optional global context.
+    """Predict additive patch flux with configurable attention and global context.
 
-    Local logits scale a positive image-wide baseline spread over the patches.
+    Patch logits scale a positive image-wide baseline spread over the patches.
+    ``mask_mode`` and ``local_window`` are passed to each patch attention block.
     An optional zero-initialized global head adjusts each patch using raw AIA
     tokens and shared context. Set ``global_patch_adjustment=False`` to omit
     that branch entirely during training and inference. The uncertainty head
@@ -681,11 +682,6 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             raise ValueError("max_abs_log10_patch_multiplier must be positive")
         if self.max_abs_log10_global_adjustment <= 0:
             raise ValueError("max_abs_log10_global_adjustment must be positive")
-        if self.mask_mode != 'local':
-            raise ValueError(
-                "The coupled model requires local patch attention so the "
-                "spatial head cannot import distant activity"
-            )
         if self.initial_relative_std <= 0:
             raise ValueError("initial_relative_std must be positive")
         if self.max_log10_relative_std <= self.min_log10_relative_std:
@@ -729,8 +725,7 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                 raise ValueError('global_attention_dropout must be in [0, 1)')
             # A summary query sees every original AIA patch. The per-patch
             # correction also receives that patch's raw AIA token and its
-            # locally encoded feature, so remote activity cannot directly
-            # replace the local evidence at a quiet patch.
+            # encoded feature under the configured attention mask.
             self.global_raw_patch_projection = nn.Linear(
                 self.input_layer.in_features, embed_dim
             )
