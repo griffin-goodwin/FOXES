@@ -307,10 +307,11 @@ def split_dataset_by_time(dataset, fraction):
     """Return the earliest ``fraction`` of a dataset's samples and the rest.
 
     Samples are kept in filename order, which is chronological, so the two
-    parts share only the boundary between them.
+    parts share only the boundary between them. ``fraction=1`` leaves the
+    second part empty.
     """
     count = round(len(dataset.samples) * fraction)
-    if not 0 < count < len(dataset.samples):
+    if count == 0 or (fraction < 1 and count == len(dataset.samples)):
         raise ValueError(
             f"Cannot split {len(dataset.samples)} samples at fraction {fraction}: "
             "both parts must be non-empty"
@@ -340,7 +341,8 @@ class AIAGOESDataModule(LightningDataModule):
     wavelengths : list of int
     val_fit_fraction : float, optional
         If set, the train split is not read. The earliest ``val_fit_fraction``
-        of the val samples becomes ``train_ds`` and the rest ``val_ds``.
+        of the val samples becomes ``train_ds`` and the rest ``val_ds``, which
+        is empty when the fraction is 1.
     """
 
     def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,

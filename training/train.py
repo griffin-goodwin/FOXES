@@ -214,13 +214,21 @@ def resolve_finetune_config(config, model_type):
     if val_fit_fraction is not None:
         if (isinstance(val_fit_fraction, bool)
                 or not isinstance(val_fit_fraction, (int, float))
-                or not 0 < val_fit_fraction < 1):
-            raise ValueError('finetune.val_fit_fraction must be between 0 and 1')
+                or not 0 < val_fit_fraction <= 1):
+            raise ValueError(
+                'finetune.val_fit_fraction must be greater than 0 and at most 1'
+            )
         # A mean model trained on val would make its val residuals optimistic.
         if not head_only:
             raise ValueError(
                 'finetune.val_fit_fraction requires '
                 'finetune.train_only_uncertainty_head'
+            )
+        if val_fit_fraction == 1 and (config.get('early_stopping') or {}).get(
+                'enabled', False):
+            raise ValueError(
+                'early_stopping needs validation data, which '
+                'finetune.val_fit_fraction: 1 leaves empty'
             )
     return checkpoint_path, head_only, reset_head, val_fit_fraction
 
@@ -331,21 +339,24 @@ def resolve_devices(gpu_config):
     return "gpu", [gpu_config], "auto"
 
 
-def build_checkpoint_callback(config_data, checkpoint_config):
-    """Build the checkpoint callback for training."""
+def build_checkpoint_callback(config_data, checkpoint_config, validate=True):
+    """Build the checkpoint callback for training.
+
+    Without validation there is no metric to rank by, so every epoch is saved.
+    """
     default_monitor = 'val/total_loss' if config_data.get('model_type') == 'coupled_uncertainty' else 'val_total_loss'
-    monitor = checkpoint_config.get('monitor', default_monitor)
+    monitor = checkpoint_config.get('monitor', default_monitor) if validate else None
     filename = f"{config_data['wandb']['run_name']}-epoch={{epoch:02d}}"
     if checkpoint_config.get('include_step_in_filename', True):
         filename += "-step={step:06d}"
-    if checkpoint_config.get('include_monitor_in_filename', False):
+    if monitor and checkpoint_config.get('include_monitor_in_filename', False):
         metric_label = monitor.replace('/', '_')
         filename += f"-{metric_label}={{{monitor}:.4f}}"
     return ModelCheckpoint(
         dirpath=config_data['data']['checkpoints_dir'],
         monitor=monitor,
         mode=checkpoint_config.get('mode', 'min'),
-        save_top_k=checkpoint_config.get('save_top_k', 10),
+        save_top_k=checkpoint_config.get('save_top_k', 10) if validate else -1,
         save_last=checkpoint_config.get('save_last', False),
         filename=filename,
         auto_insert_metric_name=False,
@@ -448,12 +459,17 @@ def main():
         val_fit_fraction=val_fit_fraction,
     )
     data_module.setup()
+    validate = val_fit_fraction != 1
     if val_fit_fraction is not None:
         fit, select = data_module.train_ds.samples, data_module.val_ds.samples
         print(
             f"Fitting the uncertainty head on val {fit[0]} to {fit[-1]} "
-            f"({len(fit):,} samples); selecting checkpoints on {select[0]} "
-            f"to {select[-1]} ({len(select):,} samples)"
+            f"({len(fit):,} samples)"
+        )
+        print(
+            f"Selecting checkpoints on {select[0]} to {select[-1]} "
+            f"({len(select):,} samples)" if validate else
+            "Validation is off (val_fit_fraction: 1); every epoch is saved"
         )
 
     base_weights, uncertainty_cfg = configure_class_weights(
@@ -504,7 +520,7 @@ def main():
         config=config,
     )
     callbacks = build_model_callbacks(config, data_module, sxr_norm, model_type)
-    callbacks.append(build_checkpoint_callback(config, checkpoint_cfg))
+    callbacks.append(build_checkpoint_callback(config, checkpoint_cfg, validate))
     early_stopping = config.get('early_stopping', {})
     if early_stopping.get('enabled', False):
         callbacks.append(EarlyStopping(
@@ -525,6 +541,7 @@ def main():
         strategy=strategy,
         max_epochs=config['epochs'],
         max_steps=config.get('max_steps', -1),
+        limit_val_batches=None if validate else 0,
         accumulate_grad_batches=config.get('accumulate_grad_batches', 1),
         callbacks=callbacks,
         logger=logger,
