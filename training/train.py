@@ -179,31 +179,42 @@ def configure_class_weights(config, data_module, model_type):
 
 
 def resolve_finetune_config(config, model_type):
-    """Return the fine-tuning checkpoint path and head-only flag."""
+    """Return the fine-tuning checkpoint path, head-only flag, and reset flag."""
     finetune = config.get('finetune') or {}
-    unknown = set(finetune) - {'checkpoint_path', 'train_only_uncertainty_head'}
+    unknown = set(finetune) - {
+        'checkpoint_path', 'train_only_uncertainty_head', 'reset_uncertainty_head',
+    }
     if unknown:
         raise ValueError(f'Unsupported finetune settings: {sorted(unknown)}')
     checkpoint_path = finetune.get('checkpoint_path') or None
     head_only = finetune.get('train_only_uncertainty_head', False)
     if not isinstance(head_only, bool):
         raise ValueError('finetune.train_only_uncertainty_head must be a boolean')
+    reset_head = finetune.get('reset_uncertainty_head', False)
+    if not isinstance(reset_head, bool):
+        raise ValueError('finetune.reset_uncertainty_head must be a boolean')
     if checkpoint_path and model_type != 'coupled_uncertainty':
         raise ValueError('finetune requires model_type: coupled_uncertainty')
     if head_only and not checkpoint_path:
         raise ValueError(
             'finetune.train_only_uncertainty_head requires finetune.checkpoint_path'
         )
-    return checkpoint_path, head_only
+    if reset_head and not checkpoint_path:
+        raise ValueError(
+            'finetune.reset_uncertainty_head requires finetune.checkpoint_path'
+        )
+    return checkpoint_path, head_only, reset_head
 
 
-def initialize_from_checkpoint(model, checkpoint_path, model_kwargs):
+def initialize_from_checkpoint(model, checkpoint_path, model_kwargs, *,
+                               reset_uncertainty_head=False):
     """Load a coupled checkpoint's mean model, and its head when compatible.
 
     The mean model and SXR normalization must match exactly. Uncertainty
     weights load only when the checkpoint used the same parameterization,
-    head input, and shapes; otherwise the configured head keeps its
-    initialization. Returns whether the uncertainty weights were loaded.
+    head input, and shapes, and ``reset_uncertainty_head`` is false; otherwise
+    the newly constructed head keeps its seeded initialization. Returns
+    whether the uncertainty weights were loaded.
     """
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     hparams = checkpoint.get('hyper_parameters', {})
@@ -255,7 +266,8 @@ def initialize_from_checkpoint(model, checkpoint_path, model_kwargs):
         'uncertainty_input', 'logit',
     )
     load_head = bool(
-        current_head
+        not reset_uncertainty_head
+        and current_head
         and set(saved_head) == current_head
         and all(saved_head[k].shape == current[k].shape for k in current_head)
         and hparams.get('uncertainty_parameterization')
@@ -268,10 +280,12 @@ def initialize_from_checkpoint(model, checkpoint_path, model_kwargs):
     )
     print(f"Loaded mean model from {checkpoint_path}")
     if current_head:
-        print(
-            "Loaded uncertainty head from checkpoint" if load_head else
-            "Uncertainty head starts fresh (checkpoint head input or shape differs)"
-        )
+        if reset_uncertainty_head:
+            print("Uncertainty head starts fresh (finetune.reset_uncertainty_head=true)")
+        elif load_head:
+            print("Loaded uncertainty head from checkpoint")
+        else:
+            print("Uncertainty head starts fresh (checkpoint head input or shape differs)")
     return load_head
 
 
@@ -386,9 +400,9 @@ def main():
         raise ValueError(
             f'Unsupported checkpoint settings: {sorted(unknown_checkpoint_keys)}'
         )
-    finetune_checkpoint, train_only_uncertainty_head = resolve_finetune_config(
-        config, model_type,
-    )
+    (
+        finetune_checkpoint, train_only_uncertainty_head, reset_uncertainty_head,
+    ) = resolve_finetune_config(config, model_type)
     seed_everything(config.get('seed', 42), workers=True)
 
     data_cfg = config['data']
@@ -445,6 +459,7 @@ def main():
     if finetune_checkpoint:
         initialize_from_checkpoint(
             model, finetune_checkpoint, config['vit_architecture'],
+            reset_uncertainty_head=reset_uncertainty_head,
         )
     if train_only_uncertainty_head:
         model.freeze_all_but_uncertainty_head()
