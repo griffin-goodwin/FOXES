@@ -1,3 +1,4 @@
+import copy
 from datetime import timedelta
 
 import pandas as pd
@@ -302,6 +303,24 @@ class AIAGOESDataset(torch.utils.data.Dataset):
 
         return aia_img, torch.tensor(sxr_val, dtype=torch.float32)
 
+def split_dataset_by_time(dataset, fraction):
+    """Return the earliest ``fraction`` of a dataset's samples and the rest.
+
+    Samples are kept in filename order, which is chronological, so the two
+    parts share only the boundary between them.
+    """
+    count = round(len(dataset.samples) * fraction)
+    if not 0 < count < len(dataset.samples):
+        raise ValueError(
+            f"Cannot split {len(dataset.samples)} samples at fraction {fraction}: "
+            "both parts must be non-empty"
+        )
+    early, late = copy.copy(dataset), copy.copy(dataset)
+    early.samples = dataset.samples[:count]
+    late.samples = dataset.samples[count:]
+    return early, late
+
+
 class AIAGOESDataModule(LightningDataModule):
     """
     PyTorch Lightning DataModule wiring up train/val/test AIAGOESDataset splits.
@@ -319,11 +338,14 @@ class AIAGOESDataModule(LightningDataModule):
         NPZ or CSV containing per-wavelength AIA normalization parameters.
     batch_size, num_workers : int
     wavelengths : list of int
+    val_fit_fraction : float, optional
+        If set, the train split is not read. The earliest ``val_fit_fraction``
+        of the val samples becomes ``train_ds`` and the rest ``val_ds``.
     """
 
     def __init__(self, aia_train_dir, aia_val_dir, aia_test_dir, sxr_train_dir, sxr_val_dir, sxr_test_dir,
                  sxr_norm, aia_norm_path=None, batch_size=64, num_workers=4,
-                 wavelengths=AIA_WAVELENGTHS):
+                 wavelengths=AIA_WAVELENGTHS, val_fit_fraction=None):
         super().__init__()
         self.aia_train_dir = aia_train_dir
         self.aia_val_dir = aia_val_dir
@@ -336,6 +358,7 @@ class AIAGOESDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.wavelengths = wavelengths
+        self.val_fit_fraction = val_fit_fraction
 
     def setup(self, stage=None):
         sxr_transform = SXRLogNormTransform(self.sxr_norm[0], self.sxr_norm[1])
@@ -347,12 +370,17 @@ class AIAGOESDataModule(LightningDataModule):
             sxr_transform=sxr_transform, aia_transform=aia_transform,
             wavelengths=self.wavelengths,
         )
-        self.train_ds = AIAGOESDataset(
-            aia_dir=self.aia_train_dir, sxr_dir=self.sxr_train_dir, **common
-        )
         self.val_ds = AIAGOESDataset(
             aia_dir=self.aia_val_dir, sxr_dir=self.sxr_val_dir, **common
         )
+        if self.val_fit_fraction is None:
+            self.train_ds = AIAGOESDataset(
+                aia_dir=self.aia_train_dir, sxr_dir=self.sxr_train_dir, **common
+            )
+        else:
+            self.train_ds, self.val_ds = split_dataset_by_time(
+                self.val_ds, self.val_fit_fraction,
+            )
         self.test_ds = AIAGOESDataset(
             aia_dir=self.aia_test_dir, sxr_dir=self.sxr_test_dir, **common
         )

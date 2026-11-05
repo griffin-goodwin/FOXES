@@ -137,8 +137,13 @@ def get_four_class_macro_weights(data_module, exponent=1.0,
     return counts, weights
 
 
-def configure_class_weights(config, data_module, model_type):
-    """Compute mean-loss class weights once for either maintained model."""
+def configure_class_weights(config, data_module, model_type,
+                            mean_loss_frozen=False):
+    """Compute mean-loss class weights once for either maintained model.
+
+    With ``mean_loss_frozen`` the weighted mean loss is only reported, so a
+    class missing from the training targets is not an error.
+    """
     coupled = model_type == 'coupled_uncertainty'
     mean_loss = config.get('mean_loss', {})
     uncertainty = dict(config.get('uncertainty', {}))
@@ -167,7 +172,7 @@ def configure_class_weights(config, data_module, model_type):
         )
         counts, weights = get_four_class_macro_weights(
             data_module, exponent=exponent,
-            require_all_classes=coupled,
+            require_all_classes=coupled and not mean_loss_frozen,
         )
         config['computed_four_class_train_counts'] = counts
         config['computed_four_class_train_weights'] = weights
@@ -179,10 +184,12 @@ def configure_class_weights(config, data_module, model_type):
 
 
 def resolve_finetune_config(config, model_type):
-    """Return the fine-tuning checkpoint path, head-only flag, and reset flag."""
+    """Return the fine-tuning checkpoint path, head-only and reset flags, and
+    the fraction of val used to fit the head (None to fit on train)."""
     finetune = config.get('finetune') or {}
     unknown = set(finetune) - {
         'checkpoint_path', 'train_only_uncertainty_head', 'reset_uncertainty_head',
+        'val_fit_fraction',
     }
     if unknown:
         raise ValueError(f'Unsupported finetune settings: {sorted(unknown)}')
@@ -203,7 +210,19 @@ def resolve_finetune_config(config, model_type):
         raise ValueError(
             'finetune.reset_uncertainty_head requires finetune.checkpoint_path'
         )
-    return checkpoint_path, head_only, reset_head
+    val_fit_fraction = finetune.get('val_fit_fraction')
+    if val_fit_fraction is not None:
+        if (isinstance(val_fit_fraction, bool)
+                or not isinstance(val_fit_fraction, (int, float))
+                or not 0 < val_fit_fraction < 1):
+            raise ValueError('finetune.val_fit_fraction must be between 0 and 1')
+        # A mean model trained on val would make its val residuals optimistic.
+        if not head_only:
+            raise ValueError(
+                'finetune.val_fit_fraction requires '
+                'finetune.train_only_uncertainty_head'
+            )
+    return checkpoint_path, head_only, reset_head, val_fit_fraction
 
 
 def initialize_from_checkpoint(model, checkpoint_path, model_kwargs, *,
@@ -402,6 +421,7 @@ def main():
         )
     (
         finetune_checkpoint, train_only_uncertainty_head, reset_uncertainty_head,
+        val_fit_fraction,
     ) = resolve_finetune_config(config, model_type)
     seed_everything(config.get('seed', 42), workers=True)
 
@@ -425,11 +445,20 @@ def main():
         sxr_norm=sxr_norm,
         aia_norm_path=data_cfg.get('aia_norm_path'),
         wavelengths=config['wavelengths'],
+        val_fit_fraction=val_fit_fraction,
     )
     data_module.setup()
+    if val_fit_fraction is not None:
+        fit, select = data_module.train_ds.samples, data_module.val_ds.samples
+        print(
+            f"Fitting the uncertainty head on val {fit[0]} to {fit[-1]} "
+            f"({len(fit):,} samples); selecting checkpoints on {select[0]} "
+            f"to {select[-1]} ({len(select):,} samples)"
+        )
 
     base_weights, uncertainty_cfg = configure_class_weights(
         config, data_module, model_type,
+        mean_loss_frozen=train_only_uncertainty_head,
     )
     common_kwargs = dict(
         model_kwargs=config['vit_architecture'],
