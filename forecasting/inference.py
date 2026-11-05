@@ -104,6 +104,18 @@ def select_inference_samples(dataset, sampling=None):
     return Subset(dataset, indices.tolist()), times
 
 
+def shard_inference_samples(dataset, times, shard_index, num_shards):
+    """Partition selected timestamps across workers without loading image data."""
+    if num_shards < 1 or not 0 <= shard_index < num_shards:
+        raise ValueError('Require num_shards >= 1 and 0 <= shard_index < num_shards')
+    if len(dataset) != len(times):
+        raise ValueError('Sharding requires one timestamp per dataset sample')
+    positions = list(range(shard_index, len(times), num_shards))
+    if not positions:
+        raise ValueError('This shard has no samples; use fewer shards')
+    return Subset(dataset, positions), [times[position] for position in positions]
+
+
 def _legacy_calibration(config, model=None):
     """Resolve explicit output options, falling back to a loaded model's options."""
     current = getattr(model, 'legacy_calibration', None) or LegacyCalibration()
@@ -602,9 +614,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='inference_config.yaml', required=True,
                         help='Path to the inference configuration YAML file.')
+    parser.add_argument('--shard-index', type=int, default=0,
+                        help='Zero-based shard to process after sampling.')
+    parser.add_argument('--num-shards', type=int, default=1,
+                        help='Number of independent inference shards.')
+    parser.add_argument('--output-path', type=str,
+                        help='Override the CSV path for this inference shard.')
+    parser.add_argument('--device', choices=('auto', 'cuda', 'mps', 'cpu'),
+                        help='Override the device in the inference YAML.')
     args = parser.parse_args()
 
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        parser.error('Require num-shards >= 1 and 0 <= shard-index < num-shards')
+    if args.num_shards > 1 and not args.output_path:
+        parser.error('--output-path is required for sharded inference')
     config_data = load_config(args.config)
+    if args.output_path:
+        config_data['output_path'] = args.output_path
+    if args.device:
+        config_data['device'] = args.device
 
     model_params = config_data.get('model_params', {})
     input_size = model_params.get('input_size', 512)
@@ -691,6 +719,12 @@ def main():
     dataset, times = select_inference_samples(
         dataset, config_data.get('sampling')
     )
+    if args.num_shards > 1:
+        dataset, times = shard_inference_samples(
+            dataset, times, args.shard_index, args.num_shards,
+        )
+        print(f'Processing shard {args.shard_index + 1}/{args.num_shards}: '
+              f'{len(times)} samples')
     
     # The uncertainty checkpoint carries the exact training normalization. The
     # optional file is checked against it to catch accidentally mixed artifacts.
