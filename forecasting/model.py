@@ -936,7 +936,7 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             x, return_attention
         )
         _, sxr_std = sxr_norm
-               (
+        (
             patch_logits, patch_flux_raw, log10_adjustment, patch_features,
         ) = self._patch_mean_from_embeddings(
             patch_embeddings, sxr_norm, images=x,
