@@ -18,7 +18,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from forecasting.dataset import AIAGOESDataModule
 from forecasting.config import load_config
 from forecasting.model import (
-    CoupledGaussianViTLocal, ViTLocal, SXRRegressionDynamicLoss,
+    CoupledGaussianViTLocal, CoupledVisionTransformerLocal, ViTLocal,
+    SXRRegressionDynamicLoss,
 )
 from training.callbacks import (
     AttentionMapCallback, ImagePredictionLogger_SXR,
@@ -27,6 +28,10 @@ from training.callbacks import (
 from training.strategies import TrainingStreamDDPStrategy
 
 FOUR_CLASS_KEYS = ('quiet', 'c_class', 'm_class', 'x_class')
+# Architecture settings that may differ from a fine-tuning checkpoint.
+TRAINING_ONLY_ARCHITECTURE_KEYS = {
+    'learning_rate', 'lr', 'dropout', 'global_attention_dropout', 'num_classes',
+}
 
 
 def _deep_merge_config(base, overrides):
@@ -173,6 +178,103 @@ def configure_class_weights(config, data_module, model_type):
     return base_weights, uncertainty
 
 
+def resolve_finetune_config(config, model_type):
+    """Return the fine-tuning checkpoint path and head-only flag."""
+    finetune = config.get('finetune') or {}
+    unknown = set(finetune) - {'checkpoint_path', 'train_only_uncertainty_head'}
+    if unknown:
+        raise ValueError(f'Unsupported finetune settings: {sorted(unknown)}')
+    checkpoint_path = finetune.get('checkpoint_path') or None
+    head_only = finetune.get('train_only_uncertainty_head', False)
+    if not isinstance(head_only, bool):
+        raise ValueError('finetune.train_only_uncertainty_head must be a boolean')
+    if checkpoint_path and model_type != 'coupled_uncertainty':
+        raise ValueError('finetune requires model_type: coupled_uncertainty')
+    if head_only and not checkpoint_path:
+        raise ValueError(
+            'finetune.train_only_uncertainty_head requires finetune.checkpoint_path'
+        )
+    return checkpoint_path, head_only
+
+
+def initialize_from_checkpoint(model, checkpoint_path, model_kwargs):
+    """Load a coupled checkpoint's mean model, and its head when compatible.
+
+    The mean model and SXR normalization must match exactly. Uncertainty
+    weights load only when the checkpoint used the same parameterization,
+    head input, and shapes; otherwise the configured head keeps its
+    initialization. Returns whether the uncertainty weights were loaded.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    hparams = checkpoint.get('hyper_parameters', {})
+    saved_kwargs = hparams.get('model_kwargs', {})
+    mismatched = sorted(
+        key for key in set(saved_kwargs) - TRAINING_ONLY_ARCHITECTURE_KEYS
+        if model_kwargs.get(key) != saved_kwargs[key]
+    )
+    if mismatched:
+        details = '; '.join(
+            f'{key}: checkpoint={saved_kwargs[key]!r}, '
+            f'config={model_kwargs.get(key)!r}' for key in mismatched
+        )
+        raise ValueError(
+            f'vit_architecture must match {checkpoint_path}: {details}'
+        )
+
+    saved = checkpoint['state_dict']
+    current = model.state_dict()
+    if 'sxr_norm' not in saved or not torch.allclose(
+        saved['sxr_norm'].float(), current['sxr_norm'].float(),
+    ):
+        raise ValueError(
+            f'data.sxr_norm_path must match the normalization in {checkpoint_path}: '
+            f'checkpoint={saved.get("sxr_norm")}, config={current["sxr_norm"]}'
+        )
+
+    head_prefixes = tuple(
+        f'model.{name}.'
+        for name in CoupledVisionTransformerLocal.UNCERTAINTY_MODULE_NAMES
+    )
+    saved_mean = {k: v for k, v in saved.items() if not k.startswith(head_prefixes)}
+    saved_head = {k: v for k, v in saved.items() if k.startswith(head_prefixes)}
+    current_mean = {k for k in current if not k.startswith(head_prefixes)}
+    current_head = {k for k in current if k.startswith(head_prefixes)}
+    missing = sorted(current_mean - set(saved_mean))
+    unexpected = sorted(set(saved_mean) - current_mean)
+    reshaped = sorted(
+        key for key in current_mean & set(saved_mean)
+        if saved_mean[key].shape != current[key].shape
+    )
+    if missing or unexpected or reshaped:
+        raise ValueError(
+            f'Mean model in {checkpoint_path} does not match the configured '
+            f'model: missing={missing[:5]}, unexpected={unexpected[:5]}, '
+            f'shape_mismatch={reshaped[:5]}'
+        )
+    saved_input = hparams.get('uncertainty_kwargs', {}).get(
+        'uncertainty_input', 'logit',
+    )
+    load_head = bool(
+        current_head
+        and set(saved_head) == current_head
+        and all(saved_head[k].shape == current[k].shape for k in current_head)
+        and hparams.get('uncertainty_parameterization')
+        == model.uncertainty_parameterization
+        and saved_input == model.model.uncertainty_input
+    )
+    model.load_state_dict(
+        {**current, **saved_mean, **(saved_head if load_head else {})},
+        strict=True,
+    )
+    print(f"Loaded mean model from {checkpoint_path}")
+    if current_head:
+        print(
+            "Loaded uncertainty head from checkpoint" if load_head else
+            "Uncertainty head starts fresh (checkpoint head input or shape differs)"
+        )
+    return load_head
+
+
 def resolve_devices(gpu_config):
     """Resolve accelerator/devices/strategy from the gpu_ids config value."""
     if gpu_config == -1:
@@ -284,6 +386,9 @@ def main():
         raise ValueError(
             f'Unsupported checkpoint settings: {sorted(unknown_checkpoint_keys)}'
         )
+    finetune_checkpoint, train_only_uncertainty_head = resolve_finetune_config(
+        config, model_type,
+    )
     seed_everything(config.get('seed', 42), workers=True)
 
     data_cfg = config['data']
@@ -337,6 +442,13 @@ def main():
             },
             diagnostic_every_n_steps=loss_cfg.get('diagnostic_every_n_steps', 200),
         )
+    if finetune_checkpoint:
+        initialize_from_checkpoint(
+            model, finetune_checkpoint, config['vit_architecture'],
+        )
+    if train_only_uncertainty_head:
+        model.freeze_all_but_uncertainty_head()
+        print("Training only the uncertainty head; the mean model is frozen")
 
     logger = WandbLogger(
         entity=config['wandb']['entity'],
