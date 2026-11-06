@@ -9,6 +9,8 @@ path_root: ..
 #
 # Usage:
 #   python forecasting/inference.py --config forecasting/inference_config.yaml
+# Multiple GPUs (one independent process per GPU):
+#   python forecasting/run_parallel_inference.py --config forecasting/inference_config.yaml --gpus 0,1,2,3
 # =============================================================================
 
 wavelengths: [94, 131, 171, 193, 211, 304, 335]

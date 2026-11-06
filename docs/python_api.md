@@ -104,8 +104,10 @@ use these same column names.
 The current checkpoint also gives you nominal 68% and 95% full-disk
 `prediction_intervals`. They are asymmetric in W/m² because the Gaussian
 is defined in transformed log-flux space. `result.flux_std_map` contains the
-per-patch standard-deviation contributions: their squares add to the
-full-disk variance. Plot them with `result.plot_uncertainty_map()`.
+per-patch standard-deviation contributions: their squares add exactly to the
+raw-flux (W/m²) variance of the log-normal full-disk prediction. Plot them
+with `result.plot_uncertainty_map()`. HARP light-curve bands use the same
+log-normal rule with each region's own flux and variance.
 
 ## Predict a Time Range
 

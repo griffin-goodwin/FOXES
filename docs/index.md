@@ -29,6 +29,7 @@ see [Command-Line Workflows](workflows.md).
 python_api
 models
 results
+uncertainties
 workflows
 api_reference
 citation

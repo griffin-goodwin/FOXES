@@ -32,6 +32,28 @@ uncertainty:
   min_log10_relative_std: -6
   start_epoch: 0
   uncertainty_hidden_dim: 512
+  # Uncertainty head input. logit: each patch's local logit, as in
+  # model_assets/UncertaintyModel.ckpt. context: the globally corrected logit
+  # plus the detached patch features, raw AIA token, and global summary
+  # (patch features only when global_patch_adjustment is false).
+  uncertainty_input: logit
+# Optional: start from a trained coupled checkpoint. vit_architecture and the
+# SXR normalization must match it; learning rate and dropout may differ.
+# Uncertainty-head weights load only when uncertainty_input and shapes match;
+# otherwise the head starts fresh.
+finetune:
+  checkpoint_path: null
+  # Freeze everything except the uncertainty head; the loss is the NLL alone.
+  train_only_uncertainty_head: false
+  # Ignore saved uncertainty weights and use a fresh, seeded head.
+  # Its initial output still follows uncertainty.initial_relative_std.
+  reset_uncertainty_head: false
+  # Fit the head on residuals the mean model never trained on: the earliest
+  # fraction of val (in time) trains the head, the rest selects checkpoints,
+  # and train is not read. 1 uses all of val and turns validation off, so
+  # every epoch is saved. Requires train_only_uncertainty_head. null fits on
+  # train, where residuals are smaller than on new data.
+  val_fit_fraction: null
 vit_architecture:
   dropout: 0.25
   embed_dim: 512
@@ -44,6 +66,7 @@ vit_architecture:
   hidden_dim: 2048
   learning_rate: 0.0001
   local_window: 3
+  # Passed to every patch attention block: local, inverted, or none (full attention).
   mask_mode: local
   max_abs_log10_global_adjustment: 1.5
   num_channels: 7

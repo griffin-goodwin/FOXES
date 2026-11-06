@@ -205,8 +205,9 @@ def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
         sigma = curves[harpnum].flux_std.iloc[0]
         flux = curves[harpnum].total_flux.iloc[0]
         ys = np.concatenate([path.vertices[:, 1] for path in polygon.get_paths()])
-        assert min(ys) == pytest.approx(flux - sigma)
-        assert max(ys) == pytest.approx(flux + sigma)
+        log_sigma = np.sqrt(np.log((1 + np.sqrt(1 + 4 * (sigma / flux) ** 2)) / 2))
+        assert min(ys) == pytest.approx(flux * np.exp(-log_sigma))
+        assert max(ys) == pytest.approx(flux * np.exp(log_sigma))
     plt.close(ax.figure)
     ax = series.plot_light_curves(show_snapshot=True, show_uncertainty=False)
     assert not ax.collections

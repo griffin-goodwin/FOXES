@@ -1,4 +1,4 @@
-"""Local-only retraining must not construct or use a global correction branch."""
+"""Retraining supports configurable patch masking and an optional global branch."""
 
 from pathlib import Path
 
@@ -36,14 +36,28 @@ class CheckTrainingGradients(pl.Callback):
 
 @pytest.mark.parametrize('uncertainty_enabled', [False, True])
 @pytest.mark.parametrize('return_attention', [False, True])
-def test_local_only_outputs_and_architecture(uncertainty_enabled, return_attention):
+@pytest.mark.parametrize('mask_mode', ['local', 'inverted', 'none'])
+def test_local_only_outputs_and_architecture(
+    uncertainty_enabled, return_attention, mask_mode,
+):
     network = CoupledVisionTransformerLocal(
-        **ARCHITECTURE, global_patch_adjustment=False,
+        **dict(ARCHITECTURE, mask_mode=mask_mode), global_patch_adjustment=False,
         uncertainty_enabled=uncertainty_enabled,
     )
     assert not any(name.startswith('global_') for name, _ in network.named_modules())
     assert not any(name.startswith('global_') for name in network.state_dict())
     assert not hasattr(network, 'global_query')
+    expected_mask = None
+    if mask_mode != 'none':
+        expected_mask = torch.eye(ARCHITECTURE['num_patches'], dtype=torch.bool)
+        if mask_mode == 'local':
+            expected_mask = ~expected_mask
+    for block in network.transformer_blocks:
+        assert block.mask_mode == mask_mode
+        if expected_mask is None:
+            assert block.attention_mask is None
+        else:
+            torch.testing.assert_close(block.attention_mask, expected_mask)
     images = torch.randn(2, 2, 2, 1)
 
     for training in (True, False):
@@ -54,6 +68,7 @@ def test_local_only_outputs_and_architecture(uncertainty_enabled, return_attenti
         )
         outputs = network(images, SXR_NORM, return_attention=return_attention)
         patches = outputs[-2] if uncertainty_enabled else outputs[-1]
+        assert torch.isfinite(outputs[0]).all()
         torch.testing.assert_close(patches, expected, rtol=0, atol=0)
         torch.testing.assert_close(outputs[0], patches.sum(dim=1, keepdim=True))
         assert torch.count_nonzero(network.last_log10_global_patch_adjustment) == 0
@@ -63,10 +78,18 @@ def test_local_only_outputs_and_architecture(uncertainty_enabled, return_attenti
         if return_attention:
             attention = outputs[3] if uncertainty_enabled else outputs[2]
             assert len(attention) == ARCHITECTURE['num_layers']
+            for weights in attention:
+                assert torch.isfinite(weights).all()
+                if expected_mask is not None:
+                    assert torch.count_nonzero(weights[..., expected_mask]) == 0
 
 
 @pytest.mark.parametrize('uncertainty_enabled', [False, True])
-def test_local_only_config_training_and_checkpoint(tmp_path, uncertainty_enabled):
+@pytest.mark.parametrize('global_patch_adjustment', [False, True])
+@pytest.mark.parametrize('mask_mode', ['local', 'inverted', 'none'])
+def test_config_training_and_checkpoint(
+    tmp_path, uncertainty_enabled, global_patch_adjustment, mask_mode,
+):
     torch.manual_seed(0)
     config_path = tmp_path / 'local_only.yaml'
     config_path.write_text(yaml.safe_dump({
@@ -74,7 +97,10 @@ def test_local_only_config_training_and_checkpoint(tmp_path, uncertainty_enabled
             Path(__file__).resolve().parents[1]
             / 'training/train_coupled_gaussian.yaml'
         )),
-        'vit_architecture': {**ARCHITECTURE, 'global_patch_adjustment': False},
+        'vit_architecture': {
+            **ARCHITECTURE, 'global_patch_adjustment': global_patch_adjustment,
+            'mask_mode': mask_mode,
+        },
         'uncertainty': {'enabled': uncertainty_enabled, 'uncertainty_hidden_dim': 8},
     }))
     config = load_training_config(config_path)
@@ -106,21 +132,28 @@ def test_local_only_config_training_and_checkpoint(tmp_path, uncertainty_enabled
         assert not torch.equal(
             model.model.patch_uncertainty_head[-1].bias, initial_uncertainty_bias,
         )
-    assert not any(name.startswith('model.global_') for name in model.state_dict())
-    assert trainer.callback_metrics['val/global_patch_adjustment_dex'] == 0
+    assert any(
+        name.startswith('model.global_') for name in model.state_dict()
+    ) == global_patch_adjustment
+    if not global_patch_adjustment:
+        assert trainer.callback_metrics['val/global_patch_adjustment_dex'] == 0
 
     path = tmp_path / 'local_only.ckpt'
     trainer.save_checkpoint(path)
     checkpoint = torch.load(path, map_location='cpu', weights_only=False)
     assert (
         checkpoint['hyper_parameters']['model_kwargs']['global_patch_adjustment']
-        is False
+        is global_patch_adjustment
     )
+    assert checkpoint['hyper_parameters']['model_kwargs']['mask_mode'] == mask_mode
     assert _auto_checkpoint_model_class(checkpoint) is CoupledGaussianViTLocal
     restored = CoupledGaussianViTLocal.load_from_checkpoint(
         path, map_location='cpu', weights_only=False, strict=True,
     )
-    assert not restored.model.global_patch_adjustment
+    assert restored.model.global_patch_adjustment is global_patch_adjustment
+    assert all(
+        block.mask_mode == mask_mode for block in restored.model.transformer_blocks
+    )
     assert set(restored.state_dict()) == set(model.state_dict())
     model.eval()
     restored.eval()

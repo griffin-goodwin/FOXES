@@ -809,8 +809,8 @@ class Prediction:
     in W/m², for the 1–8 Å band.
 
     The Gaussian checkpoint assigns a variance contribution to each patch.
-    ``flux_std_map`` contains their square roots; the squares add to the
-    full-disk variance. Each HARP's ``flux_std`` is the square root of the
+    ``flux_std_map`` contains their square roots; the squares add exactly to
+    the raw-flux variance of the full-disk prediction. Each HARP's ``flux_std`` is the square root of the
     summed variance contributions inside its box. These are model-assigned
     uncertainty attributions; calibration against individual regional X-ray
     measurements hasn't been established.
@@ -1306,10 +1306,12 @@ class PredictionTimeSeries:
         keeps the same color even when you filter regions out.
 
         **Uncertainty.** For Gaussian checkpoints, each region gets a shaded
-        band of ± one ``flux_std``. A band whose lower edge would
-        fall at or below zero is left out. Deterministic checkpoints get no
-        bands. As in :class:`Prediction`, these are the model's uncertainty
-        split across regions, not tested regional error bars.
+        68% band, ``total_flux * exp(±s)``, where ``s`` is the width of the
+        log-normal whose raw variance is ``flux_std**2``. This is the same
+        rule the model uses for the full disk, and the band never crosses
+        zero. Deterministic checkpoints get no bands. As in
+        :class:`Prediction`, these are the model's uncertainty split across
+        regions, not tested regional error bars.
 
         **Snapshot panels.** With ``show_snapshot=True``, two panels are added
         to the right of the curves: the flux map at the snapshot time (from
@@ -1387,6 +1389,9 @@ class PredictionTimeSeries:
 
     def _plot_curves(self, ax, curves, selected, colors, show_full_disk, show_observed, show_uncertainty):
         """Draw log-safe regional/comparison curves, uncertainty, and UTC axes."""
+        import torch
+        from forecasting.model import lognormal_log_variance
+
         has_uncertainty = False
         ax.set_yscale("log")
         for harpnum in selected:
@@ -1395,8 +1400,13 @@ class PredictionTimeSeries:
             ax.plot(curve.index, flux, color=colors[harpnum], marker=".", markersize=2.5, label=f"HARP {harpnum}")
             if show_uncertainty:
                 sigma = curve["flux_std"].to_numpy(dtype=float)
-                lower, upper = flux - sigma, flux + sigma
-                valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & (lower > 0) & np.isfinite(upper)
+                # 68% band of the log-normal whose raw variance is sigma**2,
+                # matching the model's full-disk rule. It never crosses zero.
+                log_sigma = np.sqrt(lognormal_log_variance(
+                    torch.as_tensor(flux), torch.as_tensor(np.square(sigma)),
+                ).numpy())
+                lower, upper = flux * np.exp(-log_sigma), flux * np.exp(log_sigma)
+                valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & np.isfinite(upper)
                 if valid.any():
                     ax.fill_between(
                         curve.index, np.where(valid, lower, np.nan), np.where(valid, upper, np.nan),
