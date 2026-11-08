@@ -17,10 +17,38 @@ and pass its path instead.
 
 ## Current Uncertainty Model
 
-`UncertaintyModel.ckpt` consists of a local transformer backbone (3 x 3 attention) + a global attention transformer with an uncertainty MLP head.
+`UncertaintyModel.ckpt` uses 12 local transformer blocks with 3 × 3 attention
+windows and a shared global attention query that adjusts the patch fluxes.
+Its uncertainty MLP uses `uncertainty_input: context`: the corrected patch
+logit, encoded patch features, raw AIA token projection, and global summary.
+These inputs are detached from the flux model when training uncertainty.
+
+The predicted raw patch variances add to the full-disk variance. The model
+uses an exact shifted log-normal conversion to obtain the normalized
+Gaussian variance and asymmetric prediction intervals; see
+[Uncertainties](uncertainties.md) for the calculation and
+[Results](results.md) for measured test-set coverage.
 
 No legacy correction is applied to it. The SXR normalization is stored
 inside the checkpoint, so you don't need a separate normalization file.
+
+Each new `FOXESModel("uncertainty")` checks whether the published checkpoint
+has changed. Unchanged weights are reused; changed weights are downloaded
+and replace the cached copy after the download succeeds. If the server
+cannot be reached, FOXES logs a warning and uses the cached weights. Existing
+caches without download-version metadata are downloaded once to establish it.
+Legacy checkpoint names reuse their cached files without an update check.
+
+The check happens when creating the model, not when importing or reloading
+the package. Updated weights must be published to the repository before
+they can be downloaded by name. Already-loaded model instances keep their
+weights. To select a specific checkpoint, pass its local file path:
+
+```python
+import helio_foxes
+
+model = helio_foxes.FOXESModel("/path/to/model_assets/UncertaintyModel.ckpt")
+```
 
 ## Legacy Models
 

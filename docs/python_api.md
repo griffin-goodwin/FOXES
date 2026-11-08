@@ -42,8 +42,12 @@ python -m pip install helio-foxes
 
 The model weights aren't bundled with the package. `FOXESModel()` downloads
 the current checkpoint the first time you use it and caches it in
-`~/.cache/helio_foxes` (set `HELIO_FOXES_CACHE` to use another folder). The
-older checkpoints are listed under [Models and Checkpoints](models.md).
+`~/.cache/helio_foxes` (set `HELIO_FOXES_CACHE` to use another folder).
+Each new `FOXESModel("uncertainty")` checks for updated published weights
+and reuses its cache when unchanged. If the check cannot reach the server,
+it logs a warning and uses the cache. Importing the package does not download
+weights. To use a specific local checkpoint, pass its file path instead.
+The older checkpoints are listed under [Models and Checkpoints](models.md).
 
 You'll also need an email address registered with JSOC to download AIA data.
 If you don't have one yet, you can
@@ -99,13 +103,19 @@ region ID and bounding box. `flux_std` is the square root of the summed
 patch variance contributions inside the box. These are model-assigned
 uncertainty attributions; regional calibration hasn't been established.
 `flux_std` is `None` for deterministic checkpoints. HARP light-curve tables
-use these same column names.
+also include `lower_68`, `upper_68`, `lower_95`, and `upper_95` in W/m².
+These bounds are computed from the raw regional flux and variance when the
+table is created. Missing uncertainty gives NaN bounds.
 
 The current checkpoint also gives you nominal 68% and 95% full-disk
-`prediction_intervals`. They are asymmetric in W/m² because the Gaussian
-is defined in transformed log-flux space. `result.flux_std_map` contains the
-per-patch standard-deviation contributions: their squares add to the
-full-disk variance. Plot them with `result.plot_uncertainty_map()`.
+`prediction_intervals`. The intervals are asymmetric in W/m² because the model’s predictive Gaussian and full-disk variance output are defined in normalized log10(flux + 1e-8) space. To calculate other prediction intervals, first compute mean ± z * sigma, with both quantities expressed in that same normalized space. Then inverse-transform each endpoint to W/m² by undoing the normalization, exponentiating with base 10, and subtracting the 1e-8 offset.
+
+Plot the contributions with `result.plot_uncertainty_map()`. HARP light-curve
+bands use an unshifted log-normal with each region's own flux as its median
+and its assigned raw variance. The regional calculation reuses the model's
+log-normal variance conversion; the resulting bounds are stored in W/m².
+See [Uncertainties](uncertainties.md) for the calculation and
+[Results](results.md) for full-disk coverage on the test set.
 
 ## Predict a Time Range
 
@@ -124,7 +134,12 @@ series.full_disk_light_curve().to_csv("predictions.csv")
 harp_curves = series.harp_light_curves()
 ```
 
-Full-disk light-curve tables use `total_flux` and `ground_truth` columns in W/m².
+Full-disk light-curve tables use `total_flux` and `ground_truth` columns in
+W/m². When predictions have intervals, the tables also include `lower_68`,
+`upper_68`, `lower_95`, and `upper_95`, copied from each prediction.
+`plot_light_curves` reads the tables' `lower_68` and `upper_68` columns for
+shading, including the full-disk curve when `show_full_disk=True`.
+`show_uncertainty=False` hides all shading.
 
 Observations are downloaded and processed one at a time, so long ranges won't
 fill up your memory. Anything already in `save_dir` is reused instead of

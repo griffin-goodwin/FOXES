@@ -39,8 +39,9 @@ def test_log_lines_mask_nonpositive_values_and_preserve_data():
     for collection in ax.collections:
         for path in collection.get_paths():
             assert np.all(path.vertices[:, 1] > 0)
-    # HARP 200's lower uncertainty bound is negative at every time: no band.
-    assert len(ax.collections) == 1
+    # HARP 200's flux - sigma is negative at every time, but its log-normal
+    # band stays positive, so both regions get a band.
+    assert len(ax.collections) == 2
     plt.close(ax.figure)
 
 

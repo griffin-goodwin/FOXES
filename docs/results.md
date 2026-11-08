@@ -1,34 +1,35 @@
 # Results
 
-These numbers come from `model_assets/UncertaintyModel.ckpt`, evaluated on the
-held-out test set: **100,058 timestamps** between **2023-08-01 00:00** and
-**2025-09-26 20:21 UTC**.
+These numbers come from the updated `model_assets/UncertaintyModel.ckpt`,
+with the `context` uncertainty head and the exact variance conversion described
+in [Uncertainties](uncertainties.md). The saved evaluation covers the held-out
+test set: **100,058 timestamps** between **2023-08-01 00:00** and
+**2025-09-26 20:21 UTC**. The summary CSVs and figures below are from
+`model_assets/results/evaluation/`.
 
 ## Metrics
 
 | Group | Samples | RMSE (dex) | MAE (dex) | R² | Pearson correlation | 68% coverage | 95% coverage |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Overall | 100,058 | 0.0933 | 0.0636 | 0.9687 | 0.9843 | 64.46% | 90.04% |
-| B | 13,589 | 0.0452 | 0.0379 | 0.6492 | 0.8934 | 59.58% | 95.59% |
-| C | 63,001 | 0.0801 | 0.0568 | 0.9279 | 0.9668 | 66.96% | 89.72% |
-| M | 22,386 | 0.1317 | 0.0932 | 0.7173 | 0.8734 | 62.01% | 89.08% |
-| X | 1,082 | 0.2181 | 0.1667 | −0.1556 | 0.5969 | 30.87% | 58.69% |
+| Overall | 100,058 | 0.0895 | 0.0597 | 0.9712 | 0.9856 | 66.74% | 91.42% |
+| B | 13,589 | 0.0486 | 0.0410 | 0.5936 | 0.8915 | 66.82% | 96.34% |
+| C | 63,001 | 0.0745 | 0.0509 | 0.9376 | 0.9697 | 65.07% | 89.65% |
+| M | 22,386 | 0.1282 | 0.0906 | 0.7320 | 0.8784 | 71.85% | 93.64% |
+| X | 1,082 | 0.2197 | 0.1657 | −0.1718 | 0.6296 | 57.30% | 87.34% |
 
 Errors are computed on `log10(flux)`, so they're in dex. Coverage is the
 fraction of measured values that land within 1 (68%) or 1.96 (95%) predicted
 standard deviations, measured in the checkpoint's normalized
 `log10(flux + 1e-8)` space.
 
-The model does well on B through M class, but X-class flux is its weak spot.Keep that in mind if you're using FOXES during large events.
-
 Full summaries:
 
-- {download}`Regression metrics <../model_assets/UncertaintyModelResults/evaluation/metrics/performance_metrics.csv>`
-- {download}`Uncertainty metrics <../model_assets/UncertaintyModelResults/evaluation/metrics/uncertainty_metrics.csv>`
+- {download}`Regression metrics <../model_assets/results/evaluation/metrics/performance_metrics.csv>`
+- {download}`Uncertainty metrics <../model_assets/results/evaluation/metrics/uncertainty_metrics.csv>`
 
 ## Predicted Versus Measured Flux
 
-```{figure} ../model_assets/UncertaintyModelResults/evaluation/plots/regression_plot.png
+```{figure} ../model_assets/results/evaluation/plots/regression_plot.png
 :alt: Density of predicted versus measured SXR flux, with a perfect-agreement line and class-specific MAE band.
 :width: 100%
 
@@ -38,12 +39,23 @@ shows the mean absolute error (in log space) for each flare class.
 
 ## Calibration
 
-```{figure} ../model_assets/UncertaintyModelResults/evaluation/plots/uncertainty_calibration.png
-:alt: Nominal versus empirical coverage by class and a histogram of standardized residuals.
+```{figure} ../model_assets/results/evaluation/plots/uncertainty_calibration.png
+:alt: Nominal versus empirical central interval coverage, overall and by flare class.
 :width: 100%
 
-Left: how often the measured flux actually falls inside each nominal interval.
-Right: the distribution of standardized residuals.
+How often the measured flux actually falls inside each nominal central
+interval, overall and by flare class.
+```
+
+## Prediction Intervals
+
+```{figure} ../model_assets/results/evaluation/plots/prediction_intervals.png
+:alt: Predicted versus measured flux with asymmetric nominal 68% and 95% intervals for a class-balanced sample.
+:width: 100%
+
+The same 48 examples (up to 12 per class) are shown with nominal 68% intervals
+on the left and 95% intervals on the right. The table's coverage values use
+all 100,058 timestamps.
 ```
 
 To run the same evaluation on your own predictions, see the

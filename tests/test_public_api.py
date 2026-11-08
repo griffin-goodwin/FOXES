@@ -7,11 +7,12 @@ import types
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import pytorch_lightning as pl
 import pytest
 import torch
 
 import helio_foxes
-from forecasting.model import CoupledGaussianViTLocal, ViTLocal
+from forecasting.model import SXR_LOG_OFFSET, CoupledGaussianViTLocal, ViTLocal
 
 
 def _prediction(flux_map):
@@ -82,8 +83,12 @@ def test_aia_processor_rejects_partial_download_and_cleans_up(monkeypatch):
     assert not __import__("os").path.exists(staged[0])
 
 
-@pytest.mark.parametrize("model_class", [ViTLocal, CoupledGaussianViTLocal])
-def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
+@pytest.mark.parametrize("model_class,uncertainty_input", [
+    pytest.param(ViTLocal, None, id="deterministic"),
+    pytest.param(CoupledGaussianViTLocal, "logit", id="gaussian-logit"),
+    pytest.param(CoupledGaussianViTLocal, "context", id="gaussian-context"),
+])
+def test_predict_matches_model_outputs(model_class, uncertainty_input, monkeypatch, tmp_path):
     kwargs = dict(
         embed_dim=8, hidden_dim=16, num_channels=7,
         num_heads=2, num_layers=1, patch_size=1,
@@ -91,15 +96,15 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     )
     model = model_class(
         model_kwargs=kwargs, sxr_norm=np.array([-6.0, 1.0], dtype=np.float32),
-        **({"uncertainty_kwargs": {"enabled": True}}
+        **({"uncertainty_kwargs": {"enabled": True, "uncertainty_input": uncertainty_input}}
            if model_class is CoupledGaussianViTLocal else {}),
     ).eval()
-    monkeypatch.setattr(
-        "forecasting.inference.load_model_from_config",
-        lambda config: model,
-    )
     checkpoint = tmp_path / "model.ckpt"
-    checkpoint.touch()
+    torch.save({
+        "pytorch-lightning_version": pl.__version__,
+        "hyper_parameters": dict(model.hparams),
+        "state_dict": model.state_dict(),
+    }, checkpoint)
     predictor = helio_foxes.FOXESModel(checkpoint, device="cpu")
     assert predictor.model_kwargs == kwargs
 
@@ -128,11 +133,28 @@ def test_predict_matches_model_outputs(model_class, monkeypatch, tmp_path):
     assert result.flux_map.shape == (2, 2)
     assert np.isclose(result.flux_map.sum(), result.total_flux, rtol=1e-5)
     if model_class is CoupledGaussianViTLocal:
+        assert predictor.model.model.uncertainty_input == uncertainty_input
         assert set(result.prediction_intervals) == {"68", "95"}
         assert result.flux_std_map.shape == (2, 2)
         assert result.harp_contributions[0]["flux_std"] == pytest.approx(
             float(result.flux_std_map[1, 0]),
         )
+        with torch.inference_mode():
+            tensor = torch.as_tensor(image).permute(1, 2, 0).unsqueeze(0)
+            for level, z in (("68", 1.0), ("95", 1.96)):
+                flux, lower, upper = model.predict_interval(tensor, z=z)
+                assert result.total_flux == pytest.approx(flux.item())
+                np.testing.assert_allclose(
+                    result.prediction_intervals[level], [lower.item(), upper.item()],
+                    rtol=1e-5,
+                )
+        # The public map and interval must describe the same raw variance,
+        # including the flux offset and median convention.
+        median = result.total_flux + SXR_LOG_OFFSET
+        log_variance = np.log((result.prediction_intervals["68"][1] + SXR_LOG_OFFSET) / median)**2
+        interval_variance = median**2 * np.exp(log_variance) * np.expm1(log_variance)
+        map_variance = np.square(result.flux_std_map.astype(float)).sum()
+        assert interval_variance == pytest.approx(map_variance, rel=1e-4, abs=0)
     else:
         assert result.prediction_intervals is None
         assert result.flux_std_map is None
@@ -496,8 +518,9 @@ def test_plot_rejects_invalid_harp_flux_threshold(monkeypatch, threshold):
 
 
 class _Response:
-    def __init__(self, payload):
-        self.payload, self.headers = payload, {"Content-Length": str(len(payload))}
+    def __init__(self, payload, headers=None):
+        self.payload = payload
+        self.headers = {"Content-Length": str(len(payload)), **(headers or {})}
 
     def read(self, size):
         chunk, self.payload = self.payload[:size], self.payload[size:]
@@ -511,11 +534,17 @@ class _Response:
 
 
 def test_named_checkpoint_downloads_once_into_cache(monkeypatch, tmp_path):
+    from urllib.error import HTTPError
+
     urls = []
 
-    def urlopen(url):
+    def urlopen(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
         urls.append(url)
-        return _Response(b"weights")
+        if not isinstance(request, str):
+            assert dict((k.lower(), v) for k, v in request.header_items())["if-none-match"] == '"version-1"'
+            raise HTTPError(url, 304, "Not Modified", {}, None)
+        return _Response(b"weights", {"ETag": '"version-1"'})
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
     monkeypatch.setenv("HELIO_FOXES_CACHE", str(tmp_path))
@@ -524,10 +553,12 @@ def test_named_checkpoint_downloads_once_into_cache(monkeypatch, tmp_path):
     assert path == tmp_path / "UncertaintyModel.ckpt"
     assert path.read_bytes() == b"weights"
     assert helio_foxes.api._resolve_checkpoint("no-attention-mask").parent == tmp_path / "LegacyModels"
+    assert helio_foxes.api._resolve_checkpoint("no-attention-mask").parent == tmp_path / "LegacyModels"
     assert helio_foxes.api._resolve_checkpoint("uncertainty") == path
     assert urls == [
         helio_foxes.api._CHECKPOINT_URL + "UncertaintyModel.ckpt",
         helio_foxes.api._CHECKPOINT_URL + "LegacyModels/no-attention-mask.ckpt",
+        helio_foxes.api._CHECKPOINT_URL + "UncertaintyModel.ckpt",
     ]
 
 
@@ -539,7 +570,7 @@ def test_checkpoint_paths_win_and_bad_downloads_leave_nothing(monkeypatch, tmp_p
     (tmp_path / "uncertainty").unlink()
     with pytest.raises(FileNotFoundError, match="released checkpoint name"):
         helio_foxes.api._resolve_checkpoint("missing.ckpt")
-    monkeypatch.setattr("urllib.request.urlopen", lambda url: _Response(b"version https://git-lfs.github.com/spec/v1\n"))
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout: _Response(b"version https://git-lfs.github.com/spec/v1\n"))
     with pytest.raises(RuntimeError, match="LFS pointer"):
         helio_foxes.api._resolve_checkpoint("uncertainty")
     assert not any((tmp_path / "cache").iterdir())

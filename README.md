@@ -36,6 +36,9 @@ data tools, training code, and evaluation workflows.
 **[Read the Sphinx documentation](https://griffin-goodwin.github.io/FOXES/)**
 for getting started, checkpoint downloads, examples, results, and the API reference.
 
+[Current model results](https://griffin-goodwin.github.io/FOXES/results.html) ·
+[Uncertainty calculation](https://griffin-goodwin.github.io/FOXES/uncertainties.html)
+
 ## Install
 
 ```bash
@@ -59,7 +62,7 @@ If you use this code or data in your work, please cite:
     title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
     institution     = {Frontier Development Lab (FDL)},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
-    version         = {v1.0},
+    version         = {v2.0.2},
     year            = {2026}
 }
 ```

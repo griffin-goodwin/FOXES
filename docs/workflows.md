@@ -78,6 +78,23 @@ patch uncertainty maps depends on the output paths and `model_params` in the
 config. Inference runs on the single device set by `device`; with CUDA, that's
 the first visible GPU.
 
+To run inference across multiple CUDA GPUs, launch one process per GPU:
+
+```bash
+python forecasting/run_parallel_inference.py \
+  --config forecasting/inference_config.yaml --gpus 0,1,2,3
+```
+
+Each worker uses the configured batch size and handles a disjoint share of the
+timestamps after the sampling step. It writes a shard CSV and log beside
+`output_path`; after every worker succeeds, the launcher merges all columns in
+timestamp order into the configured CSV. Gaussian intervals and legacy
+calibration columns are preserved. Optional maps keep their timestamp-based
+filenames in the configured folders. Paths still resolve from the YAML's
+`path_root`. The launcher explicitly selects CUDA for its workers, overriding
+the YAML's `device` setting. Keep the selected sample count at least as large
+as the number of GPUs.
+
 ## Evaluate Predictions
 
 Point `forecasting/evaluation_config.yaml` at your prediction CSV and an
@@ -104,6 +121,49 @@ Edit the data paths, model, and training settings, then run:
 python training/train.py --config training/train_coupled_gaussian.yaml
 ```
 
-The Gaussian config matches the architecture and losses of the current
-checkpoint. For a deterministic model, use `training/train_deterministic.yaml`
-instead.
+The Gaussian config is an editable training preset. For the released
+checkpoint's architecture and uncertainty head, see
+[Models and Checkpoints](models.md#current-uncertainty-model); the preset is
+not a complete reproduction recipe. For a deterministic model, use
+`training/train_deterministic.yaml` instead.
+
+To train the Gaussian model using only the patch-level flux head, set
+`vit_architecture.global_patch_adjustment: false` in the training YAML. This
+omits initialization and computation of the global correction branch while
+preserving optional uncertainty training. The setting is saved in the
+checkpoint and also applies at inference. It defaults to `true` when omitted.
+
+`vit_architecture.mask_mode` is passed to each patch attention block and accepts
+`local`, `inverted`, or `none` (full attention), with either setting of
+`global_patch_adjustment`. `local_window` sets the window size for the two
+masked modes.
+
+`uncertainty.uncertainty_input` chooses what the uncertainty head sees. `logit`
+(the training preset's default) gives it each patch's local logit. `context`
+(used by the updated released checkpoint) gives it the globally corrected
+logit plus the patch's features, raw AIA token projection, and the global
+summary. Without the global branch, `context` uses the local logit and patch
+features. To fit only the uncertainty head on an existing model, set:
+
+```yaml
+finetune:
+  checkpoint_path: model_assets/UncertaintyModel.ckpt
+  train_only_uncertainty_head: true
+  reset_uncertainty_head: true
+```
+
+`vit_architecture` and `data.sxr_norm_path` must match the checkpoint; learning
+rate and dropout may differ. The flux predictions stay exactly as in the
+checkpoint, and the training loss is the Gaussian NLL alone.
+`reset_uncertainty_head: true` starts the head fresh even when checkpoint weights
+would match. It uses seeded random hidden weights and the configured
+`uncertainty.initial_relative_std` for its initial output. The default is `false`,
+which loads compatible uncertainty weights; an incompatible head starts fresh.
+
+On the training set the flux model's errors are smaller than on new data, so a
+head fitted there learns too small a spread. To fit it on held-out data instead,
+also set `finetune.val_fit_fraction`, for example `0.8`. The earliest 80% of
+`val` (in time) then trains the head, the last 20% selects checkpoints, and
+`train/` is not read. With `1`, all of `val` trains the head, validation is
+off, early stopping is not allowed, and every epoch is saved. Keep `test/` for
+checking interval coverage afterwards.

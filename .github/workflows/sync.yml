@@ -26,10 +26,11 @@ jobs:
           git lfs fetch --all origin main
           # Rewrite only this disposable runner checkout. GitHub Pages keeps
           # its regular PNGs; Hugging Face needs LFS pointers for every PNG.
-          # Explicit paths override the Pages exceptions in .gitattributes.
+          # Path patterns cover current and historical evaluation folders
+          # and override the Pages exceptions in .gitattributes.
           git lfs migrate import \
             --include-ref=refs/heads/main \
-            --include="*.png,docs/_static/foxes-logo.png,model_assets/UncertaintyModelResults/evaluation/plots/*.png" \
+            --include="*.png,docs/_static/foxes-logo.png,model_assets/*/evaluation/plots/*.png" \
             --yes
       - name: Push to HF
         env:

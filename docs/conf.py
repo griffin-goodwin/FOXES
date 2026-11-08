@@ -32,7 +32,7 @@ root_doc = "index"
 # Local reprocessing notes are kept with the ignored tools, outside published docs.
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "sxr_reprocessing.md"]
 myst_heading_anchors = 4
-myst_enable_extensions = ["colon_fence"]
+myst_enable_extensions = ["colon_fence", "dollarmath"]
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "signature"

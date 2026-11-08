@@ -2,7 +2,7 @@
 # Keep the small documentation logo available to Pages without an LFS checkout.
 docs/_static/foxes-logo.png -filter -diff -merge -text
 # Small published evaluation figures must render in Sphinx without fetching weights.
-model_assets/UncertaintyModelResults/evaluation/plots/*.png -filter -diff -merge -text
+model_assets/results/evaluation/plots/*.png -filter -diff -merge -text
 foxes_logo.png filter=lfs diff=lfs merge=lfs -text
 *.ckpt filter=lfs diff=lfs merge=lfs -text
 tutorials/heliofoxes_demo/saved_observations/*.npz filter=lfs diff=lfs merge=lfs -text

@@ -224,6 +224,7 @@ class FOXESEvaluator:
             'MAE': mean_absolute_error(np.log10(self.y_true), np.log10(self.y_pred)),
             'R2': r2_score(np.log10(self.y_true), np.log10(self.y_pred)),
             'Pearson_Corr': np.corrcoef(np.log10(self.y_true), np.log10(self.y_pred))[0, 1],
+            'MBE': np.mean(np.log10(self.y_pred) - np.log10(self.y_true)),
             'Sample_Count': len(self.y_true),
         }
 
@@ -256,6 +257,7 @@ class FOXESEvaluator:
                     r2_score(np.log10(y_true_class), np.log10(y_pred_class))
                     if len(y_true_class) >= 2 else np.nan
                 ),
+                'MBE': np.mean(np.log10(y_pred_class) - np.log10(y_true_class)),
                 'Sample_Count': len(y_true_class),
                 'Pearson_Corr': (
                     np.corrcoef(
@@ -347,20 +349,20 @@ class FOXESEvaluator:
             row = {
                 'Group': group_name,
                 'Sample_Count': int(mask.sum()),
-                'Gaussian_NLL_Normalized': float(np.mean(nll)),
+                #'Gaussian_NLL_Normalized': float(np.mean(nll)),
                 'Coverage_68': float(np.mean(np.abs(group_z) <= 1.0)),
                 'Coverage_95': float(np.mean(np.abs(group_z) <= 1.96)),
-                'Mean_Sigma_Normalized': float(np.mean(sigma[mask])),
-                'Mean_Sigma_Dex': (
-                    float(np.nanmean(sigma_dex[mask]))
-                    if np.any(np.isfinite(sigma_dex[mask])) else np.nan
-                ),
-                'Mean_Absolute_Z': float(np.mean(np.abs(group_z))),
-                'Z_Mean': float(np.mean(group_z)),
-                'Z_Std': (
-                    float(np.std(group_z, ddof=1))
-                    if mask.sum() >= 2 else np.nan
-                ),
+                #'Mean_Sigma_Normalized': float(np.mean(sigma[mask])),
+                #'Mean_Sigma_Dex': (
+                #    float(np.nanmean(sigma_dex[mask]))
+                #    if np.any(np.isfinite(sigma_dex[mask])) else np.nan
+                #),
+                #'Mean_Absolute_Z': float(np.mean(np.abs(group_z))),
+                #'Z_Mean': float(np.mean(group_z)),
+                #'Z_Std': (
+                #    float(np.std(group_z, ddof=1))
+                #    if mask.sum() >= 2 else np.nan
+                #),
             }
             if {'lower_68', 'upper_68'}.issubset(self.df.columns):
                 row['Mean_68_Interval_Width_Raw'] = float(np.mean(
@@ -485,9 +487,9 @@ class FOXESEvaluator:
         print(f"Saved prediction interval plot to {plot_path}")
 
     def _plot_uncertainty_calibration(self, residual_z, valid):
-        """Plot nominal-vs-empirical coverage and standardized residuals."""
+        """Plot nominal-vs-empirical central interval coverage."""
         setup_barlow_font()
-        nominal = np.linspace(0.05, 0.99, 20)
+        nominal = np.linspace(0.01, 0.99, 20)
         z_limits = np.array([
             NormalDist().inv_cdf((1.0 + probability) / 2.0)
             for probability in nominal
@@ -498,24 +500,23 @@ class FOXESEvaluator:
         axes_color = '#FFFFFF' if theme == 'white' else '#151522'
         text_color = '#111111' if theme == 'white' else '#FFFFFF'
 
-        fig, (coverage_ax, residual_ax) = plt.subplots(
-            1, 2, figsize=(12, 5), facecolor=figure_color
+        fig, coverage_ax = plt.subplots(
+            1, 1, figsize=(8, 8), facecolor=figure_color
         )
         colors = {
             'Overall': '#E24A33', 'Below-B': '#8C8C8C',
             'B': '#59A14F', 'C': '#348ABD', 'M': '#988ED5',
             'X': '#FBC15E',
         }
-        for ax in (coverage_ax, residual_ax):
-            ax.set_facecolor(axes_color)
-            ax.tick_params(colors=text_color)
-            for spine in ax.spines.values():
-                spine.set_color(text_color)
-            ax.grid(alpha=0.25)
+        coverage_ax.set_facecolor(axes_color)
+        coverage_ax.tick_params(colors=text_color)
+        for spine in coverage_ax.spines.values():
+            spine.set_color(text_color)
+        coverage_ax.grid(alpha=0.25)
 
         coverage_ax.plot(
             [0, 1], [0, 1], '--', color=text_color, linewidth=1,
-            label='Ideal calibration',
+            label='Ideal Calibration',
         )
         for group_name, group_mask in self._class_masks().items():
             mask = group_mask & valid
@@ -526,37 +527,19 @@ class FOXESEvaluator:
                 for z_limit in z_limits
             ]
             coverage_ax.plot(
-                nominal, empirical, marker='o', markersize=3,
+                nominal, empirical, marker='o', markersize=5, linewidth=1.5,
                 color=colors[group_name], label=group_name,
             )
         coverage_ax.set(
-            xlabel='Nominal central interval coverage',
-            ylabel='Empirical coverage', xlim=(0, 1), ylim=(0, 1),
-            title='Predictive interval calibration',
+            xlabel='Nominal Coverage',
+            ylabel='Empirical Central Coverage (Fraction of Masked |Z-Score| Within Nominal Central Interval)', xlim=(0, 1), ylim=(0, 1),
+            #title='Predictive interval calibration',
         )
         coverage_ax.legend(fontsize=9)
 
-        overall_z = residual_z[valid]
-        residual_ax.hist(
-            overall_z, bins=np.linspace(-5, 5, 51), density=True,
-            alpha=0.75, color='#348ABD', label='FOXES residuals',
-        )
-        normal_x = np.linspace(-5, 5, 300)
-        residual_ax.plot(
-            normal_x,
-            np.exp(-0.5 * normal_x ** 2) / np.sqrt(2.0 * np.pi),
-            color='#E24A33', linewidth=2, label='Standard normal',
-        )
-        residual_ax.set(
-            xlabel='Standardized residual (target - mean) / sigma',
-            ylabel='Density', title='Standardized residual distribution',
-        )
-        residual_ax.legend(fontsize=9)
-
-        for ax in (coverage_ax, residual_ax):
-            ax.xaxis.label.set_color(text_color)
-            ax.yaxis.label.set_color(text_color)
-            ax.title.set_color(text_color)
+        coverage_ax.xaxis.label.set_color(text_color)
+        coverage_ax.yaxis.label.set_color(text_color)
+        coverage_ax.title.set_color(text_color)
 
         fig.tight_layout()
         plot_path = os.path.join(

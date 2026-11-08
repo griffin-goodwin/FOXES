@@ -1,6 +1,8 @@
 # Citing FOXES
 
-The method and results are described in our paper:
+The original FOXES method is described in our paper. For the updated
+uncertainty checkpoint and its held-out evaluation, see
+[Models and Checkpoints](models.md) and [Results](results.md).
 
 > Goodwin, G. T., March, A. J., Biradar, J., Schirninger, C., Jarolim, R.,
 > Vourlidas, A., Sadykov, V. M., & Pratt, L. (2026). Improving Solar Flare Soft
@@ -34,7 +36,7 @@ If you use the code or data directly, you can cite the software as well:
     title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
     institution     = {Frontier Development Lab (FDL)},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
-    version         = {v1.0},
+    version         = {v2.0.2},
     year            = {2026}
 }
 ```

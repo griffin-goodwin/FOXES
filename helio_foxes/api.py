@@ -606,7 +606,11 @@ class FOXESModel:
         time you use it and cached in ``~/.cache/helio_foxes`` (set the
         ``HELIO_FOXES_CACHE`` environment variable to use another folder).
         If a file with that name exists, the file wins. ``~`` is expanded in
-        paths.
+        paths. Each new ``FOXESModel("uncertainty")`` checks for updated
+        published weights, downloading them only when changed. If the
+        update check cannot reach the server, cached weights are reused
+        with a warning. Legacy names reuse their cache without checking.
+        Pass a local file path to keep using a specific checkpoint.
     device : {"auto", "cpu", "cuda", "mps"}, default "auto"
         Where to run the model. ``"auto"`` uses a GPU if one is available.
     legacy_correction_enabled : bool or None, default None
@@ -767,9 +771,9 @@ class FOXESModel:
         with torch.inference_mode():
             outputs = self.model(tensor, return_attention=False)
             if getattr(self.model, "predicts_uncertainty", False):
-                flux, variance, patches, patch_variance = outputs
+                flux, variance_normalized, patches, patch_variance = outputs
                 intervals_raw = uncertainty_from_prediction(
-                    flux, variance, self.model.sxr_norm,
+                    flux, variance_normalized, self.model.sxr_norm,
                 )
                 prediction_intervals = {
                     level: (
@@ -809,11 +813,11 @@ class Prediction:
     in W/m², for the 1–8 Å band.
 
     The Gaussian checkpoint assigns a variance contribution to each patch.
-    ``flux_std_map`` contains their square roots; the squares add to the
-    full-disk variance. Each HARP's ``flux_std`` is the square root of the
-    summed variance contributions inside its box. These are model-assigned
-    uncertainty attributions; calibration against individual regional X-ray
-    measurements hasn't been established.
+    ``flux_std_map`` contains their square roots; the squares add exactly to
+    the raw-flux variance of the full-disk prediction. ``total_flux`` is its
+    predictive median; its arithmetic mean differs because the Gaussian is
+    defined in normalized log-flux space. Each HARP's ``flux_std`` is the
+    square root of the summed variance contributions inside its box.
 
     Attributes
     ----------
@@ -1211,7 +1215,10 @@ class PredictionTimeSeries:
         """Return the full-disk light curve as a DataFrame indexed by UTC time.
 
         Columns are ``total_flux`` (predicted) and ``ground_truth`` (measured
-        GOES XRS-B, if available), both in W/m². Legacy series also get
+        GOES XRS-B, if available), both in W/m². Series with prediction
+        intervals also include ``lower_68``, ``upper_68``, ``lower_95``, and
+        ``upper_95``, copied from each prediction in W/m². Missing intervals
+        are NaN. Legacy series also get
         ``legacy_correction_enabled`` and ``flux_scale_factor`` columns.
         """
         rows = [{
@@ -1219,6 +1226,14 @@ class PredictionTimeSeries:
             "ground_truth": p.ground_truth,
         } for p in self.predictions]
         frame = pd.DataFrame(rows, columns=["timestamp", "total_flux", "ground_truth"])
+        if any(p.prediction_intervals is not None for p in self.predictions):
+            for level in ("68", "95"):
+                bounds = [
+                    (p.prediction_intervals or {}).get(level, (np.nan, np.nan))
+                    for p in self.predictions
+                ]
+                frame[f"lower_{level}"] = [lower for lower, _ in bounds]
+                frame[f"upper_{level}"] = [upper for _, upper in bounds]
         if any(p.legacy_correction_enabled for p in self.predictions):
             frame["legacy_correction_enabled"] = [p.legacy_correction_enabled for p in self.predictions]
             frame["flux_scale_factor"] = [p.flux_scale_factor for p in self.predictions]
@@ -1229,9 +1244,14 @@ class PredictionTimeSeries:
         """Return one light curve per active region, as ``{harpnum: DataFrame}``.
 
         Each DataFrame is indexed by UTC time and covers every prediction in
-        the series, with ``total_flux`` and ``flux_std`` columns in
-        W/m². If a region isn't present at a time, or there's no uncertainty,
-        that value is NaN. Nothing is interpolated or filled with zeros.
+        the series, with ``total_flux``, ``flux_std``, ``lower_68``,
+        ``upper_68``, ``lower_95``, and ``upper_95`` columns in W/m².
+        Bounds are computed here from raw regional flux and variance, with
+        no training normalization. They assume an unshifted log-normal
+        distribution with that flux as its median and ``flux_std**2`` as
+        its variance. Missing uncertainty or a nonpositive regional flux
+        gives NaN bounds. Missing regions give NaN for every column.
+        Nothing is interpolated or filled with zeros.
         """
         #Get the index of the predictions (based on their timestamps)
         index = self.full_disk_light_curve().index
@@ -1245,9 +1265,16 @@ class PredictionTimeSeries:
             for prediction in self.predictions:
                 region = next((r for r in prediction.harp_contributions or [] if r["harpnum"] == harpnum), {})
                 rows.append([region.get("total_flux", np.nan), region.get("flux_std", np.nan)])
-            curves[harpnum] = pd.DataFrame(
+            frame = pd.DataFrame(
                 rows, index=index, columns=["total_flux", "flux_std"], dtype=float,
             )
+            bounds = _regional_flux_intervals(
+                frame["total_flux"].to_numpy(),
+                np.square(frame["flux_std"].to_numpy()),
+            )
+            for name, values in bounds.items():
+                frame[name] = values
+            curves[harpnum] = frame
         return curves
 
     @staticmethod
@@ -1305,11 +1332,15 @@ class PredictionTimeSeries:
         line rather than being clipped to the bottom of the plot. Each HARP
         keeps the same color even when you filter regions out.
 
-        **Uncertainty.** For Gaussian checkpoints, each region gets a shaded
-        band of ± one ``flux_std``. A band whose lower edge would
-        fall at or below zero is left out. Deterministic checkpoints get no
-        bands. As in :class:`Prediction`, these are the model's uncertainty
-        split across regions, not tested regional error bars.
+        **Uncertainty.** Shading uses the ``lower_68`` and ``upper_68``
+        columns returned by :meth:`harp_light_curves` and, when shown,
+        :meth:`full_disk_light_curve`. Bounds are already in W/m²; plotting
+        reads them without normalization or recalculating intervals. HARP
+        bands assume a regional log-normal distribution from the summed raw
+        flux and variance contributions. Full-disk bounds come directly from
+        each prediction. Missing, nonpositive, or non-finite bounds leave
+        gaps. Deterministic checkpoints get no bands. As in
+        :class:`Prediction`, regional calibration has not been established.
 
         **Snapshot panels.** With ``show_snapshot=True``, two panels are added
         to the right of the curves: the flux map at the snapshot time (from
@@ -1388,24 +1419,19 @@ class PredictionTimeSeries:
     def _plot_curves(self, ax, curves, selected, colors, show_full_disk, show_observed, show_uncertainty):
         """Draw log-safe regional/comparison curves, uncertainty, and UTC axes."""
         has_uncertainty = False
+        has_full_disk_uncertainty = False
         ax.set_yscale("log")
         for harpnum in selected:
             curve = curves[harpnum]
             flux = _positive_flux(curve["total_flux"])
             ax.plot(curve.index, flux, color=colors[harpnum], marker=".", markersize=2.5, label=f"HARP {harpnum}")
             if show_uncertainty:
-                sigma = curve["flux_std"].to_numpy(dtype=float)
-                lower, upper = flux - sigma, flux + sigma
-                valid = np.isfinite(flux) & np.isfinite(sigma) & (sigma >= 0) & (lower > 0) & np.isfinite(upper)
-                if valid.any():
-                    ax.fill_between(
-                        curve.index, np.where(valid, lower, np.nan), np.where(valid, upper, np.nan),
-                        where=valid, color=colors[harpnum], alpha=0.18, linewidth=0,
-                    )
-                    has_uncertainty = True
+                has_uncertainty = self._plot_interval_band(ax, curve, colors[harpnum]) or has_uncertainty
         totals = self.full_disk_light_curve()
         if show_full_disk:
             ax.plot(totals.index, _positive_flux(totals["total_flux"]), color="black", marker=".", markersize=2.5, label="FOXES full disk")
+            if show_uncertainty and "lower_68" in totals:
+                has_full_disk_uncertainty = self._plot_interval_band(ax, totals, "black")
         if show_observed:
             ax.plot(totals.index, _positive_flux(totals["ground_truth"]), color="0.5", linestyle="--", marker=".", markersize=2.5, label="Observed GOES XRS-B")
         ax.set(xlabel="Requested time (UTC)", ylabel="SXR flux (W/m²)")
@@ -1420,7 +1446,24 @@ class PredictionTimeSeries:
                 start, end = start - 30 / 86400, end + 30 / 86400
             ax.set_xlim(start, end)
         if has_uncertainty:
-            ax.set_title(r"HARP light curves (shading: $\pm1\sigma$ variance attribution)")
+            ax.set_title("HARP light curves (shading: nominal 68% log-normal variance attribution)")
+        elif has_full_disk_uncertainty:
+            ax.set_title("Full-disk light curve (shading: nominal 68% prediction interval)")
+
+    @staticmethod
+    def _plot_interval_band(ax, curve, color):
+        """Shade existing raw-flux bounds without recomputing uncertainty."""
+        flux = _positive_flux(curve["total_flux"])
+        lower = _positive_flux(curve["lower_68"])
+        upper = _positive_flux(curve["upper_68"])
+        valid = np.isfinite(flux) & np.isfinite(lower) & np.isfinite(upper) & (lower <= upper)
+        if not valid.any():
+            return False
+        ax.fill_between(
+            curve.index, np.where(valid, lower, np.nan), np.where(valid, upper, np.nan),
+            where=valid, color=color, alpha=0.18, linewidth=0,
+        )
+        return True
 
     def _plot_snapshot_panels(self, ax, snapshot_ax, aia_ax, snapshot, selected, colors, show_uncertainty):
         """Reuse the standard flux map beside its matching plain AIA image."""
@@ -2081,6 +2124,8 @@ _utc_datetime = parse_timestamp
 
 def _resolve_checkpoint(checkpoint):
     """Return a checkpoint file path, downloading a released checkpoint by name."""
+    from urllib.error import URLError
+
     path = Path(checkpoint).expanduser()
     if path.is_file():
         return path.resolve()
@@ -2092,30 +2137,89 @@ def _resolve_checkpoint(checkpoint):
         )
     cache = Path(os.environ.get("HELIO_FOXES_CACHE", "~/.cache/helio_foxes")).expanduser()
     target = cache / relative
-    if not target.is_file():
+    if target.is_file() and str(checkpoint) == "uncertainty":
+        try:
+            _download(_CHECKPOINT_URL + relative, target, check_for_updates=True)
+        except (URLError, OSError) as exc:
+            logger.warning(
+                "Could not check for an updated uncertainty checkpoint; "
+                "using cached weights at %s: %s", target, exc,
+            )
+    elif not target.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
         _download(_CHECKPOINT_URL + relative, target)
     return target
 
 
-def _download(url, target):
-    """Download ``url`` to ``target`` with a progress bar, leaving nothing behind on failure."""
-    from urllib.request import urlopen
+def _download(url, target, *, check_for_updates=False):
+    """Download atomically, using HTTP validators to refresh cached weights."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
 
-    partial = target.with_name(target.name + ".part")
+    metadata_path = target.with_name(target.name + ".http.json")
+    request_headers = {}
+    if check_for_updates:
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, ValueError):
+            metadata = {}
+        if isinstance(metadata, dict) and metadata.get("url") == url:
+            for header, key in (("If-None-Match", "etag"), ("If-Modified-Since", "last_modified")):
+                if isinstance(metadata.get(key), str):
+                    request_headers[header] = metadata[key]
+    request = Request(url, headers=request_headers) if request_headers else url
     try:
-        with urlopen(url) as response, open(partial, "wb") as handle:
+        response = urlopen(request, timeout=10)
+    except HTTPError as exc:
+        if exc.code == 304 and check_for_updates and target.is_file():
+            exc.close()
+            return
+        raise
+
+    # Some hosts return 200 despite a conditional request. Matching version
+    # headers still let us close the response without downloading its body.
+    if check_for_updates and request_headers:
+        etag = response.headers.get("ETag")
+        modified = response.headers.get("Last-Modified")
+        if ((etag is not None and etag == metadata.get("etag"))
+                or (etag is None and metadata.get("etag") is None
+                    and modified is not None and modified == metadata.get("last_modified"))):
+            with response:
+                return
+
+    partial = metadata_partial = None
+    try:
+        with response, NamedTemporaryFile(
+            mode="wb", dir=target.parent, prefix=f".{target.name}.", suffix=".part", delete=False,
+        ) as handle:
+            partial = Path(handle.name)
             total = int(response.headers.get("Content-Length") or 0) or None
+            metadata = {
+                "url": url, "etag": response.headers.get("ETag"),
+                "last_modified": response.headers.get("Last-Modified"),
+            }
+            received = 0
             with tqdm(total=total, unit="B", unit_scale=True, desc=f"Downloading {target.name}") as bar:
                 while chunk := response.read(1 << 20):
                     handle.write(chunk)
+                    received += len(chunk)
                     bar.update(len(chunk))
+        if received == 0 or (total is not None and received != total):
+            raise RuntimeError(f"Incomplete checkpoint download from {url}: received {received} bytes, expected {total}")
         with open(partial, "rb") as handle:
             if handle.read(64).startswith(b"version https://git-lfs"):
                 raise RuntimeError(f"{url} returned a Git LFS pointer instead of the checkpoint")
         os.replace(partial, target)
+        with NamedTemporaryFile(
+            mode="w", dir=target.parent, prefix=f".{target.name}.", suffix=".http.json.part", delete=False,
+        ) as handle:
+            metadata_partial = Path(handle.name)
+            json.dump(metadata, handle)
+        os.replace(metadata_partial, metadata_path)
     finally:
-        partial.unlink(missing_ok=True)
+        for path in (partial, metadata_partial):
+            if path is not None:
+                path.unlink(missing_ok=True)
 
 
 def _jsoc_email(email):
@@ -2162,6 +2266,35 @@ def _make_aia_snapshot(image, observation, wavelength):
         ),
         harp_regions=observation.harp_regions, sxr_data=observation.sxr_data,
     )
+
+
+def _regional_flux_intervals(flux, variance):
+    """Return regional 68%/95% bounds from assigned raw flux and variance.
+
+    Reuse the model's log-normal variance inversion to form log-space
+    endpoints, then exponentiate them to W/m². Regions use zero offset;
+    invalid inputs and nonpositive flux give NaN bounds.
+    """
+    import torch
+    from forecasting.model import lognormal_log_variance
+
+    flux, variance = np.broadcast_arrays(
+        np.asarray(flux, dtype=float), np.asarray(variance, dtype=float),
+    )
+    valid = (
+        np.isfinite(flux) & (flux > 0) & np.isfinite(variance)
+        & (variance >= 0)
+    )
+    log_sigma = np.full(flux.shape, np.nan)
+    #Convert the normalized variance to log-space standard deviation, then exponentiate to get multiplicative factors.
+    log_sigma[valid] = torch.sqrt(lognormal_log_variance(
+        torch.as_tensor(flux[valid]), torch.as_tensor(variance[valid]),
+    )).numpy()
+    bounds = {}
+    for level, z in (("68", 1.0), ("95", 1.96)):
+        bounds[f"lower_{level}"] = flux * np.exp(-z * log_sigma)
+        bounds[f"upper_{level}"] = flux * np.exp(z * log_sigma)
+    return bounds
 
 
 def _positive_flux(values):

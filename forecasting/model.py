@@ -56,6 +56,18 @@ def unnormalize_sxr(normalized_values, sxr_norm):
     )
 
 
+def lognormal_log_variance(median, variance):
+    """Return the natural-log variance of a log-normal with this raw variance.
+
+    A log-normal ``median * exp(s * Z)`` has raw variance ``median**2 * u *
+    (u - 1)`` with ``u = exp(s**2)``. Setting that equal to ``variance`` gives
+    ``u = (1 + sqrt(1 + 4 * variance / median**2)) / 2``, so ``s**2 = log(u)``.
+    The ``log1p`` form keeps small variance ratios accurate in float32.
+    """
+    ratio = variance / median.square()
+    return torch.log1p(2 * ratio / (1 + torch.sqrt(1 + 4 * ratio)))
+
+
 class ViTLocal(pl.LightningModule):
     """
     Parameters
@@ -641,14 +653,26 @@ class SXRRegressionDynamicLoss:
 
 # Coupled single-query uncertainty model.
 class CoupledVisionTransformerLocal(VisionTransformerLocal):
-    """Predict additive patch flux with local attention and one global query.
+    """Predict additive patch flux with configurable attention and global context.
 
-    Local logits scale a positive image-wide baseline spread over the patches.
-    A zero-initialized global head adjusts each patch using raw AIA tokens and
-    shared context. The uncertainty head consumes detached local logits.
+    Patch logits scale a positive image-wide baseline spread over the patches.
+    ``mask_mode`` and ``local_window`` are passed to each patch attention block.
+    An optional zero-initialized global head adjusts each patch using raw AIA
+    tokens and shared context. Set ``global_patch_adjustment=False`` to omit
+    that branch entirely during training and inference. With
+    ``uncertainty_input='logit'``, the uncertainty head consumes detached
+    local logits. With ``'context'``, it consumes the detached globally
+    corrected logit plus normalized patch features: the encoded patch, and
+    when the global branch exists, its raw AIA token and the global summary.
     """
 
+    UNCERTAINTY_INPUTS = ('logit', 'context')
+    UNCERTAINTY_MODULE_NAMES = (
+        'patch_uncertainty_head', 'patch_uncertainty_context_norm',
+    )
+
     def __init__(self, *args, uncertainty_enabled=True,
+                 global_patch_adjustment=True,
                  max_abs_log10_patch_multiplier=8.0,
                  max_abs_log10_global_adjustment=0.3,
                  global_attention_heads=None,
@@ -657,9 +681,13 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                  initial_relative_std=1.0,
                  min_log10_relative_std=-4.0,
                  max_log10_relative_std=4.0,
-                 uncertainty_hidden_dim=16, **kwargs):
+                 uncertainty_hidden_dim=16, uncertainty_input='logit',
+                 **kwargs):
         super().__init__(*args, **kwargs)
 
+        if not isinstance(global_patch_adjustment, bool):
+            raise ValueError("global_patch_adjustment must be a boolean")
+        self.global_patch_adjustment = global_patch_adjustment
         self.uncertainty_enabled = bool(uncertainty_enabled)
         self.max_abs_log10_patch_multiplier = float(
             max_abs_log10_patch_multiplier
@@ -675,11 +703,6 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             raise ValueError("max_abs_log10_patch_multiplier must be positive")
         if self.max_abs_log10_global_adjustment <= 0:
             raise ValueError("max_abs_log10_global_adjustment must be positive")
-        if self.mask_mode != 'local':
-            raise ValueError(
-                "The coupled model requires local patch attention so the "
-                "spatial head cannot import distant activity"
-            )
         if self.initial_relative_std <= 0:
             raise ValueError("initial_relative_std must be positive")
         if self.max_log10_relative_std <= self.min_log10_relative_std:
@@ -689,61 +712,67 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             )
         if self.uncertainty_hidden_dim <= 0:
             raise ValueError("uncertainty_hidden_dim must be positive")
+        if uncertainty_input not in self.UNCERTAINTY_INPUTS:
+            raise ValueError(
+                f"uncertainty_input must be one of {list(self.UNCERTAINTY_INPUTS)}"
+            )
+        self.uncertainty_input = uncertainty_input
 
         self.last_log10_global_patch_adjustment = None
-        embed_dim = self.mlp_head[-1].in_features
-        local_heads = self.transformer_blocks[0].num_heads
-        self.global_attention_heads = (
-            local_heads if global_attention_heads is None
-            else global_attention_heads
-        )
-        self.global_head_hidden_dim = (
-            embed_dim // 2 if global_head_hidden_dim is None
-            else global_head_hidden_dim
-        )
-        self.global_attention_dropout = (
-            self.dropout.p if global_attention_dropout is None
-            else global_attention_dropout
-        )
-        if (isinstance(self.global_attention_heads, bool)
-                or not isinstance(self.global_attention_heads, int)
-                or self.global_attention_heads <= 0
-                or embed_dim % self.global_attention_heads != 0):
-            raise ValueError(
-                'global_attention_heads must be a positive divisor of embed_dim'
+        if self.global_patch_adjustment:
+            embed_dim = self.mlp_head[-1].in_features
+            local_heads = self.transformer_blocks[0].num_heads
+            self.global_attention_heads = (
+                local_heads if global_attention_heads is None
+                else global_attention_heads
             )
-        if (isinstance(self.global_head_hidden_dim, bool)
-                or not isinstance(self.global_head_hidden_dim, int)
-                or self.global_head_hidden_dim <= 0):
-            raise ValueError('global_head_hidden_dim must be a positive integer')
-        if (isinstance(self.global_attention_dropout, bool)
-                or not isinstance(self.global_attention_dropout, (int, float))
-                or not 0 <= self.global_attention_dropout < 1):
-            raise ValueError('global_attention_dropout must be in [0, 1)')
-        # A summary query sees every original AIA patch. The per-patch
-        # correction also receives that patch's raw AIA token and its
-        # locally encoded feature, so remote activity cannot directly
-        # replace the local evidence at a quiet patch.
-        self.global_raw_patch_projection = nn.Linear(
-            self.input_layer.in_features, embed_dim
-        )
-        self.global_query = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.global_attention = nn.MultiheadAttention(
-            embed_dim,
-            self.global_attention_heads,
-            dropout=self.global_attention_dropout,
-            batch_first=True,
-        )
-        self.global_patch_head = nn.Sequential(
-            nn.LayerNorm(3 * embed_dim),
-            nn.Linear(3 * embed_dim, self.global_head_hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.global_head_hidden_dim, 1),
-        )
-        nn.init.zeros_(self.global_patch_head[-1].weight)
-        nn.init.zeros_(self.global_patch_head[-1].bias)
+            self.global_head_hidden_dim = (
+                embed_dim // 2 if global_head_hidden_dim is None
+                else global_head_hidden_dim
+            )
+            self.global_attention_dropout = (
+                self.dropout.p if global_attention_dropout is None
+                else global_attention_dropout
+            )
+            if (isinstance(self.global_attention_heads, bool)
+                    or not isinstance(self.global_attention_heads, int)
+                    or self.global_attention_heads <= 0
+                    or embed_dim % self.global_attention_heads != 0):
+                raise ValueError(
+                    'global_attention_heads must be a positive divisor of embed_dim'
+                )
+            if (isinstance(self.global_head_hidden_dim, bool)
+                    or not isinstance(self.global_head_hidden_dim, int)
+                    or self.global_head_hidden_dim <= 0):
+                raise ValueError('global_head_hidden_dim must be a positive integer')
+            if (isinstance(self.global_attention_dropout, bool)
+                    or not isinstance(self.global_attention_dropout, (int, float))
+                    or not 0 <= self.global_attention_dropout < 1):
+                raise ValueError('global_attention_dropout must be in [0, 1)')
+            # A summary query sees every original AIA patch. The per-patch
+            # correction also receives that patch's raw AIA token and its
+            # encoded feature under the configured attention mask.
+            self.global_raw_patch_projection = nn.Linear(
+                self.input_layer.in_features, embed_dim
+            )
+            self.global_query = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.global_attention = nn.MultiheadAttention(
+                embed_dim,
+                self.global_attention_heads,
+                dropout=self.global_attention_dropout,
+                batch_first=True,
+            )
+            self.global_patch_head = nn.Sequential(
+                nn.LayerNorm(3 * embed_dim),
+                nn.Linear(3 * embed_dim, self.global_head_hidden_dim),
+                nn.GELU(),
+                nn.Linear(self.global_head_hidden_dim, 1),
+            )
+            nn.init.zeros_(self.global_patch_head[-1].weight)
+            nn.init.zeros_(self.global_patch_head[-1].bias)
 
         self.patch_uncertainty_head = None
+        self.patch_uncertainty_context_norm = None
         self.initial_log10_relative_std = None
         if self.uncertainty_enabled:
             self.initial_log10_relative_std = float(
@@ -758,8 +787,14 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                     "initial log10 relative standard deviation falls outside "
                     "the configured numerical bounds"
                 )
+            head_inputs = 1
+            if self.uncertainty_input == 'context':
+                embed_dim = self.mlp_head[-1].in_features
+                context_dim = embed_dim * (3 if self.global_patch_adjustment else 1)
+                self.patch_uncertainty_context_norm = nn.LayerNorm(context_dim)
+                head_inputs += context_dim
             self.patch_uncertainty_head = nn.Sequential(
-                nn.Linear(1, self.uncertainty_hidden_dim),
+                nn.Linear(head_inputs, self.uncertainty_hidden_dim),
                 nn.SiLU(),
                 nn.Linear(self.uncertainty_hidden_dim, 1),
             )
@@ -813,9 +848,18 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
         return x.transpose(0, 1), attention_weights
 
     def _patch_mean_from_embeddings(self, patch_embeddings, sxr_norm, images):
-        """Return logits and nonnegative additive patch means."""
+        """Return logits, nonnegative additive patch means, log10 global
+        adjustments, and the per-patch features seen by the global head."""
         patch_logits = self.mlp_head(patch_embeddings).squeeze(-1)
         patch_flux_raw = self._patch_flux_from_logits(patch_logits, sxr_norm)
+        if not self.global_patch_adjustment:
+            self.last_log10_global_patch_adjustment = torch.zeros_like(
+                patch_logits, requires_grad=False,
+            )
+            return (
+                patch_logits, patch_flux_raw,
+                self.last_log10_global_patch_adjustment, patch_embeddings,
+            )
         raw_tokens = self.global_raw_patch_projection(
             img_to_patch(images, self.patch_size)
         )
@@ -839,16 +883,36 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             torch.tensor(10.0, device=patch_flux_raw.device),
             log10_adjustment.float(),
         )
-        return patch_logits, patch_flux_raw
+        return patch_logits, patch_flux_raw, log10_adjustment, correction_input
 
-    def _patch_variance_from_logits(self, patch_logits, patch_flux_raw):
-        """Predict raw variance contributions from detached patch logits."""
+    def uncertainty_modules(self):
+        """Return the modules trained by the Gaussian NLL."""
+        return [
+            module for module in (
+                getattr(self, name) for name in self.UNCERTAINTY_MODULE_NAMES
+            ) if module is not None
+        ]
+
+    def _patch_variance_from_logits(self, patch_logits, patch_flux_raw,
+                                    log10_adjustment, patch_features):
+        """Predict raw variance contributions from detached patch outputs."""
         if not self.uncertainty_enabled:
             raise RuntimeError("uncertainty is disabled for this model")
         detached_patch_logits = patch_logits.detach().float()
         detached_patch_flux = patch_flux_raw.detach().float()
+        head_input = detached_patch_logits.unsqueeze(-1)
+        if self.uncertainty_input == 'context':
+            corrected_logits = (
+                detached_patch_logits + log10_adjustment.detach().float()
+            )
+            head_input = torch.cat((
+                corrected_logits.unsqueeze(-1),
+                self.patch_uncertainty_context_norm(
+                    patch_features.detach().float()
+                ),
+            ), dim=-1)
         patch_log10_relative_std = self.patch_uncertainty_head(
-            detached_patch_logits.unsqueeze(-1)
+            head_input
         ).squeeze(-1).float()
         patch_log10_relative_std = torch.clamp(
             patch_log10_relative_std,
@@ -872,7 +936,9 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
             x, return_attention
         )
         _, sxr_std = sxr_norm
-        patch_logits, patch_flux_raw = self._patch_mean_from_embeddings(
+        (
+            patch_logits, patch_flux_raw, log10_adjustment, patch_features,
+        ) = self._patch_mean_from_embeddings(
             patch_embeddings, sxr_norm, images=x,
         )
         global_flux_raw = patch_flux_raw.sum(dim=1, keepdim=True)
@@ -888,27 +954,21 @@ class CoupledVisionTransformerLocal(VisionTransformerLocal):
                 outputs = global_flux_raw, mean_normalized, patch_flux_raw
             return outputs
         patch_variance_raw = self._patch_variance_from_logits(
-            patch_logits, patch_flux_raw
+            patch_logits, patch_flux_raw, log10_adjustment, patch_features,
         )
         global_variance_raw = patch_variance_raw.sum(dim=1)
 
-        # Delta-method conversion for
-        # y=(log10(raw_flux + offset)-mean)/std.
-        # The delta-method scale depends numerically on the predicted global
-        # flux, but its variance gradient must not flow into the mean branch.
-        # Without this detach, NLL can move an otherwise-correct mean merely to
-        # shrink or enlarge its normalized variance.
+        # The NLL treats y=(log10(raw_flux + offset)-mean)/std as Gaussian, so
+        # raw_flux + offset is log-normal with median global_flux + offset.
+        # Choose its width so its raw-flux variance equals the summed patch
+        # variances exactly. The median depends numerically on the predicted
+        # global flux, but its variance gradient must not flow into the mean
+        # branch. Without this detach, NLL can move an otherwise-correct mean
+        # merely to shrink or enlarge its normalized variance.
         global_flux_for_variance = global_flux_raw.squeeze(-1).float().detach()
-        log_derivative = 1.0 / (
-            torch.log(torch.tensor(
-                10.0, device=global_flux_raw.device, dtype=torch.float32
-            ))
-            * sxr_std.float()
-            * (global_flux_for_variance + SXR_LOG_OFFSET)
-        )
-        variance_normalized = (
-            global_variance_raw * log_derivative.square()
-        )
+        variance_normalized = lognormal_log_variance(
+            global_flux_for_variance + SXR_LOG_OFFSET, global_variance_raw,
+        ) / (math.log(10.0) * sxr_std.float()).square()
 
         if return_attention:
             outputs = (
@@ -932,9 +992,13 @@ class CoupledGaussianViTLocal(pl.LightningModule):
     prediction.
 
     The final corrected-flux Huber loss updates both local and global layers.
+    With ``model_kwargs['global_patch_adjustment']=False``, no global branch is
+    constructed, and the mean loss trains only the local layers.
 
-    The predicted variance is in normalized log10-SXR units. Use
-    :meth:`predict_interval` to obtain intervals in physical W/m^2 units.
+    The full-disk variance output is in normalized log10-SXR units, matching
+    the Gaussian NLL used for uncertainty training. Patch variance
+    contributions are in raw W^2/m^4 units. Use :meth:`predict_interval`
+    to form the full-disk endpoints in log space and return them in W/m^2.
     """
 
     DEFAULT_SCHEDULER_KWARGS = {'T_max': 250, 'eta_min': 1e-7}
@@ -947,6 +1011,7 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         'min_log10_relative_std',
         'max_log10_relative_std',
         'uncertainty_hidden_dim',
+        'uncertainty_input',
     )
 
     def __init__(self, model_kwargs, sxr_norm,
@@ -960,9 +1025,6 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         filtered_kwargs.pop('learning_rate', None)
         filtered_kwargs.pop('lr', None)
         filtered_kwargs.pop('num_classes', None)
-        # This fixed architecture flag is present in the distributed checkpoint.
-        if filtered_kwargs.pop('global_patch_adjustment', True) is not True:
-            raise ValueError('The coupled model always applies global patch adjustment')
         uncertainty_kwargs = dict(uncertainty_kwargs or {})
         self.uncertainty_enabled = bool(
             uncertainty_kwargs.pop('enabled', True)
@@ -981,6 +1043,7 @@ class CoupledGaussianViTLocal(pl.LightningModule):
         else:
             self.uncertainty_start_epoch = configured_start_epoch
         self.predicts_uncertainty = self.uncertainty_enabled
+        self.uncertainty_head_only = False
         allowed_uncertainty_keys = set(self.NETWORK_UNCERTAINTY_KEYS) | {
             'huber_delta',
             'class_weighting',
@@ -1079,6 +1142,36 @@ class CoupledGaussianViTLocal(pl.LightningModule):
                 "deviation model."
             )
 
+    def freeze_all_but_uncertainty_head(self):
+        """Train only the uncertainty modules and keep the mean model fixed.
+
+        Frozen modules stay in eval mode, so dropout doesn't perturb the
+        means the head is fit to. The training loss becomes the NLL alone.
+        """
+        if not self.uncertainty_enabled:
+            raise ValueError(
+                "training only the uncertainty head requires "
+                "uncertainty.enabled=true"
+            )
+        if self.uncertainty_start_epoch != 0:
+            raise ValueError(
+                "training only the uncertainty head requires "
+                "uncertainty.start_epoch: 0"
+            )
+        self.uncertainty_head_only = True
+        self.requires_grad_(False)
+        for module in self.model.uncertainty_modules():
+            module.requires_grad_(True)
+        return self.train(self.training)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if getattr(self, 'uncertainty_head_only', False):
+            self.model.eval()
+            for module in self.model.uncertainty_modules():
+                module.train(mode)
+        return self
+
     def forward(self, x, return_attention=False):
         """Return Gaussian outputs, or deterministic outputs when disabled."""
         outputs = self.model(x, self.sxr_norm, return_attention=return_attention)
@@ -1176,10 +1269,13 @@ class CoupledGaussianViTLocal(pl.LightningModule):
             )
             if self.uncertainty_enabled else None
         )
-        loss = (
-            mean_objective + uncertainty_loss
-            if uncertainty_active else mean_objective
-        )
+        if self.uncertainty_head_only:
+            # The mean model is frozen, so only the NLL has trainable inputs.
+            loss = uncertainty_loss
+        elif uncertainty_active:
+            loss = mean_objective + uncertainty_loss
+        else:
+            loss = mean_objective
         mse = F.mse_loss(mean_norm, target_norm)
         mae = F.l1_loss(mean_norm, target_norm)
 

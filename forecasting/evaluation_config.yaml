@@ -10,10 +10,10 @@ path_root: ..
 # =============================================================================
 
 model_predictions:
-  main_model_csv: "./foxes_outputs/inference/predictions.csv"
+  main_model_csv: "./model_assets/results/inference/predictions.csv"
 
 evaluation:
-  output_dir:  "./foxes_outputs/evaluation"
+  output_dir:  "./model_assets/results/evaluation"
   # Auto-runs when Gaussian uncertainty columns are present.
   evaluate_uncertainty: true
 
@@ -21,7 +21,7 @@ plotting:
   regression_background: "black"
   # Match maps and the optional AIA image to prediction CSV timestamps.
   # Set inference_patch_dir to null to skip these figures.
-  inference_patch_dir: "./foxes_outputs/inference_patch"
+  inference_patch_dir: "./model_assets/results/inference_patch"
   aia_dir: "./foxes_data/AIA_processed/test"
   aia_wavelength: 193
   max_patch_maps: null  # null = all matching timestamps

@@ -198,15 +198,16 @@ def test_uncertainties_on_bands_and_snapshot_labels_and_toggle():
     series = foxes.FOXESModel.predict_time_series(UncertainSnapshotModel(), observations(), snapshot_time="2023-08-01 00:05")
     ax = series.plot_light_curves(show_snapshot=True)
     assert len(ax.collections) == 2
-    assert r"\sigma" in ax.get_title()
+    assert "nominal 68% log-normal variance attribution" in ax.get_title()
     assert all("±" in label.get_text() for label in ax.figure.axes[1].texts)
     curves = series.harp_light_curves()
     for polygon, harpnum in zip(ax.collections, curves):
         sigma = curves[harpnum].flux_std.iloc[0]
         flux = curves[harpnum].total_flux.iloc[0]
         ys = np.concatenate([path.vertices[:, 1] for path in polygon.get_paths()])
-        assert min(ys) == pytest.approx(flux - sigma)
-        assert max(ys) == pytest.approx(flux + sigma)
+        log_sigma = np.sqrt(np.log((1 + np.sqrt(1 + 4 * (sigma / flux) ** 2)) / 2))
+        assert min(ys) == pytest.approx(flux * np.exp(-log_sigma))
+        assert max(ys) == pytest.approx(flux * np.exp(log_sigma))
     plt.close(ax.figure)
     ax = series.plot_light_curves(show_snapshot=True, show_uncertainty=False)
     assert not ax.collections
@@ -219,7 +220,7 @@ def test_deterministic_model_never_fabricates_uncertainty():
     ax = series.plot_light_curves(show_snapshot=True, show_uncertainty=True)
     assert not ax.collections
     assert all("±" not in label.get_text() for label in ax.figure.axes[1].texts)
-    assert r"\sigma" not in ax.get_title()
+    assert "variance attribution" not in ax.get_title()
     plt.close(ax.figure)
 
 
