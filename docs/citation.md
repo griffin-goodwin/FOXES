@@ -36,7 +36,7 @@ If you use the code or data directly, you can cite the software as well:
     title           = {{FOXES: A Framework For Operational X-ray Emission Synthesis}},
     institution     = {Frontier Development Lab (FDL)},
     repository-code = {https://github.com/griffin-goodwin/FOXES},
-    version         = {v2.0.2},
+    version         = {v2.0.4},
     year            = {2026}
 }
 ```
