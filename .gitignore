@@ -151,6 +151,8 @@ cython_debug/
 wandb/
 
 *.csv
+# ITI calibration snapshot shipped with the package.
+!data/calibration/sdo_autocal_table.csv
 # Keep the published evaluation summaries; raw predictions remain local.
 !model_assets/results/evaluation/metrics/performance_metrics.csv
 !model_assets/results/evaluation/metrics/uncertainty_metrics.csv

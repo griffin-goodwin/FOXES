@@ -50,3 +50,6 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["helio_foxes", "forecasting", "training", "data", "download"]
+
+[tool.setuptools.package-data]
+data = ["calibration/*.csv", "calibration/*.md", "calibration/LICENSE-ITI.txt"]

@@ -13,9 +13,17 @@ collections.Mapping = collections.abc.Mapping  # type: ignore[attr-defined]
 collections.MutableSet = collections.abc.MutableSet  # type: ignore[attr-defined]
 collections.MutableMapping = collections.abc.MutableMapping  # type: ignore[attr-defined]
 import numpy as np
+from itipy.data import editor as iti_editor
 from itipy.data.dataset import StackDataset, get_intersecting_files, AIADataset
 from itipy.data.editor import BrightestPixelPatchEditor
 from tqdm import tqdm
+
+from data.aia_calibration import get_auto_calibration_table
+
+
+# ITI's AIAPrepEditor has no table argument: route its loader through our local
+# provider, leaving its calibration and the rest of its processing unchanged.
+iti_editor.get_auto_calibration_table = get_auto_calibration_table
 
 
 class AIAStackDataset(StackDataset):

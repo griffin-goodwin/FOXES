@@ -183,6 +183,13 @@ For raw FITS files on disk, run them through
 [notebook walkthrough](https://github.com/griffin-goodwin/FOXES/blob/main/tutorials/heliofoxes_demo/heliofoxes.ipynb)
 has more plotting and data-loading examples.
 
+FOXES bundles the [ITI AIA calibration table](https://kanzelhohe.uni-graz.at/iti/sdo_autocal_table.csv),
+so AIA preprocessing does not need to download it. A valid existing
+`~/.iti/sdo_autocal_table.csv` is preferred; a missing or invalid cache uses the
+packaged copy without writing to your home folder. The bundled snapshot covers
+May 2010 through July 2020. ITI's nearest-row correction is unchanged, including
+use of the nearest endpoint for observations outside that range.
+
 ## Older Checkpoints
 
 The older deterministic checkpoints need a correction for their outdated
