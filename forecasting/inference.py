@@ -32,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from forecasting.dataset import AIAGOESDataset, AIANormTransform
 from forecasting.config import load_config
 from forecasting.calibration import LegacyCalibration
+from data._timestamps import timestamp_filename
 from forecasting.model import (
     CoupledGaussianViTLocal,
     ViTLocal,
@@ -282,6 +283,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
     calibration = _legacy_calibration(config_data, model)
     if calibration.enabled and (times is None or len(times) != len(dataset)):
         raise ValueError("legacy_model=True requires one timestamp per inference sample")
+    times = () if times is None else times
     scale_factors = (
         np.asarray([calibration.factor(stamp) for stamp in times], dtype=np.float32)
         if calibration.enabled else None
@@ -490,7 +492,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                         weight_data = candidate
                         if weight_dir is not None and global_idx < len(times):
                             np.save(
-                                weight_dir / f"{times[global_idx]}.npy",
+                                weight_dir / timestamp_filename(str(times[global_idx]), '.npy'),
                                 weight_data,
                             )
 
@@ -499,7 +501,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                     flux_data = flux_maps_cpu[i]
                     if flux_dir is not None and global_idx < len(times):
                         np.save(
-                            flux_dir / f"{times[global_idx]}.npy",
+                            flux_dir / timestamp_filename(str(times[global_idx]), '.npy'),
                             flux_data,
                         )
 
@@ -507,7 +509,7 @@ def evaluate_model_on_dataset(model, dataset, batch_size=16, times=None, config_
                     try:
                         if uncertainty_dir is not None and global_idx < len(times):
                             np.save(
-                                uncertainty_dir / f"{times[global_idx]}.npy",
+                                uncertainty_dir / timestamp_filename(str(times[global_idx]), '.npy'),
                                 patch_std_maps_cpu[i],
                             )
                     except Exception as exc:

@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forecasting.config import load_config
+from data._timestamps import timestamp_filename
 
 
 def _as_bool(value):
@@ -566,10 +567,10 @@ class FOXESEvaluator:
 
         available = []
         for row in self.df.itertuples(index=False):
-            stamp = str(row.timestamp)
-            flux_path = self.inference_patch_dir / 'flux' / f'{stamp}.npy'
+            filename = timestamp_filename(str(row.timestamp), '.npy')
+            flux_path = self.inference_patch_dir / 'flux' / filename
             uncertainty_path = (
-                self.inference_patch_dir / 'patch_uncertainty' / f'{stamp}.npy'
+                self.inference_patch_dir / 'patch_uncertainty' / filename
             )
             if flux_path.is_file() or uncertainty_path.is_file():
                 available.append((row, flux_path, uncertainty_path))
@@ -658,7 +659,7 @@ class FOXESEvaluator:
             panels = []
             image_shape = None
             if self.aia_dir is not None:
-                aia_path = self.aia_dir / f'{stamp}.npy'
+                aia_path = self.aia_dir / timestamp_filename(stamp, '.npy')
                 if aia_path.is_file():
                     image = np.load(aia_path, allow_pickle=False)
                     if image.ndim == 1 and image.size == 7 * 512 * 512:

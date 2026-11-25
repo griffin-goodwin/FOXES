@@ -67,6 +67,7 @@ jobs:
         run: |
           python -m pytest -q --import-mode=importlib \
             "$GITHUB_WORKSPACE/tests/test_public_api.py::test_predict_matches_model_outputs" \
+            "$GITHUB_WORKSPACE/tests/test_public_api.py::test_aia_processor_uses_temporary_files_and_returns_stack" \
             "$GITHUB_WORKSPACE/tests/test_aia_calibration.py" \
             "$GITHUB_WORKSPACE/tests/test_harp_uncertainty.py" \
             "$GITHUB_WORKSPACE/tests/test_sxr_api.py" \

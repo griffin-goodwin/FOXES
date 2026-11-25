@@ -6,17 +6,19 @@ AIA files with no matching SXR value are moved to a "missing" directory.
 
 Called by build_dataset.py — not meant to be run standalone.
 """
-import glob
 import os
 import re
 import time
 import warnings
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+from data._timestamps import timestamp_filename
 
 warnings.filterwarnings('ignore')
 
@@ -143,7 +145,8 @@ def process_batch(batch_data, output_sxr_dir):
         try:
             sxr_b = data['sxr_b']
 
-            np.save(f"{output_sxr_dir}/{timestamp}.npy", np.array([sxr_b], dtype=np.float32))
+            filename = data.get('filename') or timestamp_filename(timestamp, '.npy')
+            np.save(Path(output_sxr_dir) / filename, np.array([sxr_b], dtype=np.float32))
 
             successful_count += 1
 
@@ -183,18 +186,22 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
     print(f"\nFinding target timestamps from AIA files in: {aia_processed_dir}")
     # Skip macOS AppleDouble sidecar files (e.g. "._2023-08-01T00:00:00.npy")
     # that external/non-native filesystems litter alongside real files.
-    aia_files = sorted(f for f in glob.glob(f"{aia_processed_dir}/*.npy", recursive=True)
-                       if not os.path.basename(f).startswith('._'))
-    aia_files_split = [file.split('/')[-1].split('.')[0] for file in aia_files]
-    common_timestamps = [
-        datetime.fromisoformat(date_str).strftime('%Y-%m-%dT%H:%M:%S')
-        for date_str in aia_files_split
-    ]
+    aia_files = sorted(path for path in Path(aia_processed_dir).glob('*.npy')
+                       if path.is_file() and not path.name.startswith('._'))
+    aia_timestamps = {
+        path: datetime.fromisoformat(path.stem.replace('_', ':')).strftime('%Y-%m-%dT%H:%M:%S')
+        for path in aia_files
+    }
 
-    print(f"Found {len(common_timestamps)} target timestamps")
+    print(f"Found {len(aia_timestamps)} target timestamps")
 
     # Create optimized lookup table
-    lookup_data = create_combined_lookup_table(goes_data_dict, common_timestamps)
+    lookup_by_time = {
+        row['timestamp']: row
+        for row in create_combined_lookup_table(goes_data_dict, list(dict.fromkeys(aia_timestamps.values())))
+    }
+    lookup_data = [dict(lookup_by_time[timestamp], filename=path.name)
+                   for path, timestamp in aia_timestamps.items() if timestamp in lookup_by_time]
 
     if not lookup_data:
         print("No valid data found for any timestamps!")
@@ -260,7 +267,7 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
     print(f"Available GOES instruments: {sorted(goes_data_dict.keys())}")
 
     # Report on timestamps that couldn't be processed
-    missing_count = len(common_timestamps) - len(lookup_data)
+    missing_count = len(aia_timestamps) - len(lookup_data)
     if missing_count > 0:
         print(f"\n{missing_count} timestamps had no valid GOES data available")
         print("This may be due to:")
@@ -272,23 +279,15 @@ def align_aia_sxr(goes_data_dir, aia_processed_dir, output_sxr_dir, aia_missing_
     print("\nChecking for AIA files with missing GOES data...")
     print(f"Moving files with missing GOES data to: {aia_missing_dir}")
 
-    # Create a set of timestamps that have valid GOES data for faster lookup
-    valid_timestamps = {data['timestamp'] for data in lookup_data}
-
     moved_count = 0
-    for file in aia_files:
-        # Extract timestamp from filename
-        filename = file.split('/')[-1].split('.')[0]
-        timestamp = datetime.fromisoformat(filename).strftime('%Y-%m-%dT%H:%M:%S')
-
-        if timestamp not in valid_timestamps:
+    for path, timestamp in aia_timestamps.items():
+        if timestamp not in lookup_by_time:
             try:
-                target_path = f"{aia_missing_dir}/{file.split('/')[-1]}"
-                os.rename(file, target_path)
+                os.rename(path, Path(aia_missing_dir) / path.name)
                 moved_count += 1
-                print(f"Moved {file} to {aia_missing_dir}")
+                print(f"Moved {path} to {aia_missing_dir}")
             except Exception as e:
-                print(f"Failed to move {file}: {e}")
+                print(f"Failed to move {path}: {e}")
 
     print(f"Moved {moved_count} files to {aia_missing_dir}")
     print("\nDone!")

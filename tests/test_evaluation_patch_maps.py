@@ -2,13 +2,19 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 from matplotlib.axes import Axes
 from matplotlib.colors import LogNorm
 
 from forecasting.evaluation import FOXESEvaluator
+from data import _timestamps
 
 
-def test_patch_maps_match_csv_timestamps_with_optional_aia(tmp_path, monkeypatch):
+@pytest.mark.parametrize('windows', [False, True])
+def test_patch_maps_match_csv_timestamps_with_optional_aia(tmp_path, monkeypatch, windows):
+    if _timestamps._WINDOWS and not windows:
+        pytest.skip('Windows cannot create legacy colon-separated filenames')
+    monkeypatch.setattr(_timestamps, '_WINDOWS', windows)
     patches = tmp_path / 'inference_patch'
     flux_dir = patches / 'flux'
     uncertainty_dir = patches / 'patch_uncertainty'
@@ -18,10 +24,12 @@ def test_patch_maps_match_csv_timestamps_with_optional_aia(tmp_path, monkeypatch
 
     first = '2023-08-04T15:30:00'
     second = '2023-08-06T05:46:00'
-    np.save(flux_dir / f'{first}.npy', np.ones((2, 2)) * 1e-7)
-    np.save(uncertainty_dir / f'{first}.npy', np.ones((2, 2)) * 1e-8)
-    np.save(aia_dir / f'{first}.npy', np.zeros((7, 16, 16)))
-    np.save(flux_dir / f'{second}.npy', np.ones((2, 2)) * 2e-3)
+    first_name = '2023-08-04T153000.npy' if windows else f'{first}.npy'
+    second_name = '2023-08-06T054600.npy' if windows else f'{second}.npy'
+    np.save(flux_dir / first_name, np.ones((2, 2)) * 1e-7)
+    np.save(uncertainty_dir / first_name, np.ones((2, 2)) * 1e-8)
+    np.save(aia_dir / first_name, np.zeros((7, 16, 16)))
+    np.save(flux_dir / second_name, np.ones((2, 2)) * 2e-3)
     np.save(flux_dir / 'unrelated.npy', np.ones((2, 2)))
 
     csv_path = tmp_path / 'predictions.csv'

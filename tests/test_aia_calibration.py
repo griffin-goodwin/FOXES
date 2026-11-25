@@ -1,6 +1,7 @@
 """Exercise the packaged calibration through ITI with no network or home cache."""
 
 import hashlib
+import os
 from datetime import datetime
 from importlib.resources import files
 from io import BytesIO
@@ -53,6 +54,9 @@ def test_download_preserves_tile_compressed_fits_pixels(tmp_path, monkeypatch):
     downloader = SDODownloader(tmp_path, wavelengths=[94])
     header = {"WAVELNTH": 94, "DATE__OBS": "2023-08-01T00:00:00", "QUALITY": 0}
     output = downloader.download((header, "/offline.fits", datetime(2023, 8, 1)))
+    expected_name = "2023-08-01T000000.fits" if os.name == "nt" else "2023-08-01T00:00:00.fits"
+    assert Path(output).name == expected_name
+    assert not Path(output + ".part").exists()
 
     with fits.open(output) as restored:
         np.testing.assert_array_equal(restored[1].data, expected)

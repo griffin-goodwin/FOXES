@@ -1573,7 +1573,7 @@ class AIAProcessor:
         ValueError
             If processing returns the wrong shape or non-finite values.
         """
-        from download.download_sdo import SDODownloader
+        from download.download_sdo import SDODownloader, aia_fits_filename
 
         time = _utc_datetime(time).replace(tzinfo=None)
 
@@ -1586,8 +1586,9 @@ class AIAProcessor:
             )
             downloader.downloadDate(time)
             stamp = time.isoformat("T", timespec="seconds")
+            filename = aia_fits_filename(time)
             paths = [
-                Path(temporary_path) / str(w) / f"{stamp}.fits"
+                Path(temporary_path) / str(w) / filename
                 for w in self.WAVELENGTHS
             ]
             missing = [w for w, path in zip(self.WAVELENGTHS, paths)

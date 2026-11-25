@@ -6,3 +6,5 @@ model_assets/results/evaluation/plots/*.png -filter -diff -merge -text
 foxes_logo.png filter=lfs diff=lfs merge=lfs -text
 *.ckpt filter=lfs diff=lfs merge=lfs -text
 tutorials/heliofoxes_demo/saved_observations/*.npz filter=lfs diff=lfs merge=lfs -text
+# The packaged calibration snapshot is verified against its upstream SHA-256.
+data/calibration/sdo_autocal_table.csv text eol=lf

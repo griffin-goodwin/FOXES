@@ -46,11 +46,13 @@ def process_fits_file(file_path):
             if date_obs.tz is not None:
                 date_obs = date_obs.tz_localize(None)
             wavelength = header['WAVELNTH']
-            filename = pd.to_datetime(os.path.basename(file_path).split('.')[0])
+            basename = os.path.basename(file_path)
+            filename_time = pd.Timestamp(os.path.splitext(basename)[0].replace('_', ':'))
             blank = _is_blank(hdu[1].data)  # type: ignore[union-attr]
             quality = pd.to_numeric(pd.Series([header.get('QUALITY')]), errors='coerce').iloc[0]
             bad_quality = bool(pd.notna(quality) and quality != 0)
-            return {'DATE-OBS': date_obs, 'WAVELNTH': wavelength, 'FILENAME': filename,
+            return {'DATE-OBS': date_obs, 'WAVELNTH': wavelength, 'FILENAME': filename_time,
+                    'BASENAME': basename,
                     'BLANK': blank, 'BAD_QUALITY': bad_quality}
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
@@ -78,7 +80,7 @@ def clean_aia_data(input_folder, bad_files_dir, wavelengths):
 
     # Add a column for date difference between DATE-OBS and FILENAME
     aia_header['DATE_DIFF'] = (
-        pd.to_datetime(aia_header['FILENAME']) - pd.to_datetime(aia_header['DATE-OBS'])
+        pd.to_datetime(aia_header['FILENAME']) - aia_header['DATE-OBS']
     ).dt.total_seconds()
 
     # Remove rows where DATE_DIFF is greater than ±60 seconds, the image is
@@ -91,8 +93,7 @@ def clean_aia_data(input_folder, bad_files_dir, wavelengths):
 
     for wavelength in wavelengths:
         print(f"\nProcessing wavelength: {wavelength}")
-        for names in files_to_remove['FILENAME'].to_numpy():
-            filename = pd.to_datetime(names).strftime('%Y-%m-%dT%H:%M:%S') + ".fits"
+        for filename in files_to_remove['BASENAME']:
             file_path = os.path.join(input_folder, f"{wavelength}/{filename}")
             destination_folder = os.path.join(bad_files_dir, str(wavelength))
             os.makedirs(destination_folder, exist_ok=True)

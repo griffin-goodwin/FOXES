@@ -196,12 +196,12 @@ class AIAGOESDataset(torch.utils.data.Dataset):
             print(f"Scanning AIA filenames in {self.aia_dir}...", flush=True)
         with os.scandir(self.aia_dir) as entries:
             aia_files = sorted(
-                Path(entry.path)
-                for entry in tqdm(
+                (Path(entry.path) for entry in tqdm(
                     entries, desc="Scanning AIA directory", unit="entry",
                     disable=not show_scan_progress,
                 )
-                if entry.name.endswith('.npy')
+                if entry.name.endswith('.npy')),
+                key=lambda path: path.stem.replace(':', '').replace('_', ''),
             )
         if show_scan_progress:
             print(
@@ -306,7 +306,7 @@ class AIAGOESDataset(torch.utils.data.Dataset):
 def split_dataset_by_time(dataset, fraction):
     """Return the earliest ``fraction`` of a dataset's samples and the rest.
 
-    Samples are kept in filename order, which is chronological, so the two
+    Samples are kept in chronological order, so the two
     parts share only the boundary between them. ``fraction=1`` leaves the
     second part empty.
     """

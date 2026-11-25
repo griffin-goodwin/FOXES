@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import helio_foxes
+from download import download_sdo
 from forecasting.model import SXR_LOG_OFFSET, CoupledGaussianViTLocal, ViTLocal
 
 
@@ -35,7 +36,7 @@ def test_aia_processor_uses_temporary_files_and_returns_stack(monkeypatch):
             for wavelength in self.wavelengths:
                 path = Path(self.base_path) / wavelength
                 path.mkdir()
-                (path / f"{date.isoformat(timespec='seconds')}.fits").touch()
+                (path / download_sdo.aia_fits_filename(date)).touch()
 
     class Stacker:
         def __init__(self, data, wavelengths, resolution, **kwargs):
@@ -47,7 +48,7 @@ def test_aia_processor_uses_temporary_files_and_returns_stack(monkeypatch):
             assert index == 0
             return np.ones((7, self.resolution, self.resolution), dtype=np.float32)
 
-    monkeypatch.setitem(sys.modules, "download.download_sdo", types.SimpleNamespace(SDODownloader=Downloader))
+    monkeypatch.setattr(download_sdo, "SDODownloader", Downloader)
     monkeypatch.setitem(sys.modules, "data.convert_aia", types.SimpleNamespace(AIAStackDataset=Stacker))
     stack = helio_foxes.AIAProcessor(resolution=2).fetch("2023-08-01T00:00:00Z")
     assert stack.shape == (7, 2, 2)
@@ -76,7 +77,7 @@ def test_aia_processor_rejects_partial_download_and_cleans_up(monkeypatch):
         def downloadDate(self, date):
             pass
 
-    monkeypatch.setitem(sys.modules, "download.download_sdo", types.SimpleNamespace(SDODownloader=Downloader))
+    monkeypatch.setattr(download_sdo, "SDODownloader", Downloader)
     monkeypatch.setitem(sys.modules, "data.convert_aia", types.SimpleNamespace(AIAStackDataset=object))
     with pytest.raises(FileNotFoundError, match="wavelengths"):
         helio_foxes.AIAProcessor(resolution=2).fetch("2023-08-01T00:00:00")

@@ -84,9 +84,8 @@ def check_existing_files(base_input_folder, wavelengths, output_folder):
 
     for i in range(total_expected):
         first_wl_file = files[0][i]
-        base_name = os.path.splitext(os.path.basename(first_wl_file))[0]
-        if '_' in base_name:
-            base_name = '_'.join(base_name.split('_')[:-1])
+        # Match ITI StackDataset.getId, which save_sample uses for the output.
+        base_name = os.path.basename(first_wl_file).split('.')[0]
         output_path = os.path.join(output_folder, base_name) + '.npy'
         if os.path.exists(output_path):
             existing_count += 1

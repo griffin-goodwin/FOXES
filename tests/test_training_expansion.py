@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 import download.expand_training_data as expansion
+from data import _timestamps
 from download.expand_training_data import WAVELENGTHS, add_goes_flux, file_times, get_catalog, make_plan
 
 NONE = pd.DatetimeIndex([])
@@ -76,7 +77,8 @@ def test_cap_is_seeded_and_sorted(config):
 def test_file_times_reads_timestamp_names_and_rejects_missing_folders(tmp_path):
     folder = tmp_path / "aia" / "nested"
     folder.mkdir(parents=True)
-    for name in ("2020-01-01T12:00:00.npy", "2020-01-01T13_00_00.npy", "._2020-01-01T14:00:00.npy", "stats.npy"):
+    for name in (_timestamps.timestamp_filename("2020-01-01T12:00:00", ".npy"),
+                 "2020-01-01T13_00_00.npy", "._2020-01-01T140000.npy", "stats.npy"):
         (folder / name).touch()
     assert sorted(file_times([tmp_path / "aia"])) == [pd.Timestamp("2020-01-01T12:00"), pd.Timestamp("2020-01-01T13:00")]
     with pytest.raises(FileNotFoundError):
@@ -112,10 +114,15 @@ def test_goes_flux_comes_from_the_training_lookup(tmp_path):
     assert result.satellites[0] == "GOES-16,GOES-15"
 
 
-def test_download_saves_pairs_removes_fits_and_resumes(tmp_path, config, monkeypatch):
+@pytest.mark.parametrize("windows", [False, True])
+def test_download_saves_pairs_removes_fits_and_resumes(tmp_path, config, monkeypatch, windows):
     import data.convert_aia
     import download.download_sdo
     import itipy.data.editor
+
+    if _timestamps._WINDOWS and not windows:
+        pytest.skip("Windows cannot create legacy colon-separated filenames")
+    monkeypatch.setattr(_timestamps, "_WINDOWS", windows)
 
     pd.DataFrame({"timestamp": ["2020-01-01T12:00:00", "2020-01-01T13:00:00", "2020-01-01T14:00:00"],
                   "xrsb_flux": [1e-6, 2e-6, 3e-6]}).to_csv(tmp_path / "samples.csv", index=False)
@@ -131,7 +138,8 @@ def test_download_saves_pairs_removes_fits_and_resumes(tmp_path, config, monkeyp
             if date.hour == 14:
                 return  # JSOC had no frames within tolerance.
             for wl in WAVELENGTHS:
-                path = self.directory / str(wl) / f"{date.isoformat()}.fits"
+                stamp = date.strftime("%Y-%m-%dT%H%M%S") if windows else date.isoformat()
+                path = self.directory / str(wl) / f"{stamp}.fits"
                 path.parent.mkdir(exist_ok=True)
                 path.touch()
 
@@ -149,11 +157,12 @@ def test_download_saves_pairs_removes_fits_and_resumes(tmp_path, config, monkeyp
     assert expansion.download(config, limit=1) == 0
     emails.clear()
     assert expansion.download(config) == 1
-    aia = np.load(tmp_path / "AIA_processed/train/2020-01-01T13:00:00.npy")
-    sxr = np.load(tmp_path / "SXR_processed/train/2020-01-01T13:00:00.npy")
+    name = "2020-01-01T130000.npy" if windows else "2020-01-01T13:00:00.npy"
+    aia = np.load(tmp_path / "AIA_processed/train" / name)
+    sxr = np.load(tmp_path / "SXR_processed/train" / name)
     assert aia.shape == (7, 2, 2) and aia.dtype == sxr.dtype == np.float32
     assert sxr.tolist() == [pytest.approx(2e-6)]
-    assert not (tmp_path / "AIA_processed/train/2020-01-01T14:00:00.npy").exists()
+    assert len(list((tmp_path / "AIA_processed/train").glob("*.npy"))) == 2
     assert "no AIA frame" in pd.read_csv(tmp_path / "failed.csv").error[0]
     assert not list((tmp_path / "staging").rglob("*.fits"))
     assert emails == ["a@example.com", "b@example.com"][:len(emails)]

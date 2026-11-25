@@ -6,10 +6,12 @@ import pyarrow.parquet as pq
 import pytest
 
 from download import hugging_face_data_download as download
+from data import _timestamps
 
 
 @pytest.mark.parametrize('fail_write', [False, True])
 def test_source_deleted_only_after_successful_numpy_writes(tmp_path, monkeypatch, fail_write):
+    monkeypatch.setattr(_timestamps, '_WINDOWS', True)
     monkeypatch.setattr(download, 'AIA_SHAPE', (7, 2, 2))
     monkeypatch.setattr(download, 'AIA_SIZE', 28)
     source = tmp_path / 'source'
@@ -17,7 +19,7 @@ def test_source_deleted_only_after_successful_numpy_writes(tmp_path, monkeypatch
     parquet = source / 'part.parquet'
     image = np.arange(28, dtype=np.float32)
     pq.write_table(pa.table({
-        'filename': ['sample.npy'],
+        'filename': ['2020-01-01T00:00:00.npy'],
         'aia_stack': pa.FixedSizeListArray.from_arrays(pa.array(image), 28),
         'sxr_value': [1e-6],
     }), parquet)
@@ -36,6 +38,6 @@ def test_source_deleted_only_after_successful_numpy_writes(tmp_path, monkeypatch
         download.convert_local_parquet_split(source, 'train', config)
         assert not parquet.exists()
         np.testing.assert_array_equal(
-            np.load(tmp_path / 'aia/train/sample.npy'), image.reshape(7, 2, 2),
+            np.load(tmp_path / 'aia/train/2020-01-01T000000.npy'), image.reshape(7, 2, 2),
         )
-        assert np.load(tmp_path / 'sxr/train/sample.npy').item() == pytest.approx(1e-6)
+        assert np.load(tmp_path / 'sxr/train/2020-01-01T000000.npy').item() == pytest.approx(1e-6)

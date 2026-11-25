@@ -22,8 +22,14 @@ from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forecasting.config import load_config
+from data._timestamps import timestamp_filename
 
 _JSOC_CONNECTION_LIMIT = threading.Semaphore(6)
+
+
+def aia_fits_filename(timestamp):
+    """Name a raw AIA FITS file for the requested timestamp."""
+    return timestamp_filename(timestamp.isoformat('T', timespec='seconds'), '.fits')
 
 
 class SDODownloader:
@@ -153,7 +159,7 @@ class SDODownloader:
         tmp_path = None
         try:
             dir = os.path.join(self.ds_path, '%d' % header['WAVELNTH'])
-            map_path = os.path.join(dir, '%s.fits' % t.isoformat('T', timespec='seconds'))
+            map_path = os.path.join(dir, aia_fits_filename(t))
             if os.path.exists(map_path):
                 return map_path
             if not segment or pd.isna(segment):
@@ -316,7 +322,7 @@ if __name__ == '__main__':
             if not os.path.exists(os.path.join(
                 download_dir,
                 str(wl),
-                f"{d.year:04d}-{d.month:02d}-{d.day:02d}T{d.hour:02d}:{d.minute:02d}:{d.second:02d}.fits"
+                aia_fits_filename(d)
             )):
                 break
         else:

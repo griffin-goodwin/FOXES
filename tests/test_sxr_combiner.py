@@ -9,8 +9,10 @@ pytest.importorskip("pyarrow", reason="Requires lossless Parquet processing")
 
 from data.combine_sxr import SXRDataProcessor, prepare_sxr_frame
 from data.align_aia_sxr import (
-    create_combined_lookup_table, load_and_prepare_goes_data, process_batch,
+    align_aia_sxr, create_combined_lookup_table, load_and_prepare_goes_data, process_batch,
 )
+from data._timestamps import timestamp_filename
+from forecasting.dataset import AIAGOESDataset
 
 
 def test_combiner_preserves_processed_values_and_dtypes(tmp_path):
@@ -57,10 +59,31 @@ def test_binary_alignment_preserves_halfway_rounding_and_prefers_parquet(tmp_pat
     successful, failed = process_batch(lookup, output)
 
     expected = np.array([np.mean(np.array([first, second], dtype=np.float64))], dtype=np.float32)
-    saved = np.load(output / "2018-01-01T00:00:00.npy")
+    saved = np.load(output / timestamp_filename("2018-01-01T00:00:00", ".npy"))
     assert (successful, failed) == (1, 0)
     assert saved.dtype == np.float32
     assert saved.tobytes() == expected.tobytes()
+
+
+def test_alignment_preserves_aia_filenames_for_dataset_pairs(tmp_path):
+    goes, aia, sxr, missing = (tmp_path / name for name in ('goes', 'aia', 'sxr', 'missing'))
+    goes.mkdir()
+    aia.mkdir()
+    filenames = ('2018-01-01T00_00_00.npy', '2018-01-01T000100.npy')
+    image = np.ones((7, 2, 2), dtype=np.float32)
+    for filename in (*filenames, '2018-01-01T000200.npy'):
+        np.save(aia / filename, image)
+    pd.DataFrame({
+        'time': ['2018-01-01 00:00:00', '2018-01-01 00:01:00'],
+        'xrsb_flux': [1e-6, 2e-6], 'xrsb_flag': [0, 0],
+    }).to_csv(goes / 'combined_g16_avg1m_20180101_20180101.csv', index=False)
+
+    align_aia_sxr(goes, aia, sxr, missing, max_processes=1)
+
+    assert {path.name for path in sxr.iterdir()} == set(filenames)
+    assert (missing / '2018-01-01T000200.npy').is_file()
+    dataset = AIAGOESDataset(aia, sxr, target_size=(2, 2))
+    assert [dataset[index][1].item() for index in range(len(dataset))] == pytest.approx([1e-6, 2e-6])
 
 
 def test_historical_csv_only_directory_remains_readable(tmp_path):

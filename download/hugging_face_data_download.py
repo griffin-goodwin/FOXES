@@ -31,6 +31,7 @@ from huggingface_hub import login
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forecasting.config import load_config
+from data._timestamps import timestamp_filename
 
 
 # HuggingFace uses "validation"; local pipeline directories use "val"
@@ -56,6 +57,8 @@ def _restore_aia_shape(array: np.ndarray) -> np.ndarray:
 def _write_arrays(filename: str, aia_arr: np.ndarray, sxr_arr: np.ndarray,
                   aia_split_dir: str, sxr_split_dir: str) -> bool:
     """Save pre-materialized arrays to disk. Returns True if written, False if already exists."""
+    stem, suffix = os.path.splitext(filename)
+    filename = timestamp_filename(stem, suffix)
     aia_path = os.path.join(aia_split_dir, filename)
     sxr_path = os.path.join(sxr_split_dir, filename)
 
