@@ -1,0 +1,88 @@
+name: Package compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    name: Python ${{ matrix.python }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            python: '3.11'
+            arch: x64
+          - runner: ubuntu-24.04
+            python: '3.14'
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            python: '3.14'
+            arch: arm64
+          - runner: macos-15-intel
+            python: '3.12'
+            arch: x64
+          - runner: macos-15
+            python: '3.13'
+            arch: arm64
+          - runner: macos-15
+            python: '3.14'
+            arch: arm64
+          - runner: windows-2025
+            python: '3.14'
+            arch: x64
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install CPU PyTorch on Linux
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install --only-binary=:all: torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install the wheel in a clean environment
+        shell: bash
+        run: |
+          wheels=(dist/*-py3-none-any.whl)
+          python -m pip install --only-binary=:all: "${wheels[0]}" pytest
+          python -m pip check
+          python -c "import platform, sys; print(sys.executable, platform.machine()); assert platform.machine().lower() in {'x64': {'amd64', 'x86_64'}, 'arm64': {'arm64', 'aarch64'}}['${{ matrix.arch }}']"
+      - name: Run installed API tests outside the checkout
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m pytest -q --import-mode=importlib \
+            "$GITHUB_WORKSPACE/tests/test_public_api.py::test_predict_matches_model_outputs" \
+            "$GITHUB_WORKSPACE/tests/test_aia_calibration.py" \
+            "$GITHUB_WORKSPACE/tests/test_harp_uncertainty.py" \
+            "$GITHUB_WORKSPACE/tests/test_sxr_api.py" \
+            "$GITHUB_WORKSPACE/tests/test_observation_persistence.py"
+      - name: Install workflow extras
+        shell: bash
+        run: |
+          wheels=(dist/*-py3-none-any.whl)
+          python -m pip install --only-binary=:all: "${wheels[0]}[data,dev,evaluation,training]"
+          python -m pip check
+      - name: Run installed workflow tests outside the checkout
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m pytest -q --import-mode=importlib \
+            "$GITHUB_WORKSPACE/tests/test_hf_download.py" \
+            "$GITHUB_WORKSPACE/tests/test_sxr_combiner.py" \
+            "$GITHUB_WORKSPACE/tests/test_evaluation_patch_maps.py" \
+            "$GITHUB_WORKSPACE/tests/test_coupled_checkpoint_compatibility.py::CheckpointCompatibilityTest::test_checkpoint_architecture"

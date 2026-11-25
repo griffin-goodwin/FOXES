@@ -34,10 +34,37 @@ FOXESModel().predict(observation)  ◄─────────┘
 
 ## Install
 
-FOXES needs Python 3.10 or newer.
+Use standard (GIL-enabled) CPython in a fresh virtual environment. Python 3.14
+is a supported choice on Apple Silicon, Linux, and Windows x86-64.
+
+| Platform | Python | Wheel availability |
+| --- | --- | --- |
+| Apple Silicon macOS 14+ | 3.11–3.14 | Use an `arm64` Python interpreter. |
+| Intel macOS | 3.11–3.12 | PyPI's Intel PyTorch wheels end at 2.2.2 and require NumPy 1.x. FOXES selects the compatible NumPy series. |
+| glibc-based Linux x86-64 or ARM64 | 3.11–3.14 | Use `x86_64` or `aarch64` Python to match the host. Current PyTorch Linux wheels require glibc 2.28 or newer. |
+| Windows x86-64 | 3.11–3.14 | Use an `AMD64` Python interpreter. |
+
+Python 3.15 is pending wheel availability for the dependency stack. Native
+Windows ARM64 also has upstream wheel gaps, including PyERFA.
+
+On Apple Silicon, `platform.machine()` below should return `arm64`. If it
+returns `x86_64`, switch to a native ARM interpreter in a terminal running
+without Rosetta and create a new environment. Pip selects wheels for the
+running interpreter. In a notebook, run the same diagnostic in the kernel
+with `import platform, sys; print(sys.executable, platform.machine())`.
 
 ```bash
+python -c "import platform, sys; print(sys.executable, platform.machine())"
+python -m venv .venv
+```
+
+Activate it with `source .venv/bin/activate` on macOS or Linux, or
+`.\.venv\Scripts\Activate.ps1` in Windows PowerShell. Then install FOXES.
+
+```bash
+python -m pip install --upgrade pip
 python -m pip install helio-foxes
+python -m pip check
 ```
 
 The model weights aren't bundled with the package. `FOXESModel()` downloads

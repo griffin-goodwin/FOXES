@@ -25,8 +25,9 @@ def prepare_sxr_frame(dataset, columns_to_interp=("xrsb_flux", "xrsa_flux")):
     if 'quad_diode' in df.columns:
         df = df[df['quad_diode'] == 0]
     df = df[df['xrsb_flag'] == 0]
-    df['time'] = pd.to_datetime(df['time'])
-    df.set_index('time', inplace=True)
+    # Keep the exported index in nanoseconds across pandas versions.
+    df['time'] = pd.to_datetime(df['time']).dt.as_unit('ns')
+    df = df.set_index('time')
     columns = list(columns_to_interp)
     df_log = np.log10(df[columns].replace(0, np.nan))
     df[columns] = 10 ** df_log.interpolate(method="time", limit_direction="both")

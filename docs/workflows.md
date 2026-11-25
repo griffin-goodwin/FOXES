@@ -13,14 +13,17 @@ git clone https://github.com/griffin-goodwin/FOXES.git
 cd FOXES
 conda create -n helio-foxes-dev python=3.12 pip -y
 conda activate helio-foxes-dev
-python -m pip install -e ".[dev,evaluation,training]"
+python -m pip install -e ".[data,dev,evaluation,training]"
 git lfs pull
 ```
 
-If you plan to process raw data, install `requirements.txt` as well. When
-working in a notebook, pick this environment's kernel, and restart the kernel
-after editing any source it imports. Run `python -m pytest -q` to check your
-changes.
+Each extra enables a checkout workflow. `data` supplies the raw dataset builder
+and Hugging Face downloader, `evaluation` supplies metrics, and `training`
+supplies Weights & Biases logging. `dev` adds pytest and a notebook kernel.
+`python -m pip install -r requirements.txt` installs the non-editable checkout
+with all three workflow extras. Pick the environment's kernel when working in
+a notebook and restart it after editing imported code. Run
+`python -m pytest -q` to check your changes.
 
 Paths in a YAML config are resolved relative to the config file itself, not
 to wherever your terminal or notebook happens to be. The bundled configs set

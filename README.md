@@ -41,6 +41,11 @@ for getting started, checkpoint downloads, examples, results, and the API refere
 
 ## Install
 
+Use a native CPython 3.11–3.14 interpreter in a fresh environment. For Intel
+Macs, use Python 3.11 or 3.12. See the
+[platform and architecture notes](https://griffin-goodwin.github.io/FOXES/python_api.html#install)
+for platform-specific wheel availability.
+
 ```bash
 python -m pip install helio-foxes
 ```

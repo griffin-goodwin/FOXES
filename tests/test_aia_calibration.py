@@ -1,16 +1,20 @@
 """Exercise the packaged calibration through ITI with no network or home cache."""
 
 import hashlib
+from datetime import datetime
 from importlib.resources import files
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.io import fits
 
 from data import aia_calibration
 from data.convert_aia import AIAStackDataset
+from download.download_sdo import SDODownloader
 from itipy.data import editor as iti_editor
 
 
@@ -35,6 +39,24 @@ def test_bundled_snapshot_integrity(offline_home):
     assert table.DATE.min() == pd.Timestamp("2010-05-15 00:01:06.184")
     assert table.DATE.max() == pd.Timestamp("2020-07-08 00:01:09.184")
     assert not (offline_home / ".iti").exists()
+
+
+def test_download_preserves_tile_compressed_fits_pixels(tmp_path, monkeypatch):
+    image = np.linspace(0.5, 12.5, 256, dtype=np.float32).reshape(16, 16)
+    source = BytesIO()
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(image, tile_shape=(8, 8))]).writeto(source)
+    payload = source.getvalue()
+    with fits.open(BytesIO(payload)) as compressed:
+        expected = compressed[1].data.copy()
+
+    monkeypatch.setattr("download.download_sdo.request.urlopen", lambda *args, **kwargs: BytesIO(payload))
+    downloader = SDODownloader(tmp_path, wavelengths=[94])
+    header = {"WAVELNTH": 94, "DATE__OBS": "2023-08-01T00:00:00", "QUALITY": 0}
+    output = downloader.download((header, "/offline.fits", datetime(2023, 8, 1)))
+
+    with fits.open(output) as restored:
+        np.testing.assert_array_equal(restored[1].data, expected)
+        assert restored[1].header["WAVELNTH"] == 94
 
 
 def test_existing_cache_is_preferred_and_left_untouched(offline_home):

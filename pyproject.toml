@@ -1,30 +1,41 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "helio-foxes"
-version = "2.0.4"
+version = "2.0.5"
 description = "FOXES: Framework for Operational X-ray Emission Synthesis"
 readme = "README.md"
-requires-python = ">=3.10"
-license = {file = "LICENSE"}
+requires-python = ">=3.11,<3.15"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
-  "numpy",
-  "torch",
-  "pytorch-lightning",
-  "pandas",
+  # The last PyPI PyTorch wheels for Intel macOS use the NumPy 1.x ABI.
+  "numpy>=1.26,<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "numpy>=1.26; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "torch>=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "torch>=2.4.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "pytorch-lightning>=2.6",  # FOXES passes weights_only to load_from_checkpoint.
+  "pandas>=2.2.2",
   "python-dateutil",
   "tqdm",
-  "PyYAML",
-  "matplotlib",
+  "PyYAML>=6",
+  # Matplotlib 3.11's text metrics can overlap crowded HARP labels.
+  "matplotlib>=3.10,<3.11",
   "drms",
+  # Preserve the Astropy series used to validate compressed AIA FITS handling.
   "astropy>=7.2,<8",
-  "sunpy[map,net,timeseries]>=6",
-  "h5netcdf",
-  "h5py",
-  "itipy",
-  "aiapy>=0.6.4,<0.11",
+  "sunpy[map,net,timeseries]>=6",  # The timeseries extra supplies h5netcdf and h5py.
+  "itipy==0.1.1",
+  # ITI imports aiapy.calibrate.util, which moved in aiapy 0.11.
+  "aiapy>=0.10.2,<0.11",
 ]
 
 [project.urls]
@@ -36,13 +47,20 @@ Demo = "https://huggingface.co/spaces/griffingoodwin04/FOXES-model"
 Dataset = "https://huggingface.co/datasets/griffingoodwin04/FOXES-Data"
 
 [project.optional-dependencies]
-evaluation = ["scikit-learn", "seaborn", "plotly"]
-training = ["wandb", "torchvision"]
+data = [
+  "datasets",
+  "huggingface-hub",
+  "xarray",
+  # PyArrow 26 needs NumPy 2 when it is installed, but does not declare it.
+  "pyarrow<26; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+  "pyarrow; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "numpy>=2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
+evaluation = ["scikit-learn"]
+training = ["wandb"]
 dev = [
   "pytest",
   "ipykernel",
-  "nbformat",
-  "matplotlib==3.10.7",  # Reference renderer for the HARP label-placement tests.
 ]
 
 [tool.setuptools]

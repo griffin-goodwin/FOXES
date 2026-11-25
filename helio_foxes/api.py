@@ -1405,7 +1405,7 @@ class PredictionTimeSeries:
         snapshot = self.snapshot if show_snapshot else None
         if show_snapshot and snapshot is None:
             raise ValueError("No AIA snapshot retained; use predict_time_series(..., snapshot_time=...)")
-        #Creates subplots for the curves, flux map, and AIA image if show_snapshot is True. If ax is supplied, snapshot_ax and aia_ax must also be supplied and distinct. 
+        #Creates subplots for the curves, flux map, and AIA image if show_snapshot is True. If ax is supplied, snapshot_ax and aia_ax must also be supplied and distinct.
         ax, snapshot_ax, aia_ax = self._plot_axes(ax, snapshot_ax, aia_ax, show_snapshot)
 
         # Assign colors before filtering so each HARP keeps its identity.
@@ -1947,6 +1947,7 @@ class SXRProcessor:
         try:
             from sunpy.net import Fido
             from sunpy.timeseries import TimeSeries
+            from ._download import ManagedDownloader
 
             window = timedelta(seconds=self.tolerance)
             query = [
@@ -1960,7 +1961,10 @@ class SXRProcessor:
                 return None
             candidates = []
             with TemporaryDirectory(prefix="foxes-sxr-") as directory:
-                paths = Fido.fetch(response, path=str(Path(directory) / "{file}"), progress=False)
+                paths = Fido.fetch(
+                    response, path=str(Path(directory) / "{file}"), progress=False,
+                    downloader=ManagedDownloader(progress=False),
+                )
                 if paths.errors:
                     logger.warning("Some GOES XRS downloads failed: %s", paths.errors)
                 for path in paths:

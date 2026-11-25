@@ -17,7 +17,7 @@ def test_combiner_preserves_processed_values_and_dtypes(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
     output = tmp_path / "combined"
-    times = pd.date_range("2018-01-01", periods=4, freq="min")
+    times = pd.date_range("2018-01-01", periods=4, freq="min", unit="us")
     dataset = xr.Dataset({
         "xrsb_flux": ("time", np.array([7e-6, 0, 1.4e-5, 2.1e-5], dtype=np.float32)),
         "xrsa_flux": ("time", np.array([1e-8, 0, 2e-8, 3e-8], dtype=np.float32)),
@@ -25,6 +25,7 @@ def test_combiner_preserves_processed_values_and_dtypes(tmp_path):
     }, coords={"time": times})
     dataset.to_netcdf(raw / "sci_xrsf_g15_20180101.nc")
     expected = prepare_sxr_frame(dataset)
+    assert expected.index.unit == "ns"
 
     SXRDataProcessor(raw, output).combine_goes_data()
 

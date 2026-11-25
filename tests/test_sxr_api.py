@@ -47,7 +47,7 @@ def mock_download(monkeypatch, records, *, errors=(), fail_fetch=False):
         searches.append(query)
         return response
 
-    def fetch(found, *, path, progress):
+    def fetch(found, *, path, progress, downloader=None):
         assert found is response
         assert progress is False
         directory = Path(path).parent
